@@ -37,7 +37,8 @@ public:
     JIT_NO_REGISTER_CACHE = 0x04, // keep all local variables in memory
     JIT_SYNC_EVERY_INSTR  = 0x08, // update the VM registers after every instruction (debugging aid)
     JIT_LOG               = 0x10, // log the bytecode and generated code to the log file
-    JIT_DIRECT_SYSTEM_CALLS = 0x20 // call registered functions directly (see below)
+    JIT_DIRECT_SYSTEM_CALLS    = 0x20, // call registered functions directly on all platforms (see below)
+    JIT_NO_DIRECT_SYSTEM_CALLS = 0x40  // never call registered functions directly
   };
 
   CJITCompiler(asDWORD flags = 0);
@@ -88,16 +89,20 @@ only observable difference is that the bytecode contains the JIT instructions, s
 for example the positions reported by \ref asIScriptFunction::GetLineEntry
 "GetLineEntry" are not the same as without them.
 
-Calls to registered functions normally go through the same code as the VM uses,
-which marshals the arguments for the calling convention at runtime. With
-\ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS the generated code instead calls the
-registered functions directly with their native calling convention whenever the
-signature allows it (primitives, references, and handles as arguments; primitives,
-references, or handles as return value). This is a lot faster for scripts that
-call registered functions a lot, but a C++ exception thrown by a registered
-function can then no longer be caught and turned into a script exception, so
-the option is only enabled by default when the library is compiled with
-AS_NO_EXCEPTIONS.
+The generated code calls registered functions directly with their native calling
+convention whenever the signature allows it (primitives, references, and handles
+as arguments; primitives, references, handles, or value types as return value),
+instead of going through the code the VM uses, which marshals the arguments for
+the calling convention at runtime. A C++ exception thrown by a function called
+this way is still caught and turned into a script exception like with the VM. For
+that the exception must be able to pass through the generated code, which needs
+unwind information for it. The add-on registers the unwind information on 64bit
+Windows and 64bit Linux, and 32bit Windows with MSVC doesn't need any. On other
+platforms the direct calls are only made when the library is compiled with
+AS_NO_EXCEPTIONS, or when the \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is
+set, in which case a C++ exception thrown by a registered function that was
+called directly terminates the application.
+\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off.
 
 Note that the JIT functions are compiled when the module is built, so the build
 takes a little longer. For scripts that are compiled often but run rarely a
@@ -107,61 +112,61 @@ the functions that matter.
 \section doc_addon_jit_perf Performance
 
 The table shows the time in seconds for the tests in the test_performance project
-when run with the interpreter, with the JIT compiler, and with the JIT compiler
-and direct system calls. Measured on an Intel Core i9-14900K with the 64bit release
+when run with the interpreter, with the JIT compiler without direct system calls
+(\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS), and with the JIT compiler with
+the default settings. Measured on an Intel Core i9-14900K with the 64bit release
 build from Visual Studio 2022. The tests Call and Call2 measure calls from the
-application into the script engine, which the JIT compiler can't do anything about.
-The tests Fib, Intf, Mthd, and RetObj are dominated by the cost of calling script
-functions, which is the same in both cases since the JIT compiled code uses the
-call stack of the VM to keep exceptions and debugging working.
+application into the script engine, where the JIT compiler only adds the cost of
+entering the native code. Calls between script functions, including virtual and
+interface methods, are made natively, which is what speeds up Fib, Intf, and Mthd.
 
 <pre>
-Test           VM       JIT      JIT direct
-Basic          0.245    0.179    0.127
-Basic2         0.092    0.009    0.009
-Call           0.278    0.292    0.296
-Call2          0.362    0.383    0.380
-Fib            0.352    0.322    0.325
-Int            0.051    0.042    0.029
-Intf           0.121    0.124    0.129
-Mthd           0.119    0.123    0.126
-String         0.231    0.228    0.155
-String2        0.153    0.132    0.089
-StringPooled   0.154    0.145    0.071
-ThisProp       0.221    0.029    0.028
-Vector3        0.090    0.077    0.041
-Assign.1       0.115    0.012    0.012
-Assign.2       0.248    0.021    0.021
-Assign.3       0.170    0.018    0.017
-Assign.4       0.207    0.023    0.023
-Assign.5       0.208    0.023    0.023
-Array.1        0.310    0.207    0.191
-Array.2        0.148    0.093    0.095
-GlobalVar      0.090    0.043    0.044
-ClassProp      0.139    0.056    0.056
-RetObj.1       0.324    0.329    0.335
-RetObj.2       0.202    0.202    0.202
-RetObj.3       0.076    0.051    0.052
+Test           VM       No direct  JIT
+Basic          0.240    0.106      0.047
+Basic2         0.092    0.005      0.005
+Call           0.275    0.297      0.298
+Call2          0.352    0.385      0.380
+Fib            0.349    0.127      0.121
+Int            0.050    0.023      0.010
+Intf           0.122    0.042      0.041
+Mthd           0.118    0.037      0.037
+String         0.232    0.215      0.140
+String2        0.154    0.123      0.079
+StringPooled   0.158    0.133      0.061
+ThisProp       0.220    0.024      0.024
+Vector3        0.089    0.075      0.015
+Assign.1       0.113    0.008      0.008
+Assign.2       0.245    0.017      0.017
+Assign.3       0.165    0.014      0.013
+Assign.4       0.203    0.018      0.018
+Assign.5       0.204    0.018      0.018
+Array.1        0.305    0.199      0.155
+Array.2        0.145    0.095      0.047
+GlobalVar      0.087    0.045      0.025
+ClassProp      0.139    0.054      0.033
+RetObj.1       0.315    0.253      0.251
+RetObj.2       0.194    0.158      0.158
+RetObj.3       0.075    0.036      0.036
 </pre>
 
-On 32bit x86 the gains for computational code are the same, but scripts dominated by
-calls to script functions run 5 to 20% slower than with the interpreter, e.g. Fib,
-Intf, Mthd, and RetObj. With only seven general purpose registers and all arguments
-passed on the stack, the round trip through the native code costs more than the
-few instructions it saves per call. 64bit integer operations are also done by helper
+The 32bit x86 build gains about as much, except that Call and Call2 are 11 to 14%
+slower than with the interpreter. 64bit integer operations are done by helper
 functions on 32bit hosts.
 
 \section doc_addon_jit_limits Known limitations
 
- - Calls between script functions use the call stack of the VM, so they are not
-   faster than with the interpreter. This is the main remaining opportunity for
-   improvement and is described in the comments in jit_runtime.cpp.
- - The generated code has no unwind information. A C++ exception that passes
-   through it will terminate the application, which is why direct system calls
-   are opt-in unless the library is built with AS_NO_EXCEPTIONS.
+ - Script constructors, imported functions, and delegates are called through a
+   helper function that uses the call stack of the VM, so these calls are not
+   faster than with the interpreter.
+ - Unwind information for the generated code is only registered on 64bit Windows
+   and 64bit Linux. On the other platforms besides 32bit Windows with MSVC, a C++
+   exception that passes through the generated code terminates the application,
+   which is why direct system calls are opt-in there unless the library is built
+   with AS_NO_EXCEPTIONS.
  - Direct system calls are only made for functions with primitive, reference,
-   and handle parameters and return values. Everything else, including
-   asCALL_GENERIC, goes through the same code as the VM.
+   and handle parameters, and primitive, reference, handle, and value type return
+   values. Everything else, including asCALL_GENERIC, goes through the same code
+   as the VM.
  - All functions are compiled when the module is built. Lazy compilation would
    require the asIJITCompilerV2 interface, which the add-on doesn't implement.
  - Only x86-64, AArch64, and 32bit x86 are supported, as those are the
@@ -193,15 +198,24 @@ before a registered function or another script function is called, before the
 line callback is invoked, and before returning to the VM.
 
 Compare instructions are fused with the following conditional jump or test, so a
-condition in the script becomes a single compare-and-branch. Calls to registered
-functions go through the same code as the VM uses, and calls to other script
-functions are made natively by calling the native code of the callee directly,
-falling back to the VM when the callee isn't compiled or when the depth of nested
-native calls exceeds the limit set with \ref CJITCompiler::SetNativeCallDepth.
+condition in the script becomes a single compare-and-branch. Registered functions
+are called directly where possible, and otherwise through the same code as the VM
+uses. Calls to other script functions are made natively by calling the native
+code of the callee directly, falling back to the VM when the callee isn't compiled
+or when the depth of nested native calls exceeds the limit set with
+\ref CJITCompiler::SetNativeCallDepth.
 
 Exceptions are never raised from the native code. When a division by zero, a null
 pointer access, or similar is detected, the native code returns to the VM at the
 faulting instruction and the VM raises the exception with the usual message and
 line number.
+
+The native functions that can let a C++ exception through, i.e. those that call
+registered functions directly or other script functions natively, are entered from
+the VM through a helper function with a try/catch block. When it catches an
+exception it does what the VM does for an exception thrown by a registered
+function: the translate callback set with
+\ref asIScriptEngine::SetTranslateAppExceptionCallback "SetTranslateAppExceptionCallback"
+is invoked, and a script exception is raised at the call.
 
 */
