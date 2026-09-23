@@ -71,6 +71,15 @@ protected:
 		Vec  vec;
 	};
 
+	// A registered behaviour that takes nothing but the object, e.g. AddRef or
+	// Release, called directly with its native calling convention
+	struct SDirectBehaviour
+	{
+		const void         *func;      // for virtual methods the offset in the virtual function table plus 1
+		bool                isVirtual;
+		asmjit::CallConvId  conv;
+	};
+
 	// Prologue, entry dispatch, and epilogue
 	void EmitPrologue();
 	void EmitEntryDispatch(asUINT lo, asUINT hi);
@@ -102,6 +111,9 @@ protected:
 	bool EmitCall(asUINT idx);
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	bool EmitObjectOp(asUINT idx);
+	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
+	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
+	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
 	void EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow);

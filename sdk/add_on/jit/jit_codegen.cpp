@@ -409,10 +409,11 @@ void CJITCodeGen::EmitPrologue()
 	}
 
 	// A C++ exception can only leave the functions that call registered functions
-	// directly, or script functions natively
+	// or behaviours directly, or script functions natively
 	m_guarded = false;
 	for( asUINT n = 0; n < instrs.size() && m_options.guardedEntry && !m_guarded; n++ )
-		m_guarded = m_depth.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1;
+		m_guarded = m_depth.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1 ||
+		            CallsBehaviourDirectly(instrs[n]);
 
 	// The frame pointer is set up by the entry paths
 	m_fp = m_uc.new_gp_ptr("fp");

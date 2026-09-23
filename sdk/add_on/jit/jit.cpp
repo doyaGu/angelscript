@@ -24,7 +24,8 @@
 //    implement both interface versions, so this would be a second compiler class.
 //  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall), and
 //    unwind information on the platforms besides 64bit Windows and Linux (jit_unwind.h).
-//  - Inline reference counting for script objects in REFCPY/FREE (jit_codegen_call.cpp, EmitObjectOp).
+//  - Inline reference counting for script objects in REFCPY/FREE, instead of calling their
+//    AddRef and Release behaviours (jit_codegen_call.cpp, EmitObjectOp).
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots).
 //  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer

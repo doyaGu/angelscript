@@ -785,6 +785,83 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	return true;
 }
 
+// Resolves a behaviour that takes nothing but the object, like AddRef and Release,
+// to a function that the generated code can call instead of going through
+// CallObjectMethod of the engine. The same restrictions as for EmitDirectSystemCall
+// apply, and any return value is ignored. Returns false if the engine must call it
+bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
+{
+	asCScriptEngine *engine = m_code.GetFunction()->engine;
+	if( !m_options.directSystemCalls || funcId <= 0 || asUINT(funcId) >= engine->scriptFunctions.GetLength() )
+		return false;
+
+	asCScriptFunction *descr = engine->scriptFunctions[funcId];
+	if( descr == 0 || descr->funcType != asFUNC_SYSTEM || descr->sysFuncIntf == 0 )
+		return false;
+	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+
+	// A floating point value returned on the x87 stack would have to be popped
+	if( descr->parameterTypes.GetLength() || sysFunc->paramSize || descr->DoesReturnOnStack() ||
+		sysFunc->hostReturnInMemory || sysFunc->hostReturnFloat || sysFunc->auxiliary ||
+		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+		return false;
+
+	beh.func = (const void*)FuncPtrToUInt(sysFunc->func);
+	beh.isVirtual = false;
+	beh.conv = CallConvId::kCDecl;
+	switch( sysFunc->callConv )
+	{
+	case ICC_THISCALL:
+#if defined(_MSC_VER)
+		if( !Is64Bit() ) beh.conv = CallConvId::kThisCall;
+#endif
+		break;
+#if defined(GNU_STYLE_VIRTUAL_METHOD) && (defined(AS_X86) || defined(AS_X64_GCC) || defined(AS_X64_MINGW))
+	case ICC_VIRTUAL_THISCALL:
+		// With the Itanium C++ ABI the method pointer of a virtual method holds its
+		// offset in the virtual function table plus 1
+		beh.isVirtual = true;
+		break;
+#endif
+	case ICC_CDECL_OBJFIRST:
+	case ICC_CDECL_OBJLAST:
+		break;
+	default:
+		return false;
+	}
+	return true;
+}
+
+// True if the instruction may call AddRef or Release directly, see EmitObjectOp
+bool CJITCodeGen::CallsBehaviourDirectly(const SJITInstr &instr) const
+{
+	if( instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV )
+		return false;
+	asCObjectType *objType = (asCObjectType*)asBC_PTRARG(instr.bc);
+	SDirectBehaviour beh;
+	return GetDirectBehaviour(objType->beh.release, beh) || GetDirectBehaviour(objType->beh.addref, beh);
+}
+
+// The object pointer must not be null
+void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
+{
+	FuncSignature sig(beh.conv);
+	sig.set_ret(TypeId::kVoid);
+	sig.add_arg(TypeId::kUIntPtr);
+
+	InvokeNode *call = 0;
+	if( beh.isVirtual )
+	{
+		Gp target = m_uc.new_gp_ptr();
+		m_uc.load(target, mem_ptr(obj));
+		m_uc.load(target, mem_ptr(target, int32_t(asPWORD(beh.func) - 1)));
+		m_uc.cc->invoke(Out(call), target, sig);
+	}
+	else
+		call = Invoke(beh.func, sig);
+	call->set_arg(0, obj);
+}
+
 bool CJITCodeGen::EmitObjectOp(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -820,18 +897,31 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_FREE:
 		{
+			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(bc);
+			SDirectBehaviour release;
+			bool direct = (objType->flags & asOBJ_REF) && GetDirectBehaviour(objType->beh.release, release);
+
 			Gp obj = LoadPtr(a0);
 			Label skip = m_uc.new_label();
 			m_uc.j(skip, test_z(obj));
 			// The release may execute a script destructor on the same context,
 			// which starts its frame at the stack pointer of the registers
 			SyncForCall(idx);
-			Gp var = m_uc.new_gp_ptr();
-			m_uc.lea(var, Var(a0));
-			InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
-			call->set_arg(0, m_regs);
-			call->set_arg(1, Imm(int64_t(asBC_PTRARG(bc))));
-			call->set_arg(2, var);
+			if( direct )
+			{
+				// Like the VM the variable is cleared after the release
+				EmitBehaviourCall(release, obj);
+				m_uc.store_zero_reg(Var(a0));
+			}
+			else
+			{
+				Gp var = m_uc.new_gp_ptr();
+				m_uc.lea(var, Var(a0));
+				InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
+				call->set_arg(0, m_regs);
+				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
+				call->set_arg(2, var);
+			}
 			m_uc.bind(skip);
 		}
 		break;
@@ -855,42 +945,58 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_REFCPY:
+	case asBC_RefCpyV:
 		// TODO: runtime optimize: For script objects the reference counting could be done
 		//                         inline: clear gcFlag and increment or decrement refCount
 		//                         (with the atomic operations of the engine when built with
-		//                         threads), and only call the helper when the release may
-		//                         destroy the object, i.e. when refCount is 1. Application
-		//                         types could have their AddRef/Release behaviours called
-		//                         directly instead of through CallObjectMethod. The same
-		//                         applies to FREE above.
+		//                         threads), and only call Release when it may destroy the
+		//                         object, i.e. when refCount is 1. The same applies to FREE above.
 		{
+			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(bc);
+			SDirectBehaviour addref, release;
+			bool counted = !(objType->flags & (asOBJ_NOCOUNT | asOBJ_VALUE));
+			bool direct = counted && GetDirectBehaviour(objType->beh.release, release) && GetDirectBehaviour(objType->beh.addref, addref);
+
+			// REFCPY pops the address of the destination, RefCpyV takes a variable
 			Gp d = m_uc.new_gp_ptr();
 			Gp s = m_uc.new_gp_ptr();
-			m_uc.load(d, Stack(0));
-			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			if( instr.op == asBC_REFCPY )
+			{
+				m_uc.load(d, Stack(0));
+				m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			}
+			else
+				m_uc.lea(d, Var(a0));
 			m_uc.load(s, Stack(0));
 			// The release of the old object may execute a script destructor, see FREE
 			SyncForCall(idx);
-			InvokeNode *call = Invoke((const void*)JIT_RefCpy, FuncSignature::build<void, asSVMRegisters*, void*, void*, void*>());
-			call->set_arg(0, m_regs);
-			call->set_arg(1, Imm(int64_t(asBC_PTRARG(bc))));
-			call->set_arg(2, d);
-			call->set_arg(3, s);
-		}
-		break;
-
-	case asBC_RefCpyV:
-		{
-			Gp d = m_uc.new_gp_ptr();
-			Gp s = m_uc.new_gp_ptr();
-			m_uc.lea(d, Var(a0));
-			m_uc.load(s, Stack(0));
-			SyncForCall(idx);
-			InvokeNode *call = Invoke((const void*)JIT_RefCpy, FuncSignature::build<void, asSVMRegisters*, void*, void*, void*>());
-			call->set_arg(0, m_regs);
-			call->set_arg(1, Imm(int64_t(asBC_PTRARG(bc))));
-			call->set_arg(2, d);
-			call->set_arg(3, s);
+			if( !counted || direct )
+			{
+				// Like the VM the old object is released before the new one gets its
+				// reference, and the destination is set last
+				if( direct )
+				{
+					Gp old = m_uc.new_gp_ptr();
+					m_uc.load(old, mem_ptr(d));
+					Label noOld = m_uc.new_label();
+					m_uc.j(noOld, test_z(old));
+					EmitBehaviourCall(release, old);
+					m_uc.bind(noOld);
+					Label noNew = m_uc.new_label();
+					m_uc.j(noNew, test_z(s));
+					EmitBehaviourCall(addref, s);
+					m_uc.bind(noNew);
+				}
+				m_uc.store(mem_ptr(d), s);
+			}
+			else
+			{
+				InvokeNode *call = Invoke((const void*)JIT_RefCpy, FuncSignature::build<void, asSVMRegisters*, void*, void*, void*>());
+				call->set_arg(0, m_regs);
+				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
+				call->set_arg(2, d);
+				call->set_arg(3, s);
+			}
 		}
 		break;
 
