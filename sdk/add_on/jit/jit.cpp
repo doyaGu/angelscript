@@ -15,9 +15,8 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Native call frames for script-to-script calls (jit_runtime.cpp, RunCalledFunction).
-//    Calls currently go through the call stack of the VM, so call heavy scripts run at
-//    the speed of the interpreter, and slightly slower on 32bit x86.
+//  - Inline script-to-script calls. The calls are made natively, but still through
+//    JIT_CallScript (jit_codegen_call.cpp, EmitScriptCall).
 //  - Lazy or tiered compilation through asIJITCompilerV2 (CompileFunction below). The
 //    engine currently compiles every function when the module is built. A class cannot
 //    implement both interface versions, so this would be a second compiler class.
@@ -60,6 +59,7 @@ struct CJITCompiler::SImpl
 	void                  *filterParam;
 	asUINT                 maxFunctionSize;
 	asUINT                 maxCachedSlots;
+	asUINT                 maxNativeCallDepth;
 	bool                   bailOps[asBC_MAXBYTECODE];
 	SJITStatistics         stats;
 };
@@ -73,6 +73,7 @@ CJITCompiler::CJITCompiler(asDWORD flags)
 	m_impl->filterParam     = 0;
 	m_impl->maxFunctionSize = 100000;
 	m_impl->maxCachedSlots  = 24;
+	m_impl->maxNativeCallDepth = 256;
 	memset(m_impl->bailOps, 0, sizeof(m_impl->bailOps));
 	memset(&m_impl->stats, 0, sizeof(m_impl->stats));
 }
@@ -116,7 +117,7 @@ void CJITCompiler::SetCompileFilter(JITCompileFilterFunc_t filter, void *userPar
 
 void CJITCompiler::SetNativeCallDepth(asUINT depth)
 {
-	JIT_SetMaxNativeCallDepth(depth);
+	m_impl->maxNativeCallDepth = depth;
 }
 
 void CJITCompiler::SetBailInstructions(const asEBCInstr *instructions, asUINT count)
@@ -299,6 +300,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	options.noScriptCalls  = (m_impl->flags & JIT_NO_SCRIPT_CALLS) != 0;
 	options.syncEveryInstr = (m_impl->flags & JIT_SYNC_EVERY_INSTR) != 0;
 	options.directSystemCalls = (m_impl->flags & JIT_DIRECT_SYSTEM_CALLS) != 0;
+	options.maxNativeCallDepth = m_impl->maxNativeCallDepth;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = true;

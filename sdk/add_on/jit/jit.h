@@ -74,8 +74,8 @@ public:
 	// Only compile the functions for which the filter returns true
 	void SetCompileFilter(JITCompileFilterFunc_t filter, void *userParam);
 
-	// Maximum depth of native script-to-script calls before control is
-	// returned to the VM to unwind the machine stack. Default is 256
+	// Maximum depth of nested native script-to-script calls. Deeper calls are
+	// left to the VM, which unwinds the machine stack. Default is 256
 	void SetNativeCallDepth(asUINT depth);
 
 	// Force the listed instructions to always return control to the VM.

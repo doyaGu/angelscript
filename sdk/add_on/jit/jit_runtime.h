@@ -21,6 +21,34 @@ class asCObjectType;
 // pointer and value register in the VM registers, and set the program pointer to
 // the instruction being executed, before calling a helper.
 
+// Signature of the generated functions. The VM calls them as asJITFunction, with
+// the 1-based index of the entry point in jitArg, and ignores the return value.
+// Native callers push the call state of the caller like asCContext::PushCallState
+// and call them with jitArg 0, the arguments on the script stack, and the stack
+// pointer in the VM registers. The function then sets up its frame the way
+// asCContext::PrepareScriptFunction does. depth is the number of further nested
+// native calls allowed. The return value is 0 if the function returned to its
+// caller, and non-zero if the VM must take over, in which case the VM registers
+// describe where to continue.
+typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT depth);
+
+// Layout of the context members that the generated code accesses directly. The
+// offsets are relative to the VM registers, which are embedded in the context
+struct SJITContextLayout
+{
+	int callStackArray;        // asPWORD*, the call stack
+	int callStackLength;       // asUINT, used length of the call stack in words
+	int callStackCapacity;     // asUINT
+	int currentFunction;       // asCScriptFunction*
+	int stackIndex;            // asUINT, index of the current stack block
+	int stackBlocks;           // asDWORD**, the stack blocks
+	int callingSystemFunction; // asCScriptFunction*, the registered function being called
+	int callStackFrameSize;    // words per call state
+	int reserveStack;          // dwords that must remain free on the stack block
+};
+
+const SJITContextLayout &JIT_GetContextLayout() noexcept;
+
 // Kinds of calls handled by JIT_CallScript
 enum EJITCallKind
 {
@@ -39,19 +67,24 @@ int    JIT_Thiscall1(asSVMRegisters *regs, int funcId) noexcept;
 
 // Called after a registered function has been called directly by the generated
 // code when regs->doProcessSuspend is set, i.e. when an exception was raised, a
-// suspension was requested, or a line callback is set
+// suspension was requested, or a line callback is set. The generated code sets
+// callingSystemFunction in the context around the direct calls, so that the
+// function can raise script exceptions
 int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId) noexcept;
 
-// Offset of the member of the context that holds the registered function being
-// called. The generated code sets it around direct calls so that the function can
-// raise script exceptions
-size_t JIT_CallingSystemFunctionOffset() noexcept;
+// Script function calls. Performs the call and, if possible, executes the called
+// function natively before returning. depth is the depth of the calling function,
+// see JITFunction. Returns 0 if the call completed
+int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth) noexcept;
 
-// Script function calls. Performs the call and, if possible, executes the
-// called function natively before returning. Returns 0 if the call completed
-int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) noexcept;
+// Sets up the frame of a function entered natively with jitArg 0, when the stack
+// block is too small or regs->doProcessSuspend is set. The stack pointer in the VM
+// registers must be the one the function was called with, and the program pointer
+// the start of the function
+int    JIT_PrepareFrame(asSVMRegisters *regs) noexcept;
 
-// asBC_RET. The generated code must return to its caller afterwards
+// asBC_RET in a function called by the application or as a nested call. The
+// generated code must return to the VM afterwards
 void   JIT_Return(asSVMRegisters *regs, asUINT popSize) noexcept;
 
 // asBC_SUSPEND, when regs->doProcessSuspend is set
@@ -104,9 +137,6 @@ double  JIT_uTOd(asUINT v) noexcept;
 // passed by address. The op is the bytecode instruction. Returns non-zero when
 // the VM must re-execute the instruction to raise an exception
 int    JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept;
-
-// Depth of native script-to-script calls in the current thread
-void   JIT_SetMaxNativeCallDepth(asUINT depth) noexcept;
 
 END_AS_NAMESPACE
 

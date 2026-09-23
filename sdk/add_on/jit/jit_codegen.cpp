@@ -43,8 +43,15 @@ bool CJITCodeGen::Generate()
 		m_entryLabels[n] = m_uc.new_label();
 
 	m_bailCommon = m_uc.new_label();
+	m_leave = m_uc.new_label();
 
-	// Jump to the requested entry point
+	Label direct = m_uc.new_label();
+	m_uc.j(direct, test_z(m_arg));
+
+	// Entered by the VM, which has set up the frame. Jump to the requested entry point
+	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
+	if( m_depth.is_valid() )
+		m_uc.mov(m_depth, Imm(m_options.maxNativeCallDepth));
 	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
 
 	// The body in bytecode order
@@ -112,10 +119,18 @@ bool CJITCodeGen::Generate()
 		return false;
 
 	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
-	m_uc.ret();
+	Leave();
+
+	m_uc.bind(direct);
+	EmitDirectEntry();
 
 	EmitEntryStubs();
 	EmitBailStubs();
+
+	m_uc.bind(m_leave);
+	Gp one = m_uc.new_gp32();
+	m_uc.mov(one, Imm(1));
+	m_uc.ret(one);
 
 	m_uc.end_func();
 	return true;
@@ -355,16 +370,29 @@ bool CJITCodeGen::EmitInstruction(asUINT idx)
 
 void CJITCodeGen::EmitPrologue()
 {
-	FuncNode *func = m_uc.add_func(FuncSignature::build<void, asSVMRegisters*, asPWORD>());
+	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>());
 
 	m_regs = m_uc.new_gp_ptr("regs");
 	m_arg  = m_uc.new_gp_ptr("jitArg");
 	func->set_arg(0, m_regs);
 	func->set_arg(1, m_arg);
 
+	// The depth is only needed for the calls of script functions
+	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	for( asUINT n = 0; n < instrs.size() && !m_options.noScriptCalls; n++ )
+	{
+		asEBCInstr op = instrs[n].op;
+		if( op == asBC_CALL || op == asBC_CALLINTF || op == asBC_CALLBND || op == asBC_CallPtr || op == asBC_ALLOC )
+		{
+			m_depth = m_uc.new_gp32("depth");
+			func->set_arg(2, m_depth);
+			break;
+		}
+	}
+
+	// The frame pointer is set up by the entry paths
 	m_fp = m_uc.new_gp_ptr("fp");
 	m_sp = m_uc.new_gp_ptr("sp");
-	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
 	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
 
 	if( m_vrInReg )
@@ -454,13 +482,18 @@ void CJITCodeGen::EmitBailStubs()
 	SyncStack();
 	SyncVR();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
-	m_uc.ret();
+	Leave();
 }
 
 //------------------------------------------------------------------------
 // Memory operands
 
 Mem CJITCodeGen::RegsField(size_t offset)
+{
+	return mem_ptr(m_regs, int32_t(offset));
+}
+
+Mem CJITCodeGen::ContextField(int offset)
 {
 	return mem_ptr(m_regs, int32_t(offset));
 }
@@ -916,7 +949,7 @@ Label CJITCodeGen::BailLabel(asUINT idx)
 // Returns to the VM after a helper has updated the VM registers
 void CJITCodeGen::Leave()
 {
-	m_uc.ret();
+	m_uc.j(m_leave);
 }
 
 // Returns to the VM if the helper result is non-zero

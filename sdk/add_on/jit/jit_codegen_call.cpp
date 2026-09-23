@@ -46,7 +46,7 @@ void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
 void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
 {
 	SyncForCall(idx);
-	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD>());
+	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	Gp r = m_uc.new_gp32();
 	call->set_arg(0, m_regs);
 	call->set_arg(1, Imm(kind));
@@ -55,9 +55,71 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		call->set_arg(3, *extra);
 	else
 		call->set_arg(3, Imm(int64_t(extraImm)));
+	call->set_arg(4, m_depth);
 	call->set_ret(0, r);
 
 	EmitAfterHelperCall(r, idx);
+}
+
+// Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
+// up like asCContext::PrepareScriptFunction does when the current stack block has
+// enough space and the VM has nothing to do, otherwise by JIT_PrepareFrame
+void CJITCodeGen::EmitDirectEntry()
+{
+	asCScriptFunction *func = m_code.GetFunction();
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+
+	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(func)));
+
+	Label slow  = m_uc.new_label();
+	Label ready = m_uc.new_label();
+	Gp block = m_uc.new_gp_ptr();
+	Gp index = m_uc.new_gp_ptr();
+	Gp limit = m_uc.new_gp_ptr();
+	m_uc.load(block, ContextField(layout.stackBlocks));
+	m_uc.load_u32(index, ContextField(layout.stackIndex));
+	m_uc.add_ext(block, block, index, PTR_BYTES);
+	m_uc.load(block, mem_ptr(block));
+	m_uc.sub(limit, m_sp, Imm(int(func->scriptData->stackNeeded + layout.reserveStack) * 4));
+	m_uc.j(slow, ucmp_lt(limit, block));
+	Gp flag = m_uc.new_gp32();
+	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+	m_uc.j(slow, test_nz(flag));
+
+	// Only the object variables on the heap are cleared, the others are initialized by their constructors
+	m_uc.mov(m_fp, m_sp);
+	const asCArray<asSScriptVariable*> &vars = func->scriptData->variables;
+	for( asUINT n = 0; n < vars.GetLength(); n++ )
+		if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
+			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
+	m_uc.sub(m_sp, m_sp, Imm(int(func->scriptData->variableSpace) * 4));
+	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
+
+	// Only what may be read before being written needs to be loaded, like in the entry stubs
+	m_uc.bind(ready);
+	if( m_options.syncEveryInstr )
+	{
+		ReloadVR();
+		ReloadCachedSlots();
+	}
+	else
+	{
+		if( m_code.GetBlocks()[m_code.GetInstructions()[0].block].vrLiveIn )
+			ReloadVR();
+		ReloadSlots(m_code.GetLiveInMask(0));
+	}
+	m_uc.j(InstrLabel(0));
+
+	m_uc.bind(slow);
+	SetPC(0);
+	InvokeNode *call = Invoke((const void*)JIT_PrepareFrame, FuncSignature::build<int, asSVMRegisters*>());
+	Gp r = m_uc.new_gp32();
+	call->set_arg(0, m_regs);
+	call->set_ret(0, r);
+	EmitLeaveIf(r);
+	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
+	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	m_uc.j(ready);
 }
 
 bool CJITCodeGen::EmitCall(asUINT idx)
@@ -133,11 +195,44 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		{
 			// Local variables are dead at this point so only the value register
 			// and stack pointer need to be written back
+			const SJITContextLayout &layout = JIT_GetContextLayout();
+			int popSize = asBC_WORDARG0(bc);
+			if( m_code.RetReadsVR() )
+				SyncVR();
+
+			// Pop the call state like asCContext::PopCallState, unless the function
+			// was called by the application or as a nested call
+			Label finish = m_uc.new_label();
+			Gp length = m_uc.new_gp_ptr();
+			Gp state  = m_uc.new_gp_ptr();
+			Gp t      = m_uc.new_gp_ptr();
+			m_uc.load_u32(length, ContextField(layout.callStackLength));
+			m_uc.j(finish, test_z(length));
+			m_uc.sub(length, length, Imm(layout.callStackFrameSize));
+			m_uc.load(state, ContextField(layout.callStackArray));
+			m_uc.add_ext(state, state, length, PTR_BYTES);
+			m_uc.load(t, mem_ptr(state));
+			m_uc.j(finish, test_z(t));
+			m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), t);
+			m_uc.load(t, mem_ptr(state, PTR_BYTES));
+			m_uc.store(ContextField(layout.currentFunction), t);
+			m_uc.load(t, mem_ptr(state, 2 * PTR_BYTES));
+			m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
+			m_uc.load(t, mem_ptr(state, 3 * PTR_BYTES));
+			m_uc.add(t, t, Imm(popSize * 4));
+			m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), t);
+			m_uc.load_u32(t, mem_ptr(state, 4 * PTR_BYTES));
+			m_uc.store_u32(ContextField(layout.stackIndex), t);
+			m_uc.store_u32(ContextField(layout.callStackLength), length);
+			Gp zero = m_uc.new_gp32();
+			m_uc.mov(zero, Imm(0));
+			m_uc.ret(zero);
+
+			m_uc.bind(finish);
 			SyncStack();
-			SyncVR();
 			InvokeNode *call = Invoke((const void*)JIT_Return, FuncSignature::build<void, asSVMRegisters*, asUINT>());
 			call->set_arg(0, m_regs);
-			call->set_arg(1, Imm(int(asBC_WORDARG0(bc))));
+			call->set_arg(1, Imm(popSize));
 			Leave();
 		}
 		break;
@@ -322,9 +417,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	SetPC(instr.pos);
 
 	// Let the context know which function is being called, so that it may raise exceptions
-	Gp ctx = m_uc.new_gp_ptr();
-	m_uc.load(ctx, RegsField(offsetof(asSVMRegisters, ctx)));
-	Mem callingFunc = mem_ptr(ctx, int32_t(JIT_CallingSystemFunctionOffset()));
+	Mem callingFunc = ContextField(JIT_GetContextLayout().callingSystemFunction);
 	m_uc.store(callingFunc, PtrConst(asPWORD(descr)));
 
 	InvokeNode *call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);

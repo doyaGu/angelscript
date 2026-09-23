@@ -21,12 +21,14 @@ struct SJITCodeGenOptions
 	bool noScriptCalls;     // return to the VM for script-to-script calls
 	bool syncEveryInstr;    // update the VM registers after every instruction
 	bool directSystemCalls; // call registered functions with their native calling convention
+	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 };
 
 // Translates the analysed bytecode of one function to machine code through
 // AsmJit's arch neutral UniCompiler. The generated function has the signature
-// of asJITFunction. The argument passed with the JitEntry instruction is the
-// 1-based index of the entry point.
+// JITFunction, see jit_runtime.h. The argument passed with the JitEntry
+// instruction is the 1-based index of the entry point, and native callers
+// pass 0 to enter at the start of the function.
 //
 // Register usage: the stack frame pointer, stack pointer, and value register
 // are kept in virtual registers while executing natively, and primitive
@@ -66,6 +68,7 @@ protected:
 	void EmitEntryDispatch(asUINT lo, asUINT hi);
 	void EmitEntryStubs();
 	void EmitBailStubs();
+	void EmitDirectEntry();
 
 	// Emits one instruction. Returns false if the instruction isn't supported
 	bool EmitInstruction(asUINT idx);
@@ -100,6 +103,7 @@ protected:
 
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);
+	Mem  ContextField(int offset);  // offset from SJITContextLayout
 	Mem  VRMem();
 	Mem  Var(int offset, int byteDisp = 0);
 	Mem  Stack(int dwordOffset);
@@ -174,6 +178,7 @@ protected:
 
 	Gp  m_regs;     // asSVMRegisters*
 	Gp  m_arg;      // jitArg
+	Gp  m_depth;    // nested native calls allowed, only if the function calls script functions
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_sp;       // stack pointer
 	Gp  m_vr;       // value register (64bit hosts only)
@@ -186,6 +191,7 @@ protected:
 	std::vector<Label>         m_entryLabels;  // per entry
 	std::vector<std::pair<Label, asUINT> > m_bails;  // bail stubs to emit
 	Label                      m_bailCommon;
+	Label                      m_leave;        // returns 1, i.e. the VM takes over
 
 	asUINT m_instrCount;
 	asUINT m_bailCount;

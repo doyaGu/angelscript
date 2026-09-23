@@ -16,16 +16,31 @@
 
 BEGIN_AS_NAMESPACE
 
-// Native script-to-script calls nest on the machine stack. When the depth
-// reaches the limit the native code returns to the VM, which unwinds the
-// machine stack and continues interpreting/re-entering the JIT functions.
-static thread_local asUINT g_nativeCallDepth = 0;
-static asUINT g_maxNativeCallDepth = 256;
-
-void JIT_SetMaxNativeCallDepth(asUINT depth) noexcept
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+#define JIT_CTX_OFFSET(member) (int(offsetof(asCContext, member)) - int(offsetof(asCContext, m_regs)))
+const SJITContextLayout &JIT_GetContextLayout() noexcept
 {
-	g_maxNativeCallDepth = depth;
+	static const SJITContextLayout layout =
+	{
+		JIT_CTX_OFFSET(m_callStack) + int(offsetof(asCArray<size_t>, array)),
+		JIT_CTX_OFFSET(m_callStack) + int(offsetof(asCArray<size_t>, length)),
+		JIT_CTX_OFFSET(m_callStack) + int(offsetof(asCArray<size_t>, maxLength)),
+		JIT_CTX_OFFSET(m_currentFunction),
+		JIT_CTX_OFFSET(m_stackIndex),
+		JIT_CTX_OFFSET(m_stackBlocks) + int(offsetof(asCArray<asDWORD*>, array)),
+		JIT_CTX_OFFSET(m_callingSystemFunction),
+		CALLSTACK_FRAME_SIZE,
+		RESERVE_STACK
+	};
+	return layout;
 }
+#undef JIT_CTX_OFFSET
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 static inline asCContext *GetContext(asSVMRegisters *regs)
 {
@@ -110,65 +125,54 @@ int JIT_AfterDirectCall(asSVMRegisters *regs, int funcId) noexcept
 	return CheckStatusAfterSystemCall(regs, ctx);
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-#endif
-size_t JIT_CallingSystemFunctionOffset() noexcept
+// Calls a script function. The program pointer must be after the call instruction
+// and the arguments on the stack. If the function has been compiled and the depth
+// allows it the function is executed natively, otherwise the VM is left to do it.
+// Returns 0 if the function has returned already
+static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *func, asUINT depth)
 {
-	return offsetof(asCContext, m_callingSystemFunction);
+	JITFunction jitFunc = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
+	if( jitFunc == 0 || depth == 0 )
+	{
+		ctx->CallScriptFunction(func);
+		return 1;
+	}
+
+	if( ctx->PushCallState() < 0 )
+		return 1;
+	return jitFunc(regs, 0, depth - 1);
 }
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
-// Executes the script function that has just been entered natively, if possible.
-// Returns 0 if the function returned to the caller frame
-//
-// TODO: runtime optimize: The call still goes through CallScriptFunction, i.e. PushCallState
-//                         and PrepareScriptFunction, and the return through PopCallState.
-//                         That is about the same cost as the interpreter has for a call, so
-//                         scripts dominated by small script functions don't gain anything
-//                         (see the Fib, Intf, and Mthd tests in test_performance). To do
-//                         better the generated code would have to call the callee directly
-//                         with the frame set up inline, and only materialize the VM call
-//                         stack when it is needed, i.e. when an exception is raised, the
-//                         line callback is invoked, or the context is inspected. The stack
-//                         reservation in PrepareScriptFunction and the clearing of the object
-//                         variables would have to be replicated too.
-static int RunCalledFunction(asSVMRegisters *regs, asCContext *ctx, asUINT callStackLevel)
+// Finds the implementation of a virtual or interface method for the object on
+// the stack, like asCContext::CallInterfaceMethod. Returns null after raising an
+// exception if there is no object
+static asCScriptFunction *ResolveVirtual(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *func)
 {
-	asCScriptFunction *callee = ctx->m_currentFunction;
-	asJITFunction jitFunc = callee->scriptData ? callee->scriptData->jitFunction : 0;
-	if( jitFunc == 0 || g_nativeCallDepth >= g_maxNativeCallDepth )
-		return 1;
-
-	// The program pointer is at the first instruction of the callee, which
-	// must be a JitEntry with a valid argument for the function to be entered
-	asDWORD *pc = regs->programPointer;
-	if( *(asBYTE*)pc != asBC_JitEntry )
-		return 1;
-	asPWORD jitArg = asBC_PTRARG(pc);
-	if( jitArg == 0 )
-		return 1;
-
-	g_nativeCallDepth++;
-	jitFunc(regs, jitArg);
-	g_nativeCallDepth--;
-
-	// The call is complete only if the callee returned normally, i.e. the call
-	// stack is back at the level it had before the call. Otherwise the callee
-	// left native code with its frame still active and the VM must take over
-	if( ctx->m_status == asEXECUTION_ACTIVE && ctx->m_callStack.GetLength() == callStackLevel )
+	asCScriptObject *obj = *(asCScriptObject**)(asPWORD*)regs->stackPointer;
+	if( obj == 0 )
+	{
+		ctx->m_needToCleanupArgs = true;
+		ctx->SetInternalException(TXT_NULL_POINTER_ACCESS);
 		return 0;
-	return 1;
+	}
+
+	asCObjectType *objType = obj->objType;
+	if( func->funcType != asFUNC_INTERFACE )
+		return objType->virtualFunctionTable[func->vfTableIdx];
+
+	for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
+		if( objType->interfaces[n] == func->objectType )
+			return objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
+
+	ctx->m_needToCleanupArgs = true;
+	ctx->SetInternalException(TXT_NULL_POINTER_ACCESS);
+	return 0;
 }
 
-int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) noexcept
+int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth) noexcept
 {
 	asCContext *ctx = GetContext(regs);
 	asCScriptEngine *engine = ctx->m_engine;
-	asUINT level = ctx->m_callStack.GetLength();
 
 	// The program pointer is at the call instruction. The code below mirrors
 	// the VM implementation of the respective instructions
@@ -176,13 +180,16 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 	{
 	case JIT_CALL_SCRIPT:
 		regs->programPointer += 2;
-		ctx->CallScriptFunction(engine->scriptFunctions[funcId]);
-		break;
+		return EnterScriptFunction(regs, ctx, engine->scriptFunctions[funcId], depth);
 
 	case JIT_CALL_INTERFACE:
-		regs->programPointer += 2;
-		ctx->CallInterfaceMethod(engine->GetScriptFunction(funcId));
-		break;
+		{
+			regs->programPointer += 2;
+			asCScriptFunction *func = ResolveVirtual(regs, ctx, engine->scriptFunctions[funcId]);
+			if( func == 0 )
+				return 1;
+			return EnterScriptFunction(regs, ctx, func, depth);
+		}
 
 	case JIT_CALL_BOUND:
 		{
@@ -199,7 +206,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 			if( func->funcType == asFUNC_SCRIPT )
 			{
 				regs->programPointer += 2;
-				ctx->CallScriptFunction(func);
+				return EnterScriptFunction(regs, ctx, func, depth);
 			}
 			else if( func->funcType == asFUNC_SYSTEM )
 			{
@@ -228,7 +235,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 			if( func->funcType == asFUNC_SCRIPT )
 			{
 				regs->programPointer += 2;
-				ctx->CallScriptFunction(func);
+				return EnterScriptFunction(regs, ctx, func, depth);
 			}
 			else if( func->funcType == asFUNC_DELEGATE )
 			{
@@ -242,7 +249,10 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 				else
 				{
 					regs->programPointer += 2;
-					ctx->CallInterfaceMethod(func->funcForDelegate);
+					asCScriptFunction *method = ResolveVirtual(regs, ctx, func->funcForDelegate);
+					if( method == 0 )
+						return 1;
+					return EnterScriptFunction(regs, ctx, method, depth);
 				}
 			}
 			else if( func->funcType == asFUNC_SYSTEM )
@@ -255,7 +265,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 				regs->programPointer += 2;
 				int boundId = engine->importedFunctions[func->id & ~FUNC_IMPORTED]->boundFunctionId;
 				if( boundId > 0 )
-					ctx->CallScriptFunction(engine->scriptFunctions[boundId]);
+					return EnterScriptFunction(regs, ctx, engine->scriptFunctions[boundId], depth);
 				else
 				{
 					ctx->m_needToCleanupArgs = true;
@@ -281,22 +291,22 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra) no
 			regs->stackPointer -= AS_PTR_SIZE;
 			*(asPWORD*)regs->stackPointer = (asPWORD)mem;
 			regs->programPointer += 2 + AS_PTR_SIZE;
-			ctx->CallScriptFunction(f);
+			return EnterScriptFunction(regs, ctx, f, depth);
 		}
-		break;
 
 	default:
 		return 1;
 	}
 
-	if( ctx->m_status != asEXECUTION_ACTIVE )
-		return 1;
+	// A system function was called and has returned already
+	return ctx->m_status != asEXECUTION_ACTIVE ? 1 : 0;
+}
 
-	// A system function was called and returned already
-	if( ctx->m_callStack.GetLength() == level )
-		return 0;
-
-	return RunCalledFunction(regs, ctx, level);
+int JIT_PrepareFrame(asSVMRegisters *regs) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+	ctx->PrepareScriptFunction();
+	return ctx->m_status != asEXECUTION_ACTIVE ? 1 : 0;
 }
 
 void JIT_Return(asSVMRegisters *regs, asUINT popSize) noexcept
