@@ -10,6 +10,7 @@
 #include "../../../add_on/scriptarray/scriptarray.h"
 #include "../../../add_on/scriptmath/scriptmath.h"
 #include <sstream>
+#include <new>
 
 namespace TestJIT
 {
@@ -545,15 +546,33 @@ static bool TestNestedExecution(asIScriptEngine *engine)
 namespace DirectCalls
 {
 	static int    g_destroyed = 0;
+	static int    g_live = 0;
+
+	// Value types returned by value, in memory or in registers depending on the ABI
+	struct CVec  { float x, y, z; };
+	struct CPair { int a, b; };
+	typedef float CFlt; // asOBJ_APP_FLOAT is for types that are a float in C++
+	struct CVal
+	{
+		CVal() : v(0)                 { g_live++; }
+		CVal(const CVal &o) : v(o.v)  { g_live++; }
+		~CVal()                       { g_live--; }
+		CVal &operator=(const CVal &o) { v = o.v; return *this; }
+		int v;
+	};
 
 	struct CObj
 	{
 		int v;
+		int arr[4];
 		int   Get()              { return v; }
 		void  Set(int a)         { v = a; }
 		float Mul(float f)       { return v * f; }
 		asINT64 Big(asINT64 a, int b) { return a * b + v; }
 		double Mix(double a, float b, asINT64 c, int d) { return a + b + double(c) + d + v; }
+		int  &At(int i)          { return arr[i]; }
+		CVec  Scale(float s)     { CVec r = { v * s, v * s, v * s }; return r; }
+		CPair Pair(int b)        { CPair r = { v, b }; return r; }
 	};
 	static CObj g_obj;
 
@@ -589,6 +608,18 @@ namespace DirectCalls
 	static int  &RefRet(CRef &r)                        { return r.v; }
 	static int   RefArg(CRef &r)                        { return r.v; }
 	static int   Handle(CRef *r)                        { int v = r ? r->v : -1; if( r ) r->Release(); return v; }
+	static int  &AtLast(int i, CObj *o)                 { return o->arr[i]; }
+	static int  &AtRaise(int i, CObj *o)                { asGetActiveContext()->SetException("raised in AtRaise"); return o->arr[i]; }
+	static int  &RefAt(int, CRef *r)                    { return r->v; }
+	static CVec  MakeVec(float x, float y, float z)     { CVec r = { x, y, z }; return r; }
+	static CVec  VecAdd(const CVec &a, const CVec &b)   { CVec r = { a.x + b.x, a.y + b.y, a.z + b.z }; return r; }
+	static CVec  VecMul(float s, const CVec &a)         { CVec r = { a.x * s, a.y * s, a.z * s }; return r; }
+	static CPair MakePair(int a, int b)                 { CPair r = { a, b }; return r; }
+	static CFlt  MakeFlt(float f)                       { return f + 1; }
+	static CVal  MakeVal(int v)                         { CVal r; r.v = v; return r; }
+	static CVal  MakeValThrow(int v)                    { CVal r; r.v = v; asGetActiveContext()->SetException("raised in MakeValThrow"); return r; }
+	static void  ValConstruct(CVal *p)                  { new(p) CVal(); }
+	static void  ValDestruct(CVal *p)                   { p->~CVal(); }
 
 	static void Register(asIScriptEngine *engine)
 	{
@@ -625,6 +656,39 @@ namespace DirectCalls
 		r = engine->RegisterGlobalFunction("int &RefRet(CRef &inout)", asFUNCTION(RefRet), asCALL_CDECL); assert( r >= 0 );
 		r = engine->RegisterGlobalFunction("int RefArg(CRef &inout)", asFUNCTION(RefArg), asCALL_CDECL); assert( r >= 0 );
 		r = engine->RegisterGlobalFunction("int Handle(CRef@)", asFUNCTION(Handle), asCALL_CDECL); assert( r >= 0 );
+
+		// Methods taking an int and returning a reference are called with asBC_Thiscall1
+		r = engine->RegisterObjectMethod("CObj", "int &At(int)", asMETHOD(CObj, At), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int &AtLast(int)", asFUNCTION(AtLast), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int &AtRaise(int)", asFUNCTION(AtRaise), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CRef", "int &At(int)", asFUNCTION(RefAt), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+
+		r = engine->RegisterObjectType("vec", sizeof(CVec), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("vec", "float x", asOFFSET(CVec, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("vec", "float y", asOFFSET(CVec, y)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("vec", "float z", asOFFSET(CVec, z)); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("vec", "vec opAdd(const vec &in) const", asFUNCTION(VecAdd), asCALL_CDECL_OBJFIRST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("vec", "vec opMul(float) const", asFUNCTION(VecMul), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("vec MakeVec(float, float, float)", asFUNCTION(MakeVec), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "vec Scale(float)", asMETHOD(CObj, Scale), asCALL_THISCALL); assert( r >= 0 );
+
+		r = engine->RegisterObjectType("pair", sizeof(CPair), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLINTS); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("pair", "int a", asOFFSET(CPair, a)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("pair", "int b", asOFFSET(CPair, b)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("pair MakePair(int, int)", asFUNCTION(MakePair), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "pair Pair(int)", asMETHOD(CObj, Pair), asCALL_THISCALL); assert( r >= 0 );
+
+		r = engine->RegisterObjectType("flt", sizeof(CFlt), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_FLOAT); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("flt", "float f", 0); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("flt MakeFlt(float)", asFUNCTION(MakeFlt), asCALL_CDECL); assert( r >= 0 );
+
+		r = engine->RegisterObjectType("val", sizeof(CVal), asOBJ_VALUE | asOBJ_APP_CLASS_CDAK); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("val", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(ValConstruct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("val", asBEHAVE_DESTRUCT, "void f()", asFUNCTION(ValDestruct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("val", "val &opAssign(const val &in)", asMETHODPR(CVal, operator=, (const CVal &), CVal &), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("val", "int v", asOFFSET(CVal, v)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("val MakeVal(int)", asFUNCTION(MakeVal), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("val MakeValThrow(int)", asFUNCTION(MakeValThrow), asCALL_CDECL); assert( r >= 0 );
 	}
 }
 
@@ -674,7 +738,25 @@ static bool TestDirectCalls()
 		"int nullThis() { CRef @o; return o.Get(); }                   \n"
 		"int suspend() { int a = 5; Susp(); a += 3; return a; }        \n"
 		"int leak() { CRef@ r = MakeAndThrow(3); return r.v; }         \n"
-		"int suspendArgs() { return Cdecl(SuspRet(3), 4); }            \n";
+		"int suspendArgs() { return Cdecl(SuspRet(3), 4); }            \n"
+		"int values()                                                  \n"
+		"{                                                             \n"
+		"  obj.v = 5;                                                  \n"
+		"  obj.At(1) = 11; obj.At(2) = obj.At(1) + 1;                  \n"
+		"  assert( obj.At(2) == 12 && obj.AtLast(1) == 11 );           \n"
+		"  vec a = MakeVec(1, 2, 3);                                   \n"
+		"  vec b = a + a; assert( b.x == 2 && b.y == 4 && b.z == 6 );  \n"
+		"  vec c = b * 0.5f; assert( c.x == 1 && c.z == 3 );           \n"
+		"  vec d = obj.Scale(2); assert( d.x == 10 && d.z == 10 );     \n"
+		"  pair p = MakePair(3, 4); assert( p.a == 3 && p.b == 4 );    \n"
+		"  pair q = obj.Pair(7); assert( q.a == 5 && q.b == 7 );       \n"
+		"  val w = MakeVal(8); assert( w.v == 8 );                     \n"
+		"  flt f = MakeFlt(1.5f); assert( f.f == 2.5f );               \n"
+		"  return obj.At(1) + obj.At(2);                               \n"
+		"}                                                             \n"
+		"int valThrow() { val v = MakeValThrow(3); return v.v; }       \n"
+		"int atRaise() { return obj.AtRaise(1); }                      \n"
+		"int nullAt() { CRef @r; return r.At(0); }                     \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("test", script);
@@ -738,6 +820,39 @@ static bool TestDirectCalls()
 		PRINTF("suspendArgs: returned %d, got %d\n", r, r == asEXECUTION_FINISHED ? int(ctx->GetReturnDWord()) : 0);
 		TEST_FAILED;
 	}
+
+	// asBC_Thiscall1, and value types returned by value
+	DirectCalls::g_live = 0;
+	ctx->Prepare(mod->GetFunctionByDecl("int values()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 23 )
+	{
+		if( r == asEXECUTION_EXCEPTION )
+			PRINTF("values: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
+		TEST_FAILED;
+	}
+	ctx->Unprepare();
+	if( DirectCalls::g_live != 0 )
+		TEST_FAILED;
+
+	// A value returned on the stack must be destroyed when the function also raised an exception
+	ctx->Prepare(mod->GetFunctionByDecl("int valThrow()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_EXCEPTION || std::string(ctx->GetExceptionString()) != "raised in MakeValThrow" || ctx->GetExceptionLineNumber() != 47 )
+		TEST_FAILED;
+	ctx->Unprepare();
+	if( DirectCalls::g_live != 0 )
+		TEST_FAILED;
+
+	ctx->Prepare(mod->GetFunctionByDecl("int atRaise()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_EXCEPTION || std::string(ctx->GetExceptionString()) != "raised in AtRaise" || ctx->GetExceptionLineNumber() != 48 )
+		TEST_FAILED;
+
+	ctx->Prepare(mod->GetFunctionByDecl("int nullAt()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_EXCEPTION || std::string(ctx->GetExceptionString()) != "Null pointer access" || ctx->GetExceptionLineNumber() != 49 )
+		TEST_FAILED;
 
 	ctx->Release();
 	engine->ShutDownAndRelease();
