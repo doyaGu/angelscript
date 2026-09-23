@@ -203,6 +203,7 @@ endif()
 
 if(AS_TEST_JIT)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../add_on/jit angelscript_jit)
+    target_sources(test_feature PRIVATE ../../source/test_jit.cpp)
     target_link_libraries(test_feature angelscript_jit)
     target_compile_definitions(test_feature PRIVATE AS_TEST_JIT)
 endif()

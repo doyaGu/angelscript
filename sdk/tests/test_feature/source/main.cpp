@@ -58,6 +58,7 @@ bool TestNotInitialized();
 bool TestVector3();
 
 namespace TestLiteral           { bool Test(); }
+namespace TestJIT               { bool Test(); }
 namespace TestForEach           { bool Test(); }
 namespace TestException         { bool Test(); }
 namespace TestCDeclReturn       { bool Test(); }
@@ -239,6 +240,12 @@ int allTests()
 #endif
 
 	InstallMemoryManager();
+
+#ifdef AS_TEST_JIT
+	if( TestJIT::Test()                  ) goto failed; else PRINTF("-- TestJIT passed\n");
+	// AS_TEST_JIT_ONLY=1 stops after the JIT specific tests, for quick iterations
+	if( getenv("AS_TEST_JIT_ONLY") ) { RemoveMemoryManager(); return 0; }
+#endif
 
 	if( Test_Addon_Autowrapper::Test()   ) goto failed; else PRINTF("-- Test_Addon_Autowrapper passed\n");
 	if( strstr(asGetLibraryOptions(), "AS_NO_COMPILER")!=0)
