@@ -81,7 +81,7 @@ bool CJITByteCode::ReadsVR(asEBCInstr op)
 	case asBC_RDR4:
 	case asBC_RDR8:
 	case asBC_ClrHi:
-	case asBC_RET:     // the return value is passed in the value register
+	case asBC_RET:     // primitive and reference return values, see AnalyseVRLiveness
 		return true;
 	default:
 		return false;
@@ -676,6 +676,11 @@ void CJITByteCode::BuildBlocks()
 
 void CJITByteCode::AnalyseVRLiveness()
 {
+	// RET only passes the value register to the caller for primitives and references.
+	// Handles are returned in the object register and objects in memory
+	const asCDataType &rt = m_func->returnType;
+	bool retReadsVR = rt.IsReference() || (rt.GetTokenType() != ttVoid && !rt.IsObject() && !rt.IsObjectHandle() && !rt.IsFuncdef());
+
 	// Local use/def per block
 	for( asUINT b = 0; b < m_blocks.size(); b++ )
 	{
@@ -683,7 +688,7 @@ void CJITByteCode::AnalyseVRLiveness()
 		for( asUINT n = block.first; n <= block.last; n++ )
 		{
 			asEBCInstr op = m_instrs[n].op;
-			if( ReadsVR(op) && !block.vrDef )
+			if( ReadsVR(op) && (op != asBC_RET || retReadsVR) && !block.vrDef )
 				block.vrUse = true;
 			if( WritesVR(op) )
 				block.vrDef = true;
@@ -744,7 +749,7 @@ void CJITByteCode::AnalyseVRLiveness()
 			asEBCInstr op = m_instrs[n].op;
 			if( WritesVR(op) )
 				live = false;
-			if( ReadsVR(op) )
+			if( ReadsVR(op) && (op != asBC_RET || retReadsVR) )
 				live = true;
 		}
 	}
