@@ -51,10 +51,13 @@ void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
 	{
 		Gp t = m_uc.new_gp32();
 		m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-		Label skip = m_uc.new_label();
-		m_uc.j(skip, test_z(t));
+		Label reload = m_uc.new_label();
+		Label cont = m_uc.new_label();
+		m_uc.j(reload, test_nz(t));
+		BaseNode *cold = BeginCold(reload);
 		ReloadCachedSlots();
-		m_uc.bind(skip);
+		EndCold(cold, cont);
+		m_uc.bind(cont);
 	}
 }
 
@@ -85,6 +88,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	Gp r = m_uc.new_gp32();
 	Label slow = m_uc.new_label();
 	Label done = m_uc.new_label();
+	BaseNode *cold = 0;
 	if( native )
 	{
 		const SJITObjectLayout &layout = JIT_GetObjectLayout();
@@ -118,10 +122,11 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 			m_uc.j(slow, test_z(target));
 
 		EmitNativeCall(idx, target, r, slow);
-		m_uc.j(done);
+
+		// The call through the helper is the rare path then
+		cold = BeginCold(slow);
 	}
 
-	m_uc.bind(slow);
 	SetPC(instr.pos);
 	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	call->set_arg(0, m_regs);
@@ -133,6 +138,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		call->set_arg(3, Imm(int64_t(extraImm)));
 	call->set_arg(4, m_depth);
 	call->set_ret(0, r);
+	if( cold )
+		EndCold(cold, done);
 
 	m_uc.bind(done);
 	EmitAfterHelperCall(r, idx);
@@ -766,8 +773,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Exceptions, suspend requests, and line callbacks are handled by the helper
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-	Label skip = m_uc.new_label();
-	m_uc.j(skip, test_z(flag));
+	Label check = m_uc.new_label();
+	Label cont = m_uc.new_label();
+	m_uc.j(check, test_nz(flag));
+	BaseNode *cold = BeginCold(check);
 	// The VM continues with the popped stack pointer if the helper returns non-zero
 	SyncStack();
 	SyncVR();
@@ -783,7 +792,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	EmitLeaveIf(r);
 	// With a debugger attached the variables may have been modified through the context
 	ReloadCachedSlots();
-	m_uc.bind(skip);
+	EndCold(cold, cont);
+	m_uc.bind(cont);
 
 	return true;
 }

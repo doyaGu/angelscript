@@ -190,6 +190,13 @@ protected:
 	void  EmitLeaveIf(const Gp &result);
 	Label InstrLabel(asUINT idx);
 
+	// Rare paths, e.g. the calls of the helpers that hand control to the VM, are
+	// emitted in place between BeginCold and EndCold, but moved behind the body by
+	// EmitColdCode. The code before a cold range continues after it
+	asmjit::BaseNode *BeginCold(const Label &label);
+	void  EndCold(asmjit::BaseNode *start, const Label &cont);
+	void  EmitColdCode();
+
 	// Calls a C function. Arguments and return value are set on the returned node
 	asmjit::InvokeNode *Invoke(const void *fn, const asmjit::FuncSignature &sig);
 
@@ -218,6 +225,7 @@ protected:
 	std::vector<Label>         m_labels;       // per instruction, valid for block starts
 	std::vector<Label>         m_entryLabels;  // per entry
 	std::vector<std::pair<Label, asUINT> > m_bails;  // bail stubs to emit
+	std::vector<std::pair<asmjit::BaseNode*, asmjit::BaseNode*> > m_cold;  // first and last nodes of the cold ranges
 	Label                      m_bailCommon;
 	Label                      m_leave;        // returns 1, i.e. the VM takes over
 

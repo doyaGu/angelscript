@@ -401,9 +401,8 @@ void CJITCodeGen::EmitDivMod(asUINT idx, bool is64, bool isSigned, bool isMod)
 		m_uc.j(slow, ucmp_le(t, Imm(1)));
 
 		EmitSignedDiv(q, a, b, isMod);
-		m_uc.j(done);
 
-		m_uc.bind(slow);
+		BaseNode *cold = BeginCold(slow);
 		m_uc.j(bail, test_z(b));
 		// b == -1: overflow if a is the smallest negative number
 		if( is64 )
@@ -418,6 +417,7 @@ void CJITCodeGen::EmitDivMod(asUINT idx, bool is64, bool isSigned, bool isMod)
 			m_uc.mov(q, Imm(0));
 		else
 			m_uc.neg(q, a);
+		EndCold(cold, done);
 
 		m_uc.bind(done);
 	}

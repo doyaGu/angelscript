@@ -153,6 +153,7 @@ bool CJITCodeGen::Generate()
 
 	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
 	Leave();
+	EmitColdCode();
 
 	m_uc.bind(direct);
 	EmitDirectEntry();
@@ -1078,6 +1079,41 @@ void CJITCodeGen::EmitLeaveIf(const Gp &result)
 	m_uc.j(m_leave, test_nz(result));
 }
 
+// Starts a cold range at the label. Returns the node to pass to EndCold
+BaseNode *CJITCodeGen::BeginCold(const Label &label)
+{
+	BaseNode *start = m_uc.cc->cursor();
+	m_uc.bind(label);
+	return start;
+}
+
+// Ends the cold range, which continues at cont
+void CJITCodeGen::EndCold(BaseNode *start, const Label &cont)
+{
+	m_uc.j(cont);
+	m_cold.push_back(std::pair<BaseNode*, BaseNode*>(start->next(), m_uc.cc->cursor()));
+}
+
+// Moves the cold ranges to the cursor, which must follow an unconditional jump.
+// The ranges start with a label and end with a jump, so the code is the same,
+// only the common paths fall through instead of jumping over the rare ones
+void CJITCodeGen::EmitColdCode()
+{
+	for( size_t n = 0; n < m_cold.size(); n++ )
+	{
+		BaseNode *node = m_cold[n].first;
+		for(;;)
+		{
+			BaseNode *next = node->next();
+			m_uc.cc->remove_node(node);
+			m_uc.cc->add_node(node);
+			if( node == m_cold[n].second )
+				break;
+			node = next;
+		}
+	}
+}
+
 //------------------------------------------------------------------------
 // Stack operations
 
@@ -1763,9 +1799,11 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			// suspension was requested, is the helper called
 			Gp t = m_uc.new_gp32();
 			m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-			Label skip = m_uc.new_label();
-			m_uc.j(skip, test_z(t));
+			Label suspend = m_uc.new_label();
+			Label cont = m_uc.new_label();
+			m_uc.j(suspend, test_nz(t));
 
+			BaseNode *cold = BeginCold(suspend);
 			SyncAll(idx);
 			InvokeNode *call = Invoke((const void*)JIT_Suspend, FuncSignature::build<int, asSVMRegisters*>());
 			Gp r = m_uc.new_gp32();
@@ -1775,7 +1813,8 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 
 			// The line callback may have modified variables
 			ReloadAll();
-			m_uc.bind(skip);
+			EndCold(cold, cont);
+			m_uc.bind(cont);
 		}
 		break;
 
