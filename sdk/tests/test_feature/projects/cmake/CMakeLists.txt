@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(test_feature)
 
+option(AS_TEST_JIT "Run the test suite with the JIT compiler attached to every engine" OFF)
+
 add_executable(
         test_feature
         ../../source/bstr.cpp
@@ -197,4 +199,10 @@ set_target_properties(test_feature PROPERTIES CXX_STANDARD 11)
 if(MSVC)
     # The test scripts contain UTF-8 characters
     target_compile_options(test_feature PRIVATE /utf-8)
+endif()
+
+if(AS_TEST_JIT)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../add_on/jit angelscript_jit)
+    target_link_libraries(test_feature angelscript_jit)
+    target_compile_definitions(test_feature PRIVATE AS_TEST_JIT)
 endif()

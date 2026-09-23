@@ -205,7 +205,13 @@ class EngineDestroyer
 {
 public:
 	EngineDestroyer() { en = 0; }
-	~EngineDestroyer() { if( en ) en->Release(); }
+	~EngineDestroyer()
+	{
+		if( en ) en->Release();
+#ifdef AS_TEST_JIT
+		ReleaseJitCompiler();
+#endif
+	}
 	asIScriptEngine *en;
 } g_engine;
 

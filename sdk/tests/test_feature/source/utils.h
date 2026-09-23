@@ -60,6 +60,14 @@ using std::memcpy;
 using namespace AngelScript;
 #endif
 
+#ifdef AS_TEST_JIT
+// When testing the JIT compiler every engine created by the tests gets the
+// JIT compiler attached, so the whole suite runs with native code
+asIScriptEngine *CreateEngineWithJit(asDWORD version = ANGELSCRIPT_VERSION);
+void             ReleaseJitCompiler();
+#define asCreateScriptEngine(...) CreateEngineWithJit(__VA_ARGS__)
+#endif
+
 #if defined(__GNUC__) && !(defined(__ppc__) || defined(__PPC__))
 #define STDCALL __attribute__((stdcall))
 #elif defined(_MSC_VER) || defined(__BORLANDC__)

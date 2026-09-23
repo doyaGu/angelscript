@@ -414,3 +414,82 @@ string GetCurrentDir()
 
 	return str;
 }
+
+#ifdef AS_TEST_JIT
+
+#include "../../../add_on/jit/jit.h"
+
+static CJITCompiler *g_jit = 0;
+
+// Environment variable AS_JIT_FLAGS can be used to change the JIT flags when running the tests
+asIScriptEngine *CreateEngineWithJit(asDWORD version)
+{
+	asIScriptEngine *engine = (asCreateScriptEngine)(version);
+	if( engine == 0 )
+		return 0;
+
+	// AS_JIT_DISABLE=1 runs the same tests with the VM only (but with the JIT
+	// instructions in the bytecode), and AS_JIT_DISABLE=2 without the JIT
+	// instructions, to tell test problems from JIT problems
+	const char *disable = getenv("AS_JIT_DISABLE");
+	if( disable && atoi(disable) == 2 )
+		return engine;
+
+	// The bytecode is always compiled with the JIT instructions so the test
+	// expectations are the same with and without the JIT compiler attached
+	engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+	if( disable )
+		return engine;
+
+	if( g_jit == 0 )
+	{
+		asDWORD flags = 0;
+		const char *env = getenv("AS_JIT_FLAGS");
+		if( env )
+			flags = asDWORD(strtoul(env, 0, 0));
+		g_jit = new CJITCompiler(flags);
+		const char *filter = getenv("AS_JIT_LOG_FILTER");
+		if( filter )
+			g_jit->SetLogFile(stdout, filter);
+
+		// AS_JIT_BAIL_OPS lists bytecode instruction names, separated by commas,
+		// that must always be executed by the VM. Used to bisect JIT problems
+		const char *bailOps = getenv("AS_JIT_BAIL_OPS");
+		if( bailOps )
+		{
+			std::vector<asEBCInstr> ops;
+			std::string list = bailOps;
+			size_t start = 0;
+			while( start < list.size() )
+			{
+				size_t end = list.find(',', start);
+				if( end == std::string::npos ) end = list.size();
+				std::string name = list.substr(start, end - start);
+				for( int op = 0; op < asBC_MAXBYTECODE; op++ )
+					if( name == asBCInfo[op].name )
+						ops.push_back(asEBCInstr(op));
+				start = end + 1;
+			}
+			g_jit->SetBailInstructions(ops.empty() ? 0 : &ops[0], asUINT(ops.size()));
+			PRINTF("JIT: %d instructions forced to the VM\n", int(ops.size()));
+		}
+	}
+
+	engine->SetJITCompiler(g_jit);
+	return engine;
+}
+
+// Must be called after all engines have been released
+void ReleaseJitCompiler()
+{
+	if( g_jit )
+	{
+		SJITStatistics stats = g_jit->GetStatistics();
+		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails\n",
+			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed);
+		delete g_jit;
+		g_jit = 0;
+	}
+}
+
+#endif
