@@ -481,6 +481,10 @@ void CJITCodeGen::EmitPrologue()
 	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>());
 	m_func = func;
 
+	// Only 128bit vectors are used, whose VEX encoded instructions clear the upper
+	// halves of the AVX registers, so the VZEROUPPER on return isn't needed
+	func->frame().reset_avx_auto_cleanup();
+
 	m_regs = m_uc.new_gp_ptr("regs");
 	m_arg  = m_uc.new_gp_ptr("jitArg");
 	func->set_arg(0, m_regs);
