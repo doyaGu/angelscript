@@ -10,6 +10,7 @@
 #include "../../../add_on/scriptarray/scriptarray.h"
 #include "../../../add_on/scriptmath/scriptmath.h"
 #include <sstream>
+#include <stdexcept>
 #include <new>
 
 namespace TestJIT
@@ -573,6 +574,7 @@ namespace DirectCalls
 		int  &At(int i)          { return arr[i]; }
 		CVec  Scale(float s)     { CVec r = { v * s, v * s, v * s }; return r; }
 		CPair Pair(int b)        { CPair r = { v, b }; return r; }
+		int   Throw(int a)       { if( a < 0 ) throw std::runtime_error("method"); return a + v; }
 		CVal  Five(int a, double b, float c, int d) { CVal r; r.v = int(a + b + c + d) + v; return r; }
 		double Four(float a, float b, double c, float d) { return a + b + c + d + v; }
 		int   Many(int i1, int i2, int i3, int i4, float f1, float f2, float f3, float f4,
@@ -1150,6 +1152,190 @@ static bool TestNativeCalls()
 	return fail;
 }
 
+// C++ exceptions thrown by registered functions are turned into script exceptions.
+// When the functions are called directly the exceptions pass through the generated
+// code, and everything that the application can observe must be the same as with
+// the VM
+namespace CppExceptions
+{
+	using namespace DirectCalls;
+
+	static std::stringstream g_trace;
+
+	static int    ThrowIf(int a)          { if( a < 0 ) throw std::runtime_error("negative"); return a; }
+	static int    ThrowUnknown(int a)     { if( a < 0 ) throw a; return a; }
+	static int   &AtThrow(int i, CObj *o) { if( i < 0 ) throw std::out_of_range("index"); return o->arr[i]; }
+	static CRef  *RefThrow(int v)         { if( v < 0 ) throw std::runtime_error("handle"); return new CRef(v); }
+	static CVal   ValThrow(int v)         { CVal r; r.v = v; if( v < 0 ) throw std::runtime_error("value"); return r; }
+	static double DblThrow(double d)      { if( d < 0 ) throw std::runtime_error("double"); return d * 2; }
+
+	static void Translate(asIScriptContext *ctx, void *)
+	{
+		try { throw; }
+		catch( std::exception &e ) { ctx->SetException(e.what()); }
+		catch( ... ) {}
+	}
+
+	static void OnException(asIScriptContext *ctx, void *)
+	{
+		g_trace << "[" << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" <<
+		           ctx->GetExceptionLineNumber() << " depth " << ctx->GetCallstackSize() << "] ";
+	}
+
+	static const char *script =
+		"int dtors = 0;                                                                    \n"
+		"class D { int v; D(int a) { v = a; } ~D() { dtors += v; } }                       \n"
+		"int direct(int a) { D d(1); int r = ThrowIf(a); return r + 1; }                   \n"
+		"int nested(int n) { D d(1); if( n == 0 ) return ThrowIf(-1); return nested(n - 1) + 1; } \n"
+		"int caught(int n) { int r = 0; try { r = nested(n); } catch { r = -100; } return r + ThrowIf(5); } \n"
+		"int loop(int n) { int r = 0; for( int i = 0; i < n; i++ ) { try { r += ThrowIf(i % 3 == 0 ? -1 : i); } catch { r += 100; } } return r; } \n"
+		"int unknown(int a) { return ThrowUnknown(a); }                                    \n"
+		"int thiscall1(int i) { return obj.AtThrow(i); }                                   \n"
+		"int method(int a) { obj.v = 1; return obj.Throw(a); }                             \n"
+		"int handle(int a) { CRef@ r = RefThrow(a); return r is null ? -1 : r.v; }         \n"
+		"int value(int a) { val v = ValThrow(a); return v.v; }                             \n"
+		"int valueCaught(int a) { int r = 0; try { val v = ValThrow(a); r = v.v; } catch { r = -1; } return r + 1; } \n"
+		"int dbl(int a) { return int(DblThrow(a)); }                                       \n"
+		"int args(int a) { return Cdecl(ThrowIf(a), 4); }                                  \n";
+
+	struct SCase { const char *decl; int arg; };
+	static const SCase cases[] =
+	{
+		{ "int direct(int)",      -1 },
+		{ "int direct(int)",       3 },
+		{ "int nested(int)",       5 },
+		{ "int nested(int)",     300 },
+		{ "int caught(int)",       5 },
+		{ "int caught(int)",     300 },
+		{ "int loop(int)",        10 },
+		{ "int unknown(int)",     -1 },
+		{ "int thiscall1(int)",   -1 },
+		{ "int thiscall1(int)",    1 },
+		{ "int method(int)",      -1 },
+		{ "int method(int)",       2 },
+		{ "int handle(int)",      -1 },
+		{ "int handle(int)",       4 },
+		{ "int value(int)",       -1 },
+		{ "int value(int)",        6 },
+		{ "int valueCaught(int)", -1 },
+		{ "int dbl(int)",         -1 },
+		{ "int dbl(int)",          2 },
+		{ "int args(int)",        -1 },
+	};
+
+	// Executes all the cases and returns what was observed, one line per case
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		COutStream out;
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		engine->SetTranslateAppExceptionCallback(asFUNCTION(Translate), 0, asCALL_CDECL);
+		DirectCalls::Register(engine);
+		int r;
+		r = engine->RegisterGlobalFunction("int ThrowIf(int)", asFUNCTION(ThrowIf), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("int ThrowUnknown(int)", asFUNCTION(ThrowUnknown), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int &AtThrow(int)", asFUNCTION(AtThrow), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int Throw(int)", asMETHOD(CObj, Throw), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("CRef@ RefThrow(int)", asFUNCTION(RefThrow), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("val ValThrow(int)", asFUNCTION(ValThrow), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double DblThrow(double)", asFUNCTION(DblThrow), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+			TEST_FAILED;
+		int *dtors = (int*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("dtors"));
+
+		std::string result;
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->SetExceptionCallback(asFUNCTION(OnException), 0, asCALL_CDECL);
+		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
+		{
+			g_trace.str("");
+			*dtors = 0;
+			g_live = 0;
+			g_destroyed = 0;
+
+			asIScriptFunction *func = mod->GetFunctionByDecl(cases[n].decl);
+			if( func == 0 ) { TEST_FAILED; continue; }
+			ctx->Prepare(func);
+			ctx->SetArgDWord(0, cases[n].arg);
+			r = ctx->Execute();
+
+			std::stringstream s;
+			s << cases[n].decl << "(" << cases[n].arg << "): " << r;
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			else if( r == asEXECUTION_EXCEPTION )
+				s << " '" << ctx->GetExceptionString() << "' in " << ctx->GetExceptionFunction()->GetName() << ":" << ctx->GetExceptionLineNumber();
+			ctx->Unprepare();
+			s << " dtors " << *dtors << " live " << g_live << " destroyed " << g_destroyed << " " << g_trace.str() << "\n";
+			result += s.str();
+		}
+		ctx->Release();
+		return result;
+	}
+}
+
+static bool TestCppExceptions()
+{
+	using namespace CppExceptions;
+	bool fail = false;
+
+	if( strstr(asGetLibraryOptions(), "AS_NO_EXCEPTIONS") )
+		return false;
+
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("'negative' in direct:3") == std::string::npos )
+		TEST_FAILED;
+
+	// The default, a native call depth that mixes native calls with calls made by
+	// the VM, and the calls through the engine
+	struct SConfig { const char *name; asDWORD flags; asUINT depth; };
+	const SConfig configs[] =
+	{
+		{ "default",                 0,                                      256 },
+		{ "native call depth 3",     0,                                      3 },
+		{ "no direct system calls",  CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS, 256 },
+		{ "no native script calls",  CJITCompiler::JIT_NO_SCRIPT_CALLS,      256 },
+	};
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(configs[c].flags | envFlags);
+		jit.SetNativeCallDepth(configs[c].depth);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, fail);
+		engine->ShutDownAndRelease();
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("%s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("%s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -1211,6 +1397,7 @@ bool Test()
 
 	fail = TestDirectCalls() || fail;
 	fail = TestNativeCalls() || fail;
+	fail = TestCppExceptions() || fail;
 
 	return fail;
 }
