@@ -15,6 +15,7 @@ This page gives a brief description of the add-ons that you'll find in the /sdk/
  - \subpage doc_addon_serializer
  - \subpage doc_addon_helpers
  - \subpage doc_addon_autowrap
+ - \subpage doc_addon_jit
 
 \page doc_addon_script Script extensions
 
