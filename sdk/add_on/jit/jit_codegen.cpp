@@ -1075,10 +1075,7 @@ void CJITCodeGen::Leave()
 // Returns to the VM if the helper result is non-zero
 void CJITCodeGen::EmitLeaveIf(const Gp &result)
 {
-	Label cont = m_uc.new_label();
-	m_uc.j(cont, test_z(result));
-	Leave();
-	m_uc.bind(cont);
+	m_uc.j(m_leave, test_nz(result));
 }
 
 //------------------------------------------------------------------------
@@ -1774,11 +1771,7 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			Gp r = m_uc.new_gp32();
 			call->set_arg(0, m_regs);
 			call->set_ret(0, r);
-
-			Label cont = m_uc.new_label();
-			m_uc.j(cont, test_z(r));
-			Leave();
-			m_uc.bind(cont);
+			EmitLeaveIf(r);
 
 			// The line callback may have modified variables
 			ReloadAll();

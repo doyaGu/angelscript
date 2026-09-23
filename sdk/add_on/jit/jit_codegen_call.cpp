@@ -42,11 +42,7 @@ static const int PTR_BYTES = AS_PTR_SIZE * 4;
 // otherwise pick up the registers the helper may have changed
 void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
 {
-	Label cont = m_uc.new_label();
-	m_uc.j(cont, test_z(result));
-	Leave();
-	m_uc.bind(cont);
-
+	EmitLeaveIf(result);
 	ReloadStack();
 	ReloadVR();
 
