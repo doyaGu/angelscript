@@ -1527,11 +1527,12 @@ bool CJITCodeGen::EmitBranch(asUINT idx)
 		// way it would have without the JIT
 		//
 		// TODO: runtime optimize: Large switches would be faster with a jump table
-		//                         embedded in the code (label addresses via lea/adr
-		//                         and an indirect jump through the compiler escape
-		//                         hatch in jit_codegen_arch.cpp). The register
+		//                         embedded in the code (embed_label for the entries,
+		//                         and an indirect jump emitted with the arch specific
+		//                         compiler in jit_codegen_arch.cpp). The register
 		//                         allocator must be told about the successors, i.e.
-		//                         the node needs add_jump_annotation with the labels
+		//                         the jump needs a JumpAnnotation (new_jump_annotation
+		//                         and add_label) listing the case labels
 		Gp v = Load32(asBC_SWORDARG0(instr.bc));
 		const std::vector<int> &targets = m_code.GetSwitchTargets(idx);
 

@@ -25,7 +25,7 @@
 //    code so that C++ exceptions can pass through it (jit_codegen_call.cpp, EmitDirectSystemCall).
 //  - Inline reference counting for script objects in REFCPY/FREE (jit_codegen_call.cpp, EmitObjectOp).
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots).
-//  - Jump tables for switch statements instead of the compare chain (jit_codegen.cpp, EmitBranch).
+//  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer
 //    operations instead of calling JIT_I64Op.
 //  - Project files for the add-on for the IDEs besides CMake.
@@ -224,10 +224,13 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 	}
 }
 
-// TODO: runtime optimize: With asIJITCompilerV2 the engine only reserves the entry points
-//                         at build time and the function can be compiled on first execution,
-//                         or only after it has been executed a number of times. That would
-//                         remove the compile cost for functions that are rarely executed.
+// TODO: runtime optimize: With asIJITCompilerV2 the engine only informs the compiler of each
+//                         new function with NewFunction, and the native code can be linked
+//                         at any time later with SetJITFunction. The VM reads the JIT function
+//                         at every JitEntry, so a stub linked in NewFunction could compile the
+//                         function when it is first entered, or after it has been entered a
+//                         number of times, and replace itself. That would remove the compile
+//                         cost for functions that are rarely executed.
 int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *output)
 {
 	using namespace asmjit;

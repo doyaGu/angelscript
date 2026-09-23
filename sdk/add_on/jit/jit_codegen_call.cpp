@@ -158,17 +158,19 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // C++ exceptions thrown by the function cannot be caught by the generated code, so
 // this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 //
-// TODO: runtime optimize: Objects returned in memory (hostReturnInMemory) and objects passed
-//                         by value could be supported by passing the address of the script
-//                         stack slot, like as_callfunc_*.cpp does. Auto handles would need
-//                         a release after the call, and asCALL_GENERIC could be called with
-//                         an asCGeneric set up inline. Each of these should be measured
-//                         against CallSystemFunction before adding the code.
+// TODO: runtime optimize: Objects returned by value and objects passed by value could be
+//                         supported by setting up the return memory and the argument copies
+//                         the way CallSystemFunction and as_callfunc_*.cpp do for each ABI.
+//                         Auto handles would need a release of the parameters after the call
+//                         and an AddRef of the returned handle, and asCALL_GENERIC could be
+//                         called with an asCGeneric set up inline. Each of these should be
+//                         measured against CallSystemFunction before adding the code.
 // TODO: The generated code has no unwind information, which is why C++ exceptions cannot
 //       pass through it. AsmJit doesn't emit it, but it could be registered separately
 //       (RtlAddFunctionTable on Win64, __register_frame with DWARF CFI elsewhere). With
-//       that in place the direct calls could wrap the call in a try/catch in a helper and
-//       the flag could be on by default.
+//       that in place the exception could be caught by a C++ function wrapping the entry
+//       into the generated code, and turned into a script exception like CallSystemFunction
+//       does, so the flag could be on by default.
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -520,12 +522,14 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_REFCPY:
-		// TODO: runtime optimize: For asOBJ_SCRIPT_OBJECT and other types with the plain
-		//                         AddRef/Release behaviours the reference counting could
-		//                         be done inline (with the atomic operations of the engine
-		//                         when built with threads), and only unusual types, e.g.
-		//                         with asOBJ_NOCOUNT or garbage collected, would go through
-		//                         JIT_RefCpy and JIT_Free. The same applies to FREE above.
+		// TODO: runtime optimize: For script objects the reference counting could be done
+		//                         inline: clear gcFlag and increment or decrement refCount
+		//                         (with the atomic operations of the engine when built with
+		//                         threads), and only call the helper when the release may
+		//                         destroy the object, i.e. when refCount is 1. Application
+		//                         types could have their AddRef/Release behaviours called
+		//                         directly instead of through CallObjectMethod. The same
+		//                         applies to FREE above.
 		{
 			Gp d = m_uc.new_gp_ptr();
 			Gp s = m_uc.new_gp_ptr();

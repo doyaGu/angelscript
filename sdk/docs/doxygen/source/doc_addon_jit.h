@@ -168,7 +168,7 @@ functions on 32bit hosts.
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
 
-The TODO comments in the source files describe how each of these could be addressed.
+The TODO comments in the source files describe how the first four could be addressed.
 
 \section doc_addon_jit_3 Debugging aids
 
