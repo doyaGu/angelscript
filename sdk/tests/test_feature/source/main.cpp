@@ -216,6 +216,33 @@ public:
 	asIScriptEngine *en;
 } g_engine;
 
+#if defined(AS_TEST_JIT) && defined(_WIN32)
+#include <windows.h>
+// Prints where the process crashed, to be matched with the JIT code log
+static LONG WINAPI JitCrashHandler(EXCEPTION_POINTERS *info)
+{
+	EXCEPTION_RECORD *rec = info->ExceptionRecord;
+	CONTEXT *ctx = info->ContextRecord;
+	PRINTF("CRASH: exception 0x%08X at %p (module base %p)\n", (unsigned)rec->ExceptionCode, rec->ExceptionAddress, (void*)GetModuleHandle(0));
+#if defined(_M_X64)
+	PRINTF("  rip=%p rsp=%p rbp=%p rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p r8=%p r9=%p r10=%p r11=%p\n",
+		(void*)ctx->Rip, (void*)ctx->Rsp, (void*)ctx->Rbp, (void*)ctx->Rax, (void*)ctx->Rbx, (void*)ctx->Rcx, (void*)ctx->Rdx,
+		(void*)ctx->Rsi, (void*)ctx->Rdi, (void*)ctx->R8, (void*)ctx->R9, (void*)ctx->R10, (void*)ctx->R11);
+#elif defined(_M_IX86)
+	PRINTF("  eip=%p esp=%p ebp=%p eax=%p ebx=%p ecx=%p edx=%p esi=%p edi=%p\n",
+		(void*)ctx->Eip, (void*)ctx->Esp, (void*)ctx->Ebp, (void*)ctx->Eax, (void*)ctx->Ebx, (void*)ctx->Ecx, (void*)ctx->Edx,
+		(void*)ctx->Esi, (void*)ctx->Edi);
+	// Dump the top of the stack to find return addresses
+	asDWORD *sp = (asDWORD*)ctx->Esp;
+	PRINTF("  stack:");
+	for( int n = 0; n < 24; n++ )
+		PRINTF(" %08X", sp[n]);
+	PRINTF("\n");
+#endif
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 //----------------------------------
 // Test with these flags as well
 //
@@ -242,6 +269,14 @@ int allTests()
 	InstallMemoryManager();
 
 #ifdef AS_TEST_JIT
+	// AS_TEST_JIT_UNBUFFERED=1 makes sure the output isn't lost if the process crashes
+	if( getenv("AS_TEST_JIT_UNBUFFERED") )
+	{
+		setvbuf(stdout, 0, _IONBF, 0);
+#if defined(_WIN32)
+		SetUnhandledExceptionFilter(JitCrashHandler);
+#endif
+	}
 	if( TestJIT::Test()                  ) goto failed; else PRINTF("-- TestJIT passed\n");
 	// AS_TEST_JIT_ONLY=1 stops after the JIT specific tests, for quick iterations
 	if( getenv("AS_TEST_JIT_ONLY") ) { RemoveMemoryManager(); return 0; }
