@@ -49,6 +49,21 @@ struct SJITContextLayout
 
 const SJITContextLayout &JIT_GetContextLayout() noexcept;
 
+// Offsets of the members of other engine objects that the generated code accesses directly
+struct SJITObjectLayout
+{
+	int objectType;           // asCObjectType* in asCScriptObject
+	int virtualFunctionTable; // asCScriptFunction** in asCObjectType
+	int interfaces;           // asCObjectType** in asCObjectType
+	int interfaceCount;       // asUINT in asCObjectType
+	int interfaceVFTOffsets;  // asUINT* in asCObjectType, where the methods of each interface start in the virtual function table
+	int funcType;             // asEFuncType in asCScriptFunction
+	int scriptData;           // ScriptFunctionData* in asCScriptFunction
+	int jitFunction;          // asJITFunction in ScriptFunctionData
+};
+
+const SJITObjectLayout &JIT_GetObjectLayout() noexcept;
+
 // Kinds of calls handled by JIT_CallScript
 enum EJITCallKind
 {

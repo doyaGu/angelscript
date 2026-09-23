@@ -38,6 +38,22 @@ const SJITContextLayout &JIT_GetContextLayout() noexcept
 	return layout;
 }
 #undef JIT_CTX_OFFSET
+
+const SJITObjectLayout &JIT_GetObjectLayout() noexcept
+{
+	static const SJITObjectLayout layout =
+	{
+		int(offsetof(asCScriptObject, objType)),
+		int(offsetof(asCObjectType, virtualFunctionTable) + offsetof(asCArray<asCScriptFunction*>, array)),
+		int(offsetof(asCObjectType, interfaces) + offsetof(asCArray<asCObjectType*>, array)),
+		int(offsetof(asCObjectType, interfaces) + offsetof(asCArray<asCObjectType*>, length)),
+		int(offsetof(asCObjectType, interfaceVFTOffsets) + offsetof(asCArray<asUINT>, array)),
+		int(offsetof(asCScriptFunction, funcType)),
+		int(offsetof(asCScriptFunction, scriptData)),
+		int(offsetof(asCScriptFunction::ScriptFunctionData, jitFunction))
+	};
+	return layout;
+}
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif

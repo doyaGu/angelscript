@@ -95,6 +95,8 @@ protected:
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	bool EmitObjectOp(asUINT idx);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
+	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
+	void EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 
 	// Architecture specific code (jit_codegen_arch.cpp)

@@ -15,9 +15,8 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Inline calls of virtual and interface methods, function pointers, and constructors.
-//    Only asBC_CALL pushes the call state inline, the others go through JIT_CallScript
-//    (jit_codegen_call.cpp, EmitScriptCall).
+//  - Inline calls of script constructors, imported functions, and delegates. They still
+//    go through JIT_CallScript (jit_codegen_call.cpp, EmitScriptCall).
 //  - Lazy or tiered compilation through asIJITCompilerV2 (CompileFunction below). The
 //    engine currently compiles every function when the module is built. A class cannot
 //    implement both interface versions, so this would be a second compiler class.
