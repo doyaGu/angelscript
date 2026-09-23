@@ -108,10 +108,15 @@ int main(int argc, char **argv)
 
 	// --jit runs the tests with the JIT compiler (requires building with AS_TEST_JIT).
 	// --direct makes it call registered functions directly even on platforms where
-	// C++ exceptions can't pass through the generated code, and --no-direct never does
+	// C++ exceptions can't pass through the generated code, and --no-direct never does.
+	// --log <name> writes the code generated for the functions whose name contains
+	// <name> to stderr
 	bool useJit = false, directCalls = false, noDirectCalls = false;
+	const char *logFilter = 0;
 	for( int a = 1; a < argc; a++ )
 	{
+		if( strcmp(argv[a], "--log") == 0 && a + 1 < argc )
+			logFilter = argv[++a];
 		if( strcmp(argv[a], "--jit") == 0 )
 			useJit = true;
 		if( strcmp(argv[a], "--direct") == 0 )
@@ -123,6 +128,7 @@ int main(int argc, char **argv)
 	g_useJit = useJit;
 	g_jitDirectCalls = directCalls;
 	g_jitNoDirectCalls = noDirectCalls;
+	g_jitLogFilter = logFilter;
 #else
 	if( useJit )
 		printf("The test wasn't built with the JIT compiler\n");

@@ -106,6 +106,7 @@ double GetSystemTimer()
 bool g_useJit = false;
 bool g_jitDirectCalls = false;
 bool g_jitNoDirectCalls = false;
+const char *g_jitLogFilter = 0;
 static CJITCompiler *g_jit = 0;
 
 asIScriptEngine *CreateEngineForTest(asDWORD version)
@@ -118,7 +119,10 @@ asIScriptEngine *CreateEngineForTest(asDWORD version)
 			asDWORD flags = 0;
 			if( g_jitDirectCalls )   flags |= CJITCompiler::JIT_DIRECT_SYSTEM_CALLS;
 			if( g_jitNoDirectCalls ) flags |= CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS;
+			if( g_jitLogFilter )     flags |= CJITCompiler::JIT_LOG;
 			g_jit = new CJITCompiler(flags);
+			if( g_jitLogFilter )
+				g_jit->SetLogFile(stderr, g_jitLogFilter);
 		}
 		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
 		engine->SetJITCompiler(g_jit);

@@ -10,6 +10,7 @@ void             ReleaseJitCompiler();
 extern bool      g_useJit;
 extern bool      g_jitDirectCalls;
 extern bool      g_jitNoDirectCalls;
+extern const char *g_jitLogFilter;
 #define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
 #endif
 #include <stdio.h>
