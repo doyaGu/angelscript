@@ -524,6 +524,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	if( stackPos - firstArg != sysFunc->paramSize )
 		return false;
+	if( args.size() + (hasObj ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
+		return false;
 	int popSize = stackPos;
 
 	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC

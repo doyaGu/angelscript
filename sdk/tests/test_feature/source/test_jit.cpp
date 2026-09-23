@@ -573,6 +573,22 @@ namespace DirectCalls
 		int  &At(int i)          { return arr[i]; }
 		CVec  Scale(float s)     { CVec r = { v * s, v * s, v * s }; return r; }
 		CPair Pair(int b)        { CPair r = { v, b }; return r; }
+		CVal  Five(int a, double b, float c, int d) { CVal r; r.v = int(a + b + c + d) + v; return r; }
+		double Four(float a, float b, double c, float d) { return a + b + c + d + v; }
+		int   Many(int i1, int i2, int i3, int i4, float f1, float f2, float f3, float f4,
+		           int i5, int i6, int i7, int i8, float f5, float f6, float f7, float f8)
+		{
+			return i1 + i2 * 2 + i3 * 3 + i4 * 4 + int(f1 + f2 * 2 + f3 * 3 + f4 * 4) +
+			       i5 * 5 + i6 * 6 + i7 * 7 + i8 * 8 + int(f5 * 5 + f6 * 6 + f7 * 7 + f8 * 8) + v;
+		}
+		// More arguments than AsmJit supports with the object pointer, so called through the engine
+		int   Sum32(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11,
+		            int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22,
+		            int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31)
+		{
+			return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16 +
+			       a17 + a18 + a19 + a20 + a21 + a22 + a23 + a24 + a25 + a26 + a27 + a28 + a29 + a30 + a31 * 2 + v;
+		}
 	};
 	static CObj g_obj;
 
@@ -689,6 +705,13 @@ namespace DirectCalls
 		r = engine->RegisterObjectProperty("val", "int v", asOFFSET(CVal, v)); assert( r >= 0 );
 		r = engine->RegisterGlobalFunction("val MakeVal(int)", asFUNCTION(MakeVal), asCALL_CDECL); assert( r >= 0 );
 		r = engine->RegisterGlobalFunction("val MakeValThrow(int)", asFUNCTION(MakeValThrow), asCALL_CDECL); assert( r >= 0 );
+
+		// Arguments passed on the machine stack, after the object pointer and the hidden return pointer
+		r = engine->RegisterObjectMethod("CObj", "val Five(int, double, float, int)", asMETHOD(CObj, Five), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "double Four(float, float, double, float)", asMETHOD(CObj, Four), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int Many(int, int, int, int, float, float, float, float, int, int, int, int, float, float, float, float)", asMETHOD(CObj, Many), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "int Sum32(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, "
+		                                         "int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int)", asMETHOD(CObj, Sum32), asCALL_THISCALL); assert( r >= 0 );
 	}
 }
 
@@ -756,7 +779,15 @@ static bool TestDirectCalls()
 		"}                                                             \n"
 		"int valThrow() { val v = MakeValThrow(3); return v.v; }       \n"
 		"int atRaise() { return obj.AtRaise(1); }                      \n"
-		"int nullAt() { CRef @r; return r.At(0); }                     \n";
+		"int nullAt() { CRef @r; return r.At(0); }                     \n"
+		"int stackArgs()                                               \n"
+		"{                                                             \n"
+		"  obj.v = 5;                                                  \n"
+		"  assert( obj.Four(1, 2, 3, 4) == 15 );                       \n"
+		"  val f = obj.Five(1, 2.5, 3.5f, 4); assert( f.v == 16 );     \n"
+		"  assert( obj.Sum32(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3) == 42 ); \n"
+		"  return obj.Many(1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4); \n"
+		"}                                                             \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("test", script);
@@ -852,6 +883,18 @@ static bool TestDirectCalls()
 	ctx->Prepare(mod->GetFunctionByDecl("int nullAt()"));
 	r = ctx->Execute();
 	if( r != asEXECUTION_EXCEPTION || std::string(ctx->GetExceptionString()) != "Null pointer access" || ctx->GetExceptionLineNumber() != 49 )
+		TEST_FAILED;
+
+	ctx->Prepare(mod->GetFunctionByDecl("int stackArgs()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 205 )
+	{
+		if( r == asEXECUTION_EXCEPTION )
+			PRINTF("stackArgs: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
+		TEST_FAILED;
+	}
+	ctx->Unprepare();
+	if( DirectCalls::g_live != 0 )
 		TEST_FAILED;
 
 	ctx->Release();
