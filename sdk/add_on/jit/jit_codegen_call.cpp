@@ -17,6 +17,14 @@ using namespace asmjit::ujit;
 
 static const int PTR_BYTES = AS_PTR_SIZE * 4;
 
+// The compilers for 32bit x86 that pass the object pointer of class methods in ECX
+// also let the called function pop the arguments, i.e. use the thiscall convention.
+// These are MSVC and MinGW since version 4.7. The others pass it on the stack like
+// the first argument of a cdecl function
+#if defined(AS_X86) && !defined(THISCALL_PASS_OBJECT_POINTER_ON_THE_STACK)
+#define JIT_X86_THISCALL
+#endif
+
 // Where the hidden pointer for a value returned in memory is passed, when the ABI
 // allows the direct calls to pass it like an ordinary argument. It is the first
 // argument, except that MSVC passes it after the object pointer of class methods.
@@ -445,9 +453,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		break;
 	case ICC_THISCALL:
 		hasObj = true;
-#if defined(_MSC_VER)
-		// Only MSVC (and compatible compilers) has a distinct thiscall convention on 32bit x86
-		if( !Is64Bit() ) conv = CallConvId::kThisCall;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
 #endif
 		break;
 	case ICC_CDECL_OBJFIRST:
@@ -812,8 +819,8 @@ bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 	switch( sysFunc->callConv )
 	{
 	case ICC_THISCALL:
-#if defined(_MSC_VER)
-		if( !Is64Bit() ) beh.conv = CallConvId::kThisCall;
+#if defined(JIT_X86_THISCALL)
+		beh.conv = CallConvId::kThisCall;
 #endif
 		break;
 #if defined(GNU_STYLE_VIRTUAL_METHOD) && (defined(AS_X86) || defined(AS_X64_GCC) || defined(AS_X64_MINGW))
@@ -821,6 +828,9 @@ bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 		// With the Itanium C++ ABI the method pointer of a virtual method holds its
 		// offset in the virtual function table plus 1
 		beh.isVirtual = true;
+#if defined(JIT_X86_THISCALL)
+		beh.conv = CallConvId::kThisCall;
+#endif
 		break;
 #endif
 	case ICC_CDECL_OBJFIRST:
