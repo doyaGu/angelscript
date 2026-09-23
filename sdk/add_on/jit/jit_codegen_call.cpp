@@ -286,6 +286,9 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		break;
 
 	case asBC_Thiscall1:
+		// The instruction is a CALLSYS for methods taking an int and returning a reference
+		if( m_options.directSystemCalls && EmitDirectSystemCall(idx, asBC_INTARG(bc)) )
+			break;
 		{
 			// A null object is an exception raised by the VM
 			Gp obj = m_uc.new_gp_ptr();
