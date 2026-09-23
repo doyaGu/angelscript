@@ -3095,8 +3095,10 @@ bool Test()
 		if( r != asINIT_GLOBAL_VARS_FAILED )
 			TEST_FAILED;
 
-		if( bout.buffer != "test (12, 3) : Error   : Failed to initialize global variable 'Dummy'\n"
-		                   "test (10, 0) : Info    : Exception 'Unbound function called' in 'T::T()'\n" )
+		// With JIT instructions the position after the call is still on the same line
+		if( bout.buffer != std::string("test (12, 3) : Error   : Failed to initialize global variable 'Dummy'\n") +
+		                   (TestWithJitInstructions() ? "test (9, 0) : Info    : Exception 'Unbound function called' in 'T::T()'\n"
+		                                              : "test (10, 0) : Info    : Exception 'Unbound function called' in 'T::T()'\n") )
 		{
 			PRINTF("%s", bout.buffer.c_str());
 			TEST_FAILED;

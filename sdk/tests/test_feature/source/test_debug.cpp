@@ -357,11 +357,11 @@ bool Test()
 		const char* sectionName;
 		const asDWORD* bytecode;
 		r = func->GetLineEntry(0, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if( row != 2 || col != 3 || strcmp(sectionName, "test") != 0 || bytecode - func->GetByteCode() != 0) TEST_FAILED;
+		if( row != 2 || col != 3 || strcmp(sectionName, "test") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 0)) TEST_FAILED;
 		r = func->GetLineEntry(1, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if (row != 3 || col != 3 || strcmp(sectionName, "test") != 0 || bytecode - func->GetByteCode() != 6) TEST_FAILED;
+		if (row != 3 || col != 3 || strcmp(sectionName, "test") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 6)) TEST_FAILED;
 		r = func->GetLineEntry(2, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if (row != 4 || col != 2 || strcmp(sectionName, "test") != 0 || bytecode - func->GetByteCode() != 10) TEST_FAILED;
+		if (row != 4 || col != 2 || strcmp(sectionName, "test") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 10)) TEST_FAILED;
 
 		asITypeInfo *b = mod->GetTypeInfoByDecl("B");
 		asEBehaviours beh;
@@ -369,11 +369,11 @@ bool Test()
 		if (beh != asBEHAVE_CONSTRUCT) TEST_FAILED;
 
 		r = func->GetLineEntry(0, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if (row != 2 || col != 7 || strcmp(sectionName, "mixin") != 0 || bytecode - func->GetByteCode() != 0) TEST_FAILED;
+		if (row != 2 || col != 7 || strcmp(sectionName, "mixin") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 0)) TEST_FAILED;
 		r = func->GetLineEntry(1, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if (row != 6 || col != 9 || strcmp(sectionName, "test") != 0 || bytecode - func->GetByteCode() != 5) TEST_FAILED;
+		if (row != 6 || col != 9 || strcmp(sectionName, "test") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 5)) TEST_FAILED;
 		r = func->GetLineEntry(2, &row, &col, &sectionName, &bytecode); if (r < 0) TEST_FAILED;
-		if (row != 6 || col != 18 || strcmp(sectionName, "test") != 0 || bytecode - func->GetByteCode() != 11) TEST_FAILED;
+		if (row != 6 || col != 18 || strcmp(sectionName, "test") != 0 || BYTECODE_OFFSET_DIFFERS(bytecode - func->GetByteCode(), 11)) TEST_FAILED;
 
 		engine->ShutDownAndRelease();
 
@@ -453,6 +453,7 @@ void main(bool is_cgame)
 		doSkipTemporary = true;
 		engine->ShutDownAndRelease();
 
+#ifndef AS_TEST_JIT // the line callbacks differ with the JIT instructions in the bytecode
 		if (printBuffer !=
 			R"out(test:void main(bool):13,5
 test:void main(bool):14,5
@@ -474,6 +475,7 @@ test:void main(bool):29,2
 			TEST_FAILED;
 			PRINTF("%s", printBuffer.c_str());
 		}
+#endif
 
 		if (bout.buffer != "")
 		{
@@ -647,6 +649,7 @@ test:void main(bool):29,2
 		doSkipTemporary = true;
 		engine->ShutDownAndRelease();
 
+#ifndef AS_TEST_JIT // the line callbacks differ with the JIT instructions in the bytecode
 		if (printBuffer !=
 			"Module1:void main():3,7\n"
 			"Module1:void main():3,7\n"
@@ -675,6 +678,7 @@ test:void main(bool):29,2
 			TEST_FAILED;
 			PRINTF("%s", printBuffer.c_str());
 		}
+#endif
 	}
 
 	// Test IsVarInScope and GetAddresOfVar for registered value types when variable slot is reused in multiple scopes
@@ -734,6 +738,7 @@ test:void main(bool):29,2
 		ctx->Release();
 		engine->ShutDownAndRelease();
 
+#ifndef AS_TEST_JIT // the line callbacks differ with the JIT instructions in the bytecode
 		if (printBuffer !=
 			"Module1:void main():3,3\n"
 			" (null):array<array<any>@>@ $fact():0,0\n"
@@ -794,6 +799,7 @@ test:void main(bool):29,2
 			TEST_FAILED;
 			PRINTF("%s", printBuffer.c_str());
 		}
+#endif
 	}
 
 	// Test IsVarInScope and GetAddresOfVar for registered value types
@@ -849,6 +855,7 @@ test:void main(bool):29,2
 		ctx->Release();
 		engine->ShutDownAndRelease();
 
+#ifndef AS_TEST_JIT // the line callbacks differ with the JIT instructions in the bytecode
 		if( printBuffer != 
 			"Module1:void main():3,3\n"
 			" (null):array<array<any>@>@ $fact():0,0\n"
@@ -892,6 +899,7 @@ test:void main(bool):29,2
 			TEST_FAILED;
 			PRINTF("%s", printBuffer.c_str());
 		}
+#endif
 	}
 
 	// GetTypeByDeclaration shouldn't write message on incorrect declaration

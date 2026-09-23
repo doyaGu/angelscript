@@ -381,7 +381,8 @@ bool Test()
 		if( r != asEXECUTION_FINISHED )
 			TEST_FAILED;
 
-		if( debug.output !=	"type t = <null>\n" // The variable is declared, but not yet initialized
+		// With JIT instructions the variables are only in scope after the first JitEntry
+		std::string expected = std::string(TestWithJitInstructions() ? "" : "type t = <null>\n") + // The variable is declared, but not yet initialized
 							"ExecuteString:1; void ExecuteString()\n"
 							"string glob = (len=4) \"test\"\n"
 							"script:0; type@ type()\n"
@@ -395,8 +396,8 @@ bool Test()
 							"const string& d = (len=1) \"d\"\n"
 							"type@ e = {XXXXXXXX}\n"
 							"type& f = {XXXXXXXX}\n"
-							"type@& g = {XXXXXXXX}\n"
-							"int[] arr = <null>\n" // The variable is declared, but not yet initialized
+							"type@& g = {XXXXXXXX}\n" +
+							std::string(TestWithJitInstructions() ? "" : "int[] arr = <null>\n") + // The variable is declared, but not yet initialized
 							"string glob = (len=4) \"test\"\n"
 							"script:3; void func(int, const int&in, string, const string&in, type@, type&inout, type@&in)\n"
 							"{unnamed}:0; int[]@ $list(int&in) { repeat int }\n"
@@ -411,7 +412,8 @@ bool Test()
 							"string glob = (len=4) \"test\"\n"
 							"script:4; void func(int, const int&in, string, const string&in, type@, type&inout, type@&in)\n"
 							"type t = {XXXXXXXX}\n"
-							"ExecuteString:2; void ExecuteString()\n" )
+							"ExecuteString:2; void ExecuteString()\n";
+		if( debug.output != expected )
 		{
 			PRINTF("%s", debug.output.c_str());
 			TEST_FAILED;

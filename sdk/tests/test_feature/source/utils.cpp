@@ -334,23 +334,76 @@ asDWORD ComputeCRC32(const asBYTE *buf, asUINT length)
 	return ~crc;
 }
 
+#ifdef AS_TEST_JIT
+// With JIT instructions enabled the bytecode also contains the JitEntry
+// instructions, and the SUSPEND for the first line isn't removed. These are
+// removed from both the actual and the expected bytecode before comparing
+static void NormalizeByteCode(std::vector<asBYTE> &ops)
+{
+	std::vector<asBYTE> out;
+	bool leading = true;
+	for( size_t n = 0; n < ops.size(); n++ )
+	{
+		asBYTE c = ops[n];
+		if( c == asBC_JitEntry || (c == asBC_SUSPEND && leading) )
+			continue;
+		leading = false;
+		out.push_back(c);
+	}
+	ops = out;
+}
+#endif
+
 bool ValidateByteCode(asIScriptFunction *func, asBYTE *expect)
 {
 	if (func == 0) return false;
 	asUINT len;
 	asDWORD *bc = func->GetByteCode(&len);
-	for( asUINT n = 0, i = 0; n < len; )
+
+	std::vector<asBYTE> actual, expected;
+	for( asUINT n = 0; n < len; )
 	{
 		asBYTE c = *(asBYTE*)(&bc[n]);
-		if( c != expect[i] )
-			return false;
+		actual.push_back(c);
 		n += asBCTypeSize[asBCInfo[c].type];
-
-		if( expect[i++] == asBC_RET && n < len )
-			return false;
+	}
+	for( asUINT i = 0; ; i++ )
+	{
+		expected.push_back(expect[i]);
+		if( expect[i] == asBC_RET )
+			break;
 	}
 
-	return true;
+#ifdef AS_TEST_JIT
+	NormalizeByteCode(actual);
+	NormalizeByteCode(expected);
+#endif
+
+	return actual == expected;
+}
+
+bool CompareMessages(const std::string &buffer, const char *expected)
+{
+#ifdef AS_TEST_JIT
+	// Remove the digits following 'stream: ' from both
+	std::string a = buffer, b = expected;
+	for( int pass = 0; pass < 2; pass++ )
+	{
+		std::string &str = pass == 0 ? a : b;
+		size_t pos = 0;
+		while( (pos = str.find("stream: ", pos)) != std::string::npos )
+		{
+			pos += 8;
+			size_t end = pos;
+			while( end < str.size() && str[end] >= '0' && str[end] <= '9' )
+				end++;
+			str.erase(pos, end - pos);
+		}
+	}
+	return a == b;
+#else
+	return buffer == expected;
+#endif
 }
 
 string GetCurrentDir()
@@ -413,6 +466,16 @@ string GetCurrentDir()
 		str[pos] = '/';
 
 	return str;
+}
+
+bool TestWithJitInstructions()
+{
+#ifdef AS_TEST_JIT
+	const char *disable = getenv("AS_JIT_DISABLE");
+	return !(disable && atoi(disable) == 2);
+#else
+	return false;
+#endif
 }
 
 #ifdef AS_TEST_JIT

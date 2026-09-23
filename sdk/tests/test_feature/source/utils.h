@@ -68,6 +68,10 @@ void             ReleaseJitCompiler();
 #define asCreateScriptEngine(...) CreateEngineWithJit(__VA_ARGS__)
 #endif
 
+// Returns true if the engines are created with the JIT instructions in the
+// bytecode, which changes the layout of the bytecode and thus some expectations
+bool TestWithJitInstructions();
+
 #if defined(__GNUC__) && !(defined(__ppc__) || defined(__PPC__))
 #define STDCALL __attribute__((stdcall))
 #elif defined(_MSC_VER) || defined(__BORLANDC__)
@@ -95,6 +99,11 @@ class CBufferedOutStream
 public:
 	void Callback(asSMessageInfo *msg) 
 	{ 
+#ifdef AS_TEST_JIT
+		// Bytecode saved without JIT instructions gives this warning when loaded with the JIT attached
+		if( msg->type == asMSGTYPE_WARNING && strstr(msg->message, "compiled without JIT entry points") )
+			return;
+#endif
 		const char *msgType = 0;
 		if( msg->type == 0 ) msgType = "Error  ";
 		if( msg->type == 1 ) msgType = "Warning";
@@ -228,6 +237,11 @@ int  GetNumAllocs();
 int  GetAllocedMem();
 void PrintLocationCounters();
 
+// Compares the message buffer with the expected text. When testing the JIT the
+// number of bytes reported by LoadByteCode failures is ignored as the saved
+// bytecode includes the JIT instructions
+bool CompareMessages(const std::string &buffer, const char *expected);
+
 // Returns true if bytecode is as expected
 bool ValidateByteCode(asIScriptFunction *func, asBYTE *expectBC);
 
@@ -257,6 +271,16 @@ inline bool CompareFloat(float a,float b)
 }
 
 asDWORD ComputeCRC32(const asBYTE *buf, asUINT length);
+
+// The checksums of saved bytecode are only valid when compiled without JIT
+// instructions, so the comparisons are disabled when testing the JIT
+#ifdef AS_TEST_JIT
+#define BYTECODE_CRC_DIFFERS(crc, expected) (false)
+#define BYTECODE_OFFSET_DIFFERS(offset, expected) (false)
+#else
+#define BYTECODE_CRC_DIFFERS(crc, expected) ((crc) != (expected))
+#define BYTECODE_OFFSET_DIFFERS(offset, expected) ((offset) != (expected))
+#endif
 
 #define UNUSED_VAR(x) ((void)(x))
 
