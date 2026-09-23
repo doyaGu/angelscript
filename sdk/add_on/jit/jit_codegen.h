@@ -86,6 +86,9 @@ protected:
 	void EmitEntryStubs();
 	void EmitBailStubs();
 	void EmitDirectEntry();
+	void AssignHomeRegs();
+	void CopyLiveArgs();
+	bool IsLiveThrough(const asmjit::Reg &reg) const;
 
 	// Emits one instruction. Returns false if the instruction isn't supported
 	bool EmitInstruction(asUINT idx);
@@ -120,6 +123,7 @@ protected:
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 
 	// Architecture specific code (jit_codegen_arch.cpp)
+	void SetHomeRegHints();
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 

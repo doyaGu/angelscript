@@ -11,6 +11,26 @@ using namespace asmjit::ujit;
 
 #if defined(ASMJIT_UJIT_X86)
 
+// Callee-saved home registers for the registers used all through the function,
+// see AssignHomeRegs. The allocator uses the scratch registers ECX|RCX and EDI|R15
+// for jumps, so they are avoided. Otherwise these are only hints, so if a register
+// isn't available, e.g. EBP|RBP as frame pointer, the allocator picks another one
+void CJITCodeGen::SetHomeRegHints()
+{
+	x86::Compiler *cc = m_uc.cc;
+	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(x86::Gp::kIdBx);
+	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(x86::Gp::kIdBp);
+	if( Is64Bit() )
+	{
+		// RSI and RDI aren't callee-saved on System V
+		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdR14);
+		if( m_depth.is_valid() )
+			cc->virt_reg_by_reg(m_depth)->set_home_id_hint(x86::Gp::kIdR12);
+	}
+	else
+		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdSi);
+}
+
 // dst = a / b or a % b for signed integers. The operands must have been
 // checked for division by zero and overflow already
 void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod)
@@ -90,6 +110,18 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 
 #elif defined(ASMJIT_UJIT_AARCH64)
 
+// Callee-saved home registers, see the x86 version. The allocator's scratch
+// registers are X27 and X28
+void CJITCodeGen::SetHomeRegHints()
+{
+	a64::Compiler *cc = m_uc.cc;
+	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(19);
+	cc->virt_reg_by_reg(m_fp)->set_home_id_hint(20);
+	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
+	if( m_depth.is_valid() )
+		cc->virt_reg_by_reg(m_depth)->set_home_id_hint(22);
+}
+
 void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -127,6 +159,10 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 }
 
 #else
+
+void CJITCodeGen::SetHomeRegHints()
+{
+}
 
 void CJITCodeGen::EmitSignedDiv(const Gp &, const Gp &, const Gp &, bool)
 {

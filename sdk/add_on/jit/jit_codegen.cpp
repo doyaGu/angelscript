@@ -71,7 +71,8 @@ bool CJITCodeGen::Generate()
 		m_uc.mov(m_depth, Imm(m_options.maxNativeCallDepth));
 	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
 
-	// The body in bytecode order
+	// The body in bytecode order. Notes the instructions that call functions
+	std::vector<bool> calls(instrs.size());
 	asUINT idx = 0;
 	while( idx < instrs.size() && !m_failed )
 	{
@@ -91,6 +92,7 @@ bool CJITCodeGen::Generate()
 		if( m_uc.cc->has_logger() )
 			m_uc.commentf("%d %s", instr.pos, asBCInfo[instr.op].name);
 #endif
+		BaseNode *start = m_uc.cc->cursor();
 		if( instr.flags & JIT_INSTR_BAIL )
 		{
 			Bail(idx);
@@ -126,6 +128,11 @@ bool CJITCodeGen::Generate()
 
 			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
 				SyncAllSlots(instrs[idx + consumed].pos);
+
+			// Suspend requests and returns to the VM only call functions on rare paths
+			if( instr.op != asBC_SUSPEND && instr.op != asBC_RET )
+				for( BaseNode *node = start->next(); node && !calls[idx]; node = node->next() )
+					calls[idx] = node->is_invoke();
 		}
 
 		m_instrCount += consumed;
@@ -134,6 +141,15 @@ bool CJITCodeGen::Generate()
 
 	if( m_failed )
 		return false;
+
+	// Callee-saved registers must be saved and restored on each entry, which only
+	// pays off for the registers used all through the function if calls are made
+	// repeatedly, i.e. in loops. Short functions that are called often, like
+	// recursive ones, get slower otherwise
+	bool callsInLoop = false;
+	for( asUINT n = 0; n < instrs.size() && !callsInLoop; n++ )
+		for( int t = instrs[n].target; t >= 0 && asUINT(t) <= n && !callsInLoop; t++ )
+			callsInLoop = calls[t];
 
 	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
 	Leave();
@@ -150,7 +166,82 @@ bool CJITCodeGen::Generate()
 	m_uc.ret(one);
 
 	m_uc.end_func();
+	if( callsInLoop )
+		AssignHomeRegs();
 	return true;
+}
+
+// The registers pointer, the frame and stack pointers, and the depth are used all
+// through the function. AsmJit prefers the registers that calls clobber though, so
+// they would be saved and reloaded around every call. This gives them callee-saved
+// home registers instead. The allocator assigns the arguments to the registers they
+// are passed in, so they are copied to the registers used by the function first
+void CJITCodeGen::AssignHomeRegs()
+{
+	BaseNode *cursor = m_uc.cc->set_cursor(m_func);
+	Gp regsArg = m_uc.new_gp_ptr("regsArg");
+	m_func->set_arg(0, regsArg);
+	m_uc.mov(m_regs, regsArg);
+	if( m_depth.is_valid() )
+	{
+		Gp depthArg = m_uc.new_gp32("depthArg");
+		m_func->set_arg(2, depthArg);
+		m_uc.mov(m_depth, depthArg);
+	}
+	m_uc.cc->set_cursor(cursor);
+
+	SetHomeRegHints();
+	CopyLiveArgs();
+}
+
+// AsmJit moves a register passed to a call into the argument register, so if it is
+// still needed afterwards it is saved and reloaded around the call, even if it has
+// a callee-saved home register. So the calls get copies of the registers that live
+// through the function, i.e. the VM registers and the cached variables
+void CJITCodeGen::CopyLiveArgs()
+{
+	BaseNode *cursor = m_uc.cc->cursor();
+	for( BaseNode *node = m_func; node; node = node->next() )
+	{
+		if( !node->is_invoke() )
+			continue;
+
+		InvokeNode *call = node->as<InvokeNode>();
+		for( uint32_t a = 0; a < call->arg_count(); a++ )
+		{
+			for( uint32_t v = 0; v < Globals::kMaxValuePack; v++ )
+			{
+				Operand &op = call->arg(a, v);
+				if( !op.is_reg() || !IsLiveThrough(op.as<Reg>()) )
+					continue;
+
+				m_uc.cc->set_cursor(call->prev());
+				if( op.is_gp() )
+				{
+					Gp copy = m_uc.cc->new_similar_reg(op.as<Gp>());
+					m_uc.mov(copy, op.as<Gp>());
+					op = copy;
+				}
+				else
+				{
+					Vec copy = m_uc.cc->new_similar_reg(op.as<Vec>());
+					m_uc.v_mov(copy, op.as<Vec>());
+					op = copy;
+				}
+			}
+		}
+	}
+	m_uc.cc->set_cursor(cursor);
+}
+
+bool CJITCodeGen::IsLiveThrough(const Reg &reg) const
+{
+	if( reg.id() == m_regs.id() || (m_depth.is_valid() && reg.id() == m_depth.id()) )
+		return true;
+	for( size_t n = 0; n < m_cached.size(); n++ )
+		if( reg.id() == (m_cached[n].gp.is_valid() ? m_cached[n].gp.id() : m_cached[n].vec.id()) )
+			return true;
+	return false;
 }
 
 bool CJITCodeGen::EmitInstruction(asUINT idx)
