@@ -148,6 +148,52 @@ int JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noex
 	return CheckStatusAfterSystemCall(regs, ctx);
 }
 
+int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
+{
+	asCContext *ctx = GetContext(regs);
+	JITFunction func = reinterpret_cast<JITFunction>(ctx->m_currentFunction->scriptData->jitFunction);
+#ifdef AS_NO_EXCEPTIONS
+	return func(regs, jitArg | JIT_GUARDED_ENTRY, 0);
+#else
+	try
+	{
+		return func(regs, jitArg | JIT_GUARDED_ENTRY, 0);
+	}
+	catch(...)
+	{
+		asCScriptFunction *descr = ctx->m_callingSystemFunction;
+		if( descr == 0 )
+			throw;
+
+		// Convert the exception to a script exception like CallSystemFunction
+		ctx->HandleAppException();
+		ctx->m_callingSystemFunction = 0;
+
+		// The VM registers describe the asBC_CALLSYS or asBC_Thiscall1 instruction in
+		// the innermost function, with the arguments on the stack. The function hasn't
+		// returned anything, so there is nothing to clean up
+		asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+		int popSize = sysFunc->paramSize;
+		if( sysFunc->callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
+			popSize += AS_PTR_SIZE;
+		if( descr->DoesReturnOnStack() )
+			popSize += AS_PTR_SIZE;
+
+		bool onStack = descr->DoesReturnOnStack();
+		if( asEBCInstr(*(asBYTE*)regs->programPointer) == asBC_CALLSYS )
+			regs->objectType = onStack ? 0 : descr->returnType.GetTypeInfo();
+		if( !onStack && (descr->returnType.IsObject() || descr->returnType.IsFuncdef()) && !descr->returnType.IsReference() )
+			regs->objectRegister = 0;
+		else if( !onStack )
+			regs->valueRegister = 0;
+
+		regs->stackPointer += popSize;
+		regs->programPointer += 2;
+		return 1;
+	}
+#endif
+}
+
 // Calls a script function. The program pointer must be after the call instruction
 // and the arguments on the stack. If the function has been compiled and the depth
 // allows it the function is executed natively, otherwise the VM is left to do it.
@@ -192,7 +238,7 @@ static asCScriptFunction *ResolveVirtual(asSVMRegisters *regs, asCContext *ctx, 
 	return 0;
 }
 
-int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth) noexcept
+int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth)
 {
 	asCContext *ctx = GetContext(regs);
 	asCScriptEngine *engine = ctx->m_engine;

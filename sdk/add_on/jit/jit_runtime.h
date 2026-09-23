@@ -88,10 +88,23 @@ int    JIT_Thiscall1(asSVMRegisters *regs, int funcId) noexcept;
 // type returned by value, or null
 int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noexcept;
 
+// Set in jitArg when the generated code is entered through JIT_GuardedEntry
+const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
+
+// Catches the C++ exceptions thrown by registered functions that the generated
+// code calls directly, and turns them into script exceptions like CallSystemFunction
+// does. When entered by the VM without JIT_GUARDED_ENTRY in jitArg the generated
+// code returns the result of this function, which enters it again with the bit set.
+// The exception unwinds all the functions executed natively since, so the VM
+// registers are updated here the way the VM does after the call. Exceptions thrown
+// outside of the direct calls are passed on
+int    JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg);
+
 // Script function calls. Performs the call and, if possible, executes the called
 // function natively before returning. depth is the depth of the calling function,
-// see JITFunction. Returns 0 if the call completed
-int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth) noexcept;
+// see JITFunction. Returns 0 if the call completed. Not noexcept, as the C++
+// exceptions caught by JIT_GuardedEntry may pass through it
+int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth);
 
 // Sets up the frame of a function entered natively with jitArg 0, when the stack
 // block is too small or regs->doProcessSuspend is set. The stack pointer in the VM

@@ -16,6 +16,8 @@ static const int PTR_BYTES = AS_PTR_SIZE * 4;
 CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCodeGenOptions &options) :
 	m_uc(uc), m_code(code), m_options(options)
 {
+	m_func       = 0;
+	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
 	m_instrCount = 0;
 	m_bailCount  = 0;
@@ -47,6 +49,21 @@ bool CJITCodeGen::Generate()
 
 	Label direct = m_uc.new_label();
 	m_uc.j(direct, test_z(m_arg));
+
+	if( m_guarded )
+	{
+		// Enter again through the helper that catches the C++ exceptions of the direct calls
+		Label guarded = m_uc.new_label();
+		m_uc.j(guarded, test_nz(m_arg, Imm(JIT_GUARDED_ENTRY)));
+		InvokeNode *call = Invoke((const void*)JIT_GuardedEntry, FuncSignature::build<int, asSVMRegisters*, asPWORD>());
+		Gp r = m_uc.new_gp32();
+		call->set_arg(0, m_regs);
+		call->set_arg(1, m_arg);
+		call->set_ret(0, r);
+		m_uc.ret(r);
+		m_uc.bind(guarded);
+		m_uc.and_(m_arg, m_arg, Imm(~JIT_GUARDED_ENTRY));
+	}
 
 	// Entered by the VM, which has set up the frame. Jump to the requested entry point
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
@@ -371,6 +388,7 @@ bool CJITCodeGen::EmitInstruction(asUINT idx)
 void CJITCodeGen::EmitPrologue()
 {
 	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>());
+	m_func = func;
 
 	m_regs = m_uc.new_gp_ptr("regs");
 	m_arg  = m_uc.new_gp_ptr("jitArg");
@@ -389,6 +407,12 @@ void CJITCodeGen::EmitPrologue()
 			break;
 		}
 	}
+
+	// A C++ exception can only leave the functions that call registered functions
+	// directly, or script functions natively
+	m_guarded = false;
+	for( asUINT n = 0; n < instrs.size() && m_options.guardedEntry && !m_guarded; n++ )
+		m_guarded = m_depth.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1;
 
 	// The frame pointer is set up by the entry paths
 	m_fp = m_uc.new_gp_ptr("fp");

@@ -2,12 +2,14 @@
 #include "jit_bytecode.h"
 #include "jit_codegen.h"
 #include "jit_runtime.h"
+#include "jit_unwind.h"
 
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
 #include "as_scriptfunction.h"
 
 #include <asmjit/ujit.h>
+#include <map>
 #include <mutex>
 #include <string>
 #include <string.h>
@@ -62,6 +64,7 @@ struct CJITCompiler::SImpl
 	asUINT                 maxNativeCallDepth;
 	bool                   bailOps[asBC_MAXBYTECODE];
 	SJITStatistics         stats;
+	std::map<asJITFunction, void*> unwindInfo; // registered unwind information by function
 };
 
 CJITCompiler::CJITCompiler(asDWORD flags)
@@ -81,6 +84,8 @@ CJITCompiler::CJITCompiler(asDWORD flags)
 CJITCompiler::~CJITCompiler()
 {
 	// Releasing the runtime frees all code that is still held
+	for( std::map<asJITFunction, void*>::iterator it = m_impl->unwindInfo.begin(); it != m_impl->unwindInfo.end(); ++it )
+		CJITUnwindInfo::Unregister(it->second);
 	delete m_impl;
 }
 
@@ -304,6 +309,11 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = true;
+	options.guardedEntry = false;
+#else
+	// The C++ exceptions thrown by the functions called directly can only be caught
+	// if they can pass through the generated code
+	options.guardedEntry = options.directSystemCalls && CJITUnwindInfo::IsSupported();
 #endif
 
 	CJITCodeGen gen(uc, code, options);
@@ -313,11 +323,28 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	if( ok )
 		ok = (errorHandler.error == Error::kOk);
 
+	// The functions that C++ exceptions can pass through need unwind information
+	CJITUnwindInfo unwind;
+	if( ok && gen.IsGuarded() && !unwind.Prepare(cc, gen.GetFuncNode()) )
+	{
+		ok = false;
+		errorHandler.message = "no unwind information for the prologue";
+	}
+
 	asJITFunction jitFunc = 0;
 	if( ok )
 	{
 		std::lock_guard<std::mutex> lock(m_impl->mutex);
 		ok = (m_impl->runtime.add(&jitFunc, &holder) == Error::kOk);
+		void *unwindHandle = 0;
+		if( ok && gen.IsGuarded() && !unwind.Register((void*)jitFunc, &unwindHandle) )
+		{
+			m_impl->runtime.release(jitFunc);
+			ok = false;
+			errorHandler.message = "the unwind information could not be registered";
+		}
+		if( unwindHandle )
+			m_impl->unwindInfo[jitFunc] = unwindHandle;
 		if( ok )
 		{
 			m_impl->stats.functionsCompiled++;
@@ -356,6 +383,12 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 		return;
 
 	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	std::map<asJITFunction, void*>::iterator it = m_impl->unwindInfo.find(func);
+	if( it != m_impl->unwindInfo.end() )
+	{
+		CJITUnwindInfo::Unregister(it->second);
+		m_impl->unwindInfo.erase(it);
+	}
 	m_impl->runtime.release(func);
 	m_impl->stats.functionsReleased++;
 }

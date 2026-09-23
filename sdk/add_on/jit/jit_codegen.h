@@ -21,6 +21,7 @@ struct SJITCodeGenOptions
 	bool noScriptCalls;     // return to the VM for script-to-script calls
 	bool syncEveryInstr;    // update the VM registers after every instruction
 	bool directSystemCalls; // call registered functions with their native calling convention
+	bool guardedEntry;      // enter through JIT_GuardedEntry when called by the VM
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 };
 
@@ -42,6 +43,13 @@ public:
 
 	// Emits the whole function. Returns false if something couldn't be compiled
 	bool   Generate();
+
+	// The function node, whose frame is final once the compiler has been finalized
+	asmjit::FuncNode *GetFuncNode() const { return m_func; }
+
+	// True if the function is entered through JIT_GuardedEntry, in which case C++
+	// exceptions may pass through it and it needs unwind information
+	bool   IsGuarded() const { return m_guarded; }
 
 	asUINT GetInstructionCount() const { return m_instrCount; }
 	asUINT GetBailCount() const        { return m_bailCount; }
@@ -177,6 +185,7 @@ protected:
 	asmjit::ujit::UniCompiler &m_uc;
 	const CJITByteCode        &m_code;
 	SJITCodeGenOptions         m_options;
+	asmjit::FuncNode          *m_func;
 
 	Gp  m_regs;     // asSVMRegisters*
 	Gp  m_arg;      // jitArg
@@ -186,6 +195,7 @@ protected:
 	Gp  m_vr;       // value register (64bit hosts only)
 	Gp  m_bailPC;   // program pointer to set when bailing
 	bool m_vrInReg;
+	bool m_guarded;
 
 	std::vector<SCachedSlot>   m_cached;
 	std::map<int, asUINT>      m_cachedIndex;
