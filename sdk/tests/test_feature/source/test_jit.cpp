@@ -899,6 +899,14 @@ static bool TestDirectCalls()
 
 	ctx->Release();
 	engine->ShutDownAndRelease();
+
+	// A function that fails to compile would silently be left to the VM
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("direct calls: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
 	return fail;
 }
 

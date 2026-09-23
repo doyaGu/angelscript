@@ -730,11 +730,14 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 		break;
 	case RET_F64:
+		if( Is64Bit() )
 		{
 			Gp bits = m_uc.new_gp64();
 			m_uc.s_mov_u64(bits, retVec);
 			StoreVR64(bits);
 		}
+		else
+			m_uc.v_storeu64_f64(VRMem(), retVec);
 		break;
 	case RET_PTR:
 		StoreVRPtr(retGp);
