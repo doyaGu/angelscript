@@ -1,0 +1,1646 @@
+#include "jit_codegen.h"
+#include "jit_runtime.h"
+
+#include <stddef.h>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+BEGIN_AS_NAMESPACE
+
+using namespace asmjit;
+using namespace asmjit::ujit;
+
+static const int PTR_BYTES = AS_PTR_SIZE * 4;
+
+CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCodeGenOptions &options) :
+	m_uc(uc), m_code(code), m_options(options)
+{
+	m_vrInReg    = uc.is_64bit();
+	m_instrCount = 0;
+	m_bailCount  = 0;
+	m_failed     = false;
+}
+
+//------------------------------------------------------------------------
+// Driver
+
+bool CJITCodeGen::Generate()
+{
+	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	const std::vector<asUINT> &entries = m_code.GetEntries();
+
+	EmitPrologue();
+
+	// Labels for the basic blocks and entry points
+	m_labels.resize(instrs.size());
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].flags & JIT_INSTR_BLOCK_START )
+			m_labels[n] = m_uc.new_label();
+
+	m_entryLabels.resize(entries.size());
+	for( asUINT n = 0; n < entries.size(); n++ )
+		m_entryLabels[n] = m_uc.new_label();
+
+	m_bailCommon = m_uc.new_label();
+
+	// Jump to the requested entry point
+	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
+
+	// The body in bytecode order
+	asUINT idx = 0;
+	while( idx < instrs.size() && !m_failed )
+	{
+		// No code for instructions that can never be reached
+		if( instrs[idx].flags & JIT_INSTR_DEAD )
+		{
+			idx++;
+			continue;
+		}
+
+		if( instrs[idx].flags & JIT_INSTR_BLOCK_START )
+			m_uc.bind(m_labels[idx]);
+
+		asUINT consumed = 1;
+		const SJITInstr &instr = instrs[idx];
+#ifndef ASMJIT_NO_LOGGING
+		if( m_uc.cc->has_logger() )
+			m_uc.commentf("%d %s", instr.pos, asBCInfo[instr.op].name);
+#endif
+		if( instr.flags & JIT_INSTR_BAIL )
+		{
+			Bail(idx);
+			m_bailCount++;
+		}
+		else
+		{
+			bool ok;
+			switch( instr.op )
+			{
+			case asBC_CMPd:
+			case asBC_CMPu:
+			case asBC_CMPf:
+			case asBC_CMPi:
+			case asBC_CMPIi:
+			case asBC_CMPIf:
+			case asBC_CMPIu:
+			case asBC_CMPi64:
+			case asBC_CMPu64:
+			case asBC_CmpPtr:
+				ok = EmitCompare(idx, consumed);
+				break;
+			default:
+				ok = EmitInstruction(idx);
+				break;
+			}
+
+			if( !ok )
+			{
+				m_failed = true;
+				break;
+			}
+
+			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
+				SyncAllSlots(instrs[idx + consumed].pos);
+		}
+
+		m_instrCount += consumed;
+		idx += consumed;
+	}
+
+	if( m_failed )
+		return false;
+
+	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
+	m_uc.ret();
+
+	EmitEntryStubs();
+	EmitBailStubs();
+
+	m_uc.end_func();
+	return true;
+}
+
+bool CJITCodeGen::EmitInstruction(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+
+	switch( instr.op )
+	{
+	// Stack
+	case asBC_PopPtr:
+	case asBC_PshGPtr:
+	case asBC_PshC4:
+	case asBC_PshV4:
+	case asBC_PSF:
+	case asBC_SwapPtr:
+	case asBC_PshG4:
+	case asBC_PshC8:
+	case asBC_PshVPtr:
+	case asBC_PopRPtr:
+	case asBC_PshRPtr:
+	case asBC_GETOBJ:
+	case asBC_GETOBJREF:
+	case asBC_GETREF:
+	case asBC_PshNull:
+	case asBC_OBJTYPE:
+	case asBC_TYPEID:
+	case asBC_PGA:
+	case asBC_VAR:
+	case asBC_FuncPtr:
+	case asBC_PshV8:
+	case asBC_PshListElmnt:
+		return EmitStackOp(instr);
+
+	// Loads and stores
+	case asBC_LdGRdR4:
+	case asBC_COPY:
+	case asBC_RDSPtr:
+	case asBC_ClrVPtr:
+	case asBC_SetV4:
+	case asBC_SetV8:
+	case asBC_ADDSi:
+	case asBC_CpyVtoV4:
+	case asBC_CpyVtoV8:
+	case asBC_CpyVtoR4:
+	case asBC_CpyVtoR8:
+	case asBC_CpyVtoG4:
+	case asBC_CpyRtoV4:
+	case asBC_CpyRtoV8:
+	case asBC_CpyGtoV4:
+	case asBC_WRTV1:
+	case asBC_WRTV2:
+	case asBC_WRTV4:
+	case asBC_WRTV8:
+	case asBC_RDR1:
+	case asBC_RDR2:
+	case asBC_RDR4:
+	case asBC_RDR8:
+	case asBC_LDG:
+	case asBC_LDV:
+	case asBC_SetG4:
+	case asBC_ChkRefS:
+	case asBC_ChkNullV:
+	case asBC_SetV1:
+	case asBC_SetV2:
+	case asBC_ChkNullS:
+	case asBC_CHKREF:
+	case asBC_LoadThisR:
+	case asBC_LoadRObjR:
+	case asBC_LoadVObjR:
+	case asBC_AllocMem:
+	case asBC_SetListSize:
+	case asBC_SetListType:
+		return EmitLoadStore(instr);
+
+	// Branches
+	case asBC_JMP:
+	case asBC_JZ:
+	case asBC_JNZ:
+	case asBC_JS:
+	case asBC_JNS:
+	case asBC_JP:
+	case asBC_JNP:
+	case asBC_JMPP:
+	case asBC_JLowZ:
+	case asBC_JLowNZ:
+		return EmitBranch(idx);
+
+	// Tests on the value register
+	case asBC_TZ:
+	case asBC_TNZ:
+	case asBC_TS:
+	case asBC_TNS:
+	case asBC_TP:
+	case asBC_TNP:
+	case asBC_NOT:
+	case asBC_ClrHi:
+	case asBC_NEGi:
+	case asBC_IncVi:
+	case asBC_DecVi:
+	case asBC_BNOT:
+	case asBC_BAND:
+	case asBC_BOR:
+	case asBC_BXOR:
+	case asBC_BSLL:
+	case asBC_BSRL:
+	case asBC_BSRA:
+	case asBC_ADDi:
+	case asBC_SUBi:
+	case asBC_MULi:
+	case asBC_DIVi:
+	case asBC_MODi:
+	case asBC_DIVu:
+	case asBC_MODu:
+	case asBC_ADDIi:
+	case asBC_SUBIi:
+	case asBC_MULIi:
+	case asBC_POWi:
+	case asBC_POWu:
+	case asBC_NEGi64:
+	case asBC_BNOT64:
+	case asBC_ADDi64:
+	case asBC_SUBi64:
+	case asBC_MULi64:
+	case asBC_DIVi64:
+	case asBC_MODi64:
+	case asBC_DIVu64:
+	case asBC_MODu64:
+	case asBC_BAND64:
+	case asBC_BOR64:
+	case asBC_BXOR64:
+	case asBC_BSLL64:
+	case asBC_BSRL64:
+	case asBC_BSRA64:
+	case asBC_POWi64:
+	case asBC_POWu64:
+		return EmitIntMath(idx);
+
+	case asBC_NEGf:
+	case asBC_NEGd:
+	case asBC_ADDf:
+	case asBC_SUBf:
+	case asBC_MULf:
+	case asBC_DIVf:
+	case asBC_MODf:
+	case asBC_ADDd:
+	case asBC_SUBd:
+	case asBC_MULd:
+	case asBC_DIVd:
+	case asBC_MODd:
+	case asBC_ADDIf:
+	case asBC_SUBIf:
+	case asBC_MULIf:
+	case asBC_POWf:
+	case asBC_POWd:
+	case asBC_POWdi:
+		return EmitFloatMath(idx);
+
+	case asBC_INCi16:
+	case asBC_INCi8:
+	case asBC_DECi16:
+	case asBC_DECi8:
+	case asBC_INCi:
+	case asBC_DECi:
+	case asBC_INCf:
+	case asBC_DECf:
+	case asBC_INCd:
+	case asBC_DECd:
+	case asBC_INCi64:
+	case asBC_DECi64:
+		return EmitIncDec(instr);
+
+	case asBC_iTOf:
+	case asBC_fTOi:
+	case asBC_uTOf:
+	case asBC_fTOu:
+	case asBC_sbTOi:
+	case asBC_swTOi:
+	case asBC_ubTOi:
+	case asBC_uwTOi:
+	case asBC_dTOi:
+	case asBC_dTOu:
+	case asBC_dTOf:
+	case asBC_iTOd:
+	case asBC_uTOd:
+	case asBC_fTOd:
+	case asBC_iTOb:
+	case asBC_iTOw:
+	case asBC_i64TOi:
+	case asBC_uTOi64:
+	case asBC_iTOi64:
+	case asBC_fTOi64:
+	case asBC_dTOi64:
+	case asBC_fTOu64:
+	case asBC_dTOu64:
+	case asBC_i64TOf:
+	case asBC_u64TOf:
+	case asBC_i64TOd:
+	case asBC_u64TOd:
+		return EmitConversion(idx);
+
+	// Calls
+	case asBC_CALL:
+	case asBC_RET:
+	case asBC_CALLSYS:
+	case asBC_CALLBND:
+	case asBC_CALLINTF:
+	case asBC_CallPtr:
+	case asBC_Thiscall1:
+		return EmitCall(idx);
+
+	// Objects
+	case asBC_ALLOC:
+	case asBC_FREE:
+	case asBC_LOADOBJ:
+	case asBC_STOREOBJ:
+	case asBC_REFCPY:
+	case asBC_RefCpyV:
+	case asBC_Cast:
+		return EmitObjectOp(idx);
+
+	// Misc
+	case asBC_SUSPEND:
+	case asBC_JitEntry:
+	case asBC_STR:
+		return EmitMisc(idx);
+
+	default:
+		return false;
+	}
+}
+
+//------------------------------------------------------------------------
+// Prologue, dispatch, and stubs
+
+void CJITCodeGen::EmitPrologue()
+{
+	FuncNode *func = m_uc.add_func(FuncSignature::build<void, asSVMRegisters*, asPWORD>());
+
+	m_regs = m_uc.new_gp_ptr("regs");
+	m_arg  = m_uc.new_gp_ptr("jitArg");
+	func->set_arg(0, m_regs);
+	func->set_arg(1, m_arg);
+
+	m_fp = m_uc.new_gp_ptr("fp");
+	m_sp = m_uc.new_gp_ptr("sp");
+	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
+	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+
+	if( m_vrInReg )
+		m_vr = m_uc.new_gp64("vr");
+
+	m_bailPC = m_uc.new_gp_ptr("bailPC");
+
+	// Registers for the cached variables. They are loaded by the entry stubs
+	const std::vector<SJITSlot> &slots = m_code.GetSlots();
+	for( asUINT n = 0; n < slots.size(); n++ )
+	{
+		if( slots[n].cacheKind == JIT_SLOT_NONE )
+			continue;
+
+		char name[32];
+		snprintf(name, sizeof(name), "var%d", slots[n].offset);
+
+		SCachedSlot cached;
+		cached.offset = slots[n].offset;
+		cached.kind   = slots[n].cacheKind;
+		switch( cached.kind )
+		{
+		case JIT_SLOT_I32: cached.gp  = m_uc.new_gp32(name); break;
+		case JIT_SLOT_I64: cached.gp  = m_uc.new_gp64(name); break;
+		case JIT_SLOT_F32: cached.vec = m_uc.new_vec128_f32x1(name); break;
+		case JIT_SLOT_F64: cached.vec = m_uc.new_vec128_f64x1(name); break;
+		}
+		m_cachedIndex[cached.offset] = asUINT(m_cached.size());
+		m_cached.push_back(cached);
+	}
+}
+
+// Binary search on the 1-based entry index in jitArg
+void CJITCodeGen::EmitEntryDispatch(asUINT lo, asUINT hi)
+{
+	if( lo == hi )
+	{
+		m_uc.j(m_entryLabels[lo]);
+		return;
+	}
+
+	asUINT mid = (lo + hi) / 2;
+	Label upper = m_uc.new_label();
+	m_uc.j(upper, ucmp_gt(m_arg, Imm(int(mid + 1))));
+	EmitEntryDispatch(lo, mid);
+	m_uc.bind(upper);
+	EmitEntryDispatch(mid + 1, hi);
+}
+
+void CJITCodeGen::EmitEntryStubs()
+{
+	const std::vector<asUINT> &entries = m_code.GetEntries();
+	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	const std::vector<SJITBlock> &blocks = m_code.GetBlocks();
+	for( asUINT n = 0; n < entries.size(); n++ )
+	{
+		m_uc.bind(m_entryLabels[n]);
+
+		// Only what may be read before being written needs to be loaded
+		const SJITBlock &block = blocks[instrs[entries[n]].block];
+		if( m_options.syncEveryInstr )
+		{
+			ReloadVR();
+			ReloadCachedSlots();
+		}
+		else
+		{
+			if( block.vrLiveIn )
+				ReloadVR();
+			ReloadSlots(m_code.GetLiveInMask(entries[n]));
+		}
+		m_uc.j(InstrLabel(entries[n]));
+	}
+}
+
+void CJITCodeGen::EmitBailStubs()
+{
+	for( asUINT n = 0; n < m_bails.size(); n++ )
+	{
+		m_uc.bind(m_bails[n].first);
+		Bail(m_bails[n].second);
+	}
+
+	// Common tail: the cached variables have been stored by the bail sites,
+	// so only the VM registers and the program pointer remain
+	m_uc.bind(m_bailCommon);
+	SyncStack();
+	SyncVR();
+	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
+	m_uc.ret();
+}
+
+//------------------------------------------------------------------------
+// Memory operands
+
+Mem CJITCodeGen::RegsField(size_t offset)
+{
+	return mem_ptr(m_regs, int32_t(offset));
+}
+
+Mem CJITCodeGen::VRMem()
+{
+	return RegsField(offsetof(asSVMRegisters, valueRegister));
+}
+
+Mem CJITCodeGen::Var(int offset, int byteDisp)
+{
+	return mem_ptr(m_fp, -offset * 4 + byteDisp);
+}
+
+Mem CJITCodeGen::Stack(int dwordOffset)
+{
+	return mem_ptr(m_sp, dwordOffset * 4);
+}
+
+Mem CJITCodeGen::Global(asPWORD address, Gp &tmp)
+{
+	tmp = PtrConst(address);
+	return mem_ptr(tmp);
+}
+
+Gp CJITCodeGen::PtrConst(asPWORD value)
+{
+	Gp t = m_uc.new_gp_ptr();
+	m_uc.mov(t, Imm(int64_t(value)));
+	return t;
+}
+
+InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	m_uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
+	return node;
+}
+
+//------------------------------------------------------------------------
+// Variable access
+
+CJITCodeGen::SCachedSlot *CJITCodeGen::FindCached(int offset)
+{
+	std::map<int, asUINT>::iterator it = m_cachedIndex.find(offset);
+	if( it == m_cachedIndex.end() )
+		return 0;
+	return &m_cached[it->second];
+}
+
+Gp CJITCodeGen::Load32(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I32 )
+		return c->gp;
+
+	Gp t = m_uc.new_gp32();
+	if( c && c->kind == JIT_SLOT_F32 )
+		m_uc.s_mov_u32(t, c->vec);
+	else
+		m_uc.load_u32(t, Var(offset));
+	return t;
+}
+
+Gp CJITCodeGen::Load64(int offset)
+{
+	assert( Is64Bit() );
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I64 )
+		return c->gp;
+
+	Gp t = m_uc.new_gp64();
+	if( c && c->kind == JIT_SLOT_F64 )
+		m_uc.s_mov_u64(t, c->vec);
+	else
+		m_uc.load_u64(t, Var(offset));
+	return t;
+}
+
+Gp CJITCodeGen::LoadPtr(int offset)
+{
+	// Pointers are never cached
+	Gp t = m_uc.new_gp_ptr();
+	m_uc.load(t, Var(offset));
+	return t;
+}
+
+Vec CJITCodeGen::LoadF32(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F32 )
+		return c->vec;
+
+	Vec v = m_uc.new_vec128_f32x1();
+	if( c && c->kind == JIT_SLOT_I32 )
+		m_uc.s_mov_u32(v, c->gp);
+	else
+		m_uc.v_loadu32_f32(v, Var(offset));
+	return v;
+}
+
+Vec CJITCodeGen::LoadF64(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F64 )
+		return c->vec;
+
+	Vec v = m_uc.new_vec128_f64x1();
+	if( c && c->kind == JIT_SLOT_I64 )
+		m_uc.s_mov_u64(v, c->gp);
+	else
+		m_uc.v_loadu64_f64(v, Var(offset));
+	return v;
+}
+
+Gp CJITCodeGen::Dst32(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I32 )
+		return c->gp;
+	return m_uc.new_gp32();
+}
+
+Gp CJITCodeGen::Dst64(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I64 )
+		return c->gp;
+	return m_uc.new_gp64();
+}
+
+Vec CJITCodeGen::DstF32(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F32 )
+		return c->vec;
+	return m_uc.new_vec128_f32x1();
+}
+
+Vec CJITCodeGen::DstF64(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F64 )
+		return c->vec;
+	return m_uc.new_vec128_f64x1();
+}
+
+void CJITCodeGen::Commit32(int offset, const Gp &value)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I32 )
+	{
+		if( c->gp.id() != value.id() )
+			m_uc.mov(c->gp, value);
+	}
+	else if( c && c->kind == JIT_SLOT_F32 )
+		m_uc.s_mov_u32(c->vec, value);
+	else
+		m_uc.store_u32(Var(offset), value);
+}
+
+void CJITCodeGen::Commit64(int offset, const Gp &value)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_I64 )
+	{
+		if( c->gp.id() != value.id() )
+			m_uc.mov(c->gp, value);
+	}
+	else if( c && c->kind == JIT_SLOT_F64 )
+		m_uc.s_mov_u64(c->vec, value);
+	else
+		m_uc.store_u64(Var(offset), value);
+}
+
+void CJITCodeGen::CommitF32(int offset, const Vec &value)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F32 )
+	{
+		if( c->vec.id() != value.id() )
+			m_uc.v_mov(c->vec, value);
+	}
+	else if( c && c->kind == JIT_SLOT_I32 )
+		m_uc.s_mov_u32(c->gp, value);
+	else
+		m_uc.v_storeu32_f32(Var(offset), value);
+}
+
+void CJITCodeGen::CommitF64(int offset, const Vec &value)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_F64 )
+	{
+		if( c->vec.id() != value.id() )
+			m_uc.v_mov(c->vec, value);
+	}
+	else if( c && c->kind == JIT_SLOT_I64 )
+		m_uc.s_mov_u64(c->gp, value);
+	else
+		m_uc.v_storeu64_f64(Var(offset), value);
+}
+
+void CJITCodeGen::StorePtr(int offset, const Gp &value)
+{
+	m_uc.store(Var(offset), value);
+}
+
+void CJITCodeGen::Copy32(const Mem &dst, const Mem &src)
+{
+	Gp t = m_uc.new_gp32();
+	m_uc.load_u32(t, src);
+	m_uc.store_u32(dst, t);
+}
+
+void CJITCodeGen::Copy64(const Mem &dst, const Mem &src)
+{
+	if( Is64Bit() )
+	{
+		Gp t = m_uc.new_gp64();
+		m_uc.load_u64(t, src);
+		m_uc.store_u64(dst, t);
+	}
+	else
+	{
+		Vec v = m_uc.new_vec128_f64x1();
+		m_uc.v_loadu64_f64(v, src);
+		m_uc.v_storeu64_f64(dst, v);
+	}
+}
+
+//------------------------------------------------------------------------
+// Value register
+
+void CJITCodeGen::LoadVR32(const Gp &dst)
+{
+	if( m_vrInReg )
+		m_uc.mov(dst, m_vr.r32());
+	else
+		m_uc.load_u32(dst, VRMem());
+}
+
+void CJITCodeGen::LoadVR64(const Gp &dst)
+{
+	assert( Is64Bit() );
+	if( m_vrInReg )
+		m_uc.mov(dst, m_vr);
+	else
+		m_uc.load_u64(dst, VRMem());
+}
+
+void CJITCodeGen::LoadVRPtr(const Gp &dst)
+{
+	if( m_vrInReg )
+		m_uc.mov(dst, m_vr);
+	else
+		m_uc.load(dst, VRMem());
+}
+
+void CJITCodeGen::StoreVR32(const Gp &src)
+{
+	// A 32bit write zero extends the register. The VM leaves the upper bits
+	// unchanged, but the compiler never reads more than it wrote
+	if( m_vrInReg )
+		m_uc.mov(m_vr.r32(), src);
+	else
+		m_uc.store_u32(VRMem(), src);
+}
+
+void CJITCodeGen::StoreVR64(const Gp &src)
+{
+	assert( Is64Bit() );
+	if( m_vrInReg )
+		m_uc.mov(m_vr, src);
+	else
+		m_uc.store_u64(VRMem(), src);
+}
+
+void CJITCodeGen::StoreVRPtr(const Gp &src)
+{
+	if( m_vrInReg )
+		m_uc.mov(m_vr, src);
+	else
+		m_uc.store(VRMem(), src);
+}
+
+void CJITCodeGen::StoreVRImm32(int value)
+{
+	if( m_vrInReg )
+		m_uc.mov(m_vr.r32(), Imm(value));
+	else
+	{
+		Gp t = m_uc.new_gp32();
+		m_uc.mov(t, Imm(value));
+		m_uc.store_u32(VRMem(), t);
+	}
+}
+
+void CJITCodeGen::SyncVR()
+{
+	if( m_vrInReg )
+		m_uc.store_u64(VRMem(), m_vr);
+}
+
+void CJITCodeGen::ReloadVR()
+{
+	if( m_vrInReg )
+		m_uc.load_u64(m_vr, VRMem());
+}
+
+//------------------------------------------------------------------------
+// Synchronization with the VM
+
+void CJITCodeGen::SetPC(asUINT pos)
+{
+	Gp t = PtrConst(asPWORD(m_code.GetByteCode() + pos));
+	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
+}
+
+void CJITCodeGen::SyncStack()
+{
+	m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), m_sp);
+}
+
+void CJITCodeGen::ReloadStack()
+{
+	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+}
+
+void CJITCodeGen::StoreCachedSlots()
+{
+	for( asUINT n = 0; n < m_cached.size(); n++ )
+		StoreCachedSlot(m_cached[n].offset);
+}
+
+// Reloading all cached slots is only valid right after they have all been
+// stored, otherwise registers holding newer values would be overwritten
+void CJITCodeGen::ReloadCachedSlots()
+{
+	for( asUINT n = 0; n < m_cached.size(); n++ )
+		ReloadCachedSlot(m_cached[n].offset);
+}
+
+void CJITCodeGen::StoreCachedSlot(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c == 0 )
+		return;
+	switch( c->kind )
+	{
+	case JIT_SLOT_I32: m_uc.store_u32(Var(c->offset), c->gp); break;
+	case JIT_SLOT_I64: m_uc.store_u64(Var(c->offset), c->gp); break;
+	case JIT_SLOT_F32: m_uc.v_storeu32_f32(Var(c->offset), c->vec); break;
+	case JIT_SLOT_F64: m_uc.v_storeu64_f64(Var(c->offset), c->vec); break;
+	}
+}
+
+void CJITCodeGen::ReloadCachedSlot(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c == 0 )
+		return;
+	switch( c->kind )
+	{
+	case JIT_SLOT_I32: m_uc.load_u32(c->gp, Var(c->offset)); break;
+	case JIT_SLOT_I64: m_uc.load_u64(c->gp, Var(c->offset)); break;
+	case JIT_SLOT_F32: m_uc.v_loadu32_f32(c->vec, Var(c->offset)); break;
+	case JIT_SLOT_F64: m_uc.v_loadu64_f64(c->vec, Var(c->offset)); break;
+	}
+}
+
+// Stores the cached slots in the mask, see CJITByteCode::GetDirtyMask
+void CJITCodeGen::StoreDirtySlots(asUINT mask)
+{
+	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
+	{
+		int bit = m_code.GetCacheBit(m_cached[n].offset);
+		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
+			StoreCachedSlot(m_cached[n].offset);
+	}
+}
+
+// Loads the cached slots in the mask from memory
+void CJITCodeGen::ReloadSlots(asUINT mask)
+{
+	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
+	{
+		int bit = m_code.GetCacheBit(m_cached[n].offset);
+		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
+			ReloadCachedSlot(m_cached[n].offset);
+	}
+}
+
+void CJITCodeGen::SyncAll(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	SyncStack();
+	SyncVR();
+	SetPC(instr.pos);
+}
+
+// Calls always clobber the value register, so it doesn't have to be written back
+void CJITCodeGen::SyncForCall(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	SyncStack();
+	SetPC(instr.pos);
+}
+
+void CJITCodeGen::SyncAllSlots(asUINT pos)
+{
+	StoreCachedSlots();
+	SyncStack();
+	SyncVR();
+	SetPC(pos);
+}
+
+void CJITCodeGen::ReloadAll()
+{
+	ReloadStack();
+	ReloadVR();
+	ReloadCachedSlots();
+}
+
+//------------------------------------------------------------------------
+// Control flow helpers
+
+Label CJITCodeGen::InstrLabel(asUINT idx)
+{
+	assert( m_labels[idx].is_valid() );
+	return m_labels[idx];
+}
+
+// Returns to the VM which will re-execute the instruction
+void CJITCodeGen::Bail(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
+	m_uc.j(m_bailCommon);
+}
+
+// Label to a cold stub that bails out at the instruction
+Label CJITCodeGen::BailLabel(asUINT idx)
+{
+	Label l = m_uc.new_label();
+	m_bails.push_back(std::pair<Label, asUINT>(l, idx));
+	return l;
+}
+
+// Returns to the VM after a helper has updated the VM registers
+void CJITCodeGen::Leave()
+{
+	m_uc.ret();
+}
+
+// Returns to the VM if the helper result is non-zero
+void CJITCodeGen::EmitLeaveIf(const Gp &result)
+{
+	Label cont = m_uc.new_label();
+	m_uc.j(cont, test_z(result));
+	Leave();
+	m_uc.bind(cont);
+}
+
+//------------------------------------------------------------------------
+// Stack operations
+
+bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
+{
+	const asDWORD *bc = instr.bc;
+	int a0 = asBC_SWORDARG0(bc);
+
+	switch( instr.op )
+	{
+	case asBC_PopPtr:
+		m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+		break;
+
+	case asBC_PshGPtr:
+		{
+			Gp g;
+			Mem src = Global(asBC_PTRARG(bc), g);
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.load(t, src);
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_PshC4:
+	case asBC_TYPEID:
+		{
+			Gp t = m_uc.new_gp32();
+			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc))));
+			m_uc.sub(m_sp, m_sp, Imm(4));
+			m_uc.store_u32(Stack(0), t);
+		}
+		break;
+
+	case asBC_PshV4:
+		{
+			Gp t = Load32(a0);
+			m_uc.sub(m_sp, m_sp, Imm(4));
+			m_uc.store_u32(Stack(0), t);
+		}
+		break;
+
+	case asBC_PshV8:
+		{
+			m_uc.sub(m_sp, m_sp, Imm(8));
+			SCachedSlot *c = FindCached(a0);
+			if( c && c->kind == JIT_SLOT_I64 )
+				m_uc.store_u64(Stack(0), c->gp);
+			else if( c && c->kind == JIT_SLOT_F64 )
+				m_uc.v_storeu64_f64(Stack(0), c->vec);
+			else
+				Copy64(Stack(0), Var(a0));
+		}
+		break;
+
+	case asBC_PSF:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.lea(t, Var(a0));
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_SwapPtr:
+		{
+			Gp p0 = m_uc.new_gp_ptr();
+			Gp p1 = m_uc.new_gp_ptr();
+			m_uc.load(p0, Stack(0));
+			m_uc.load(p1, Stack(AS_PTR_SIZE));
+			m_uc.store(Stack(0), p1);
+			m_uc.store(Stack(AS_PTR_SIZE), p0);
+		}
+		break;
+
+	case asBC_PshG4:
+		{
+			Gp g;
+			Mem src = Global(asBC_PTRARG(bc), g);
+			Gp t = m_uc.new_gp32();
+			m_uc.load_u32(t, src);
+			m_uc.sub(m_sp, m_sp, Imm(4));
+			m_uc.store_u32(Stack(0), t);
+		}
+		break;
+
+	case asBC_PshC8:
+		{
+			m_uc.sub(m_sp, m_sp, Imm(8));
+			asQWORD value = asBC_QWORDARG(bc);
+			if( Is64Bit() )
+			{
+				Gp t = m_uc.new_gp64();
+				m_uc.mov(t, Imm(int64_t(value)));
+				m_uc.store_u64(Stack(0), t);
+			}
+			else
+			{
+				Gp t = m_uc.new_gp32();
+				m_uc.mov(t, Imm(int(asDWORD(value))));
+				m_uc.store_u32(Stack(0), t);
+				m_uc.mov(t, Imm(int(asDWORD(value >> 32))));
+				m_uc.store_u32(Stack(1), t);
+			}
+		}
+		break;
+
+	case asBC_PshVPtr:
+		{
+			Gp t = LoadPtr(a0);
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_PopRPtr:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.load(t, Stack(0));
+			StoreVRPtr(t);
+			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+		}
+		break;
+
+	case asBC_PshRPtr:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			LoadVRPtr(t);
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_GETOBJ:
+		{
+			// Move the object from the variable to the stack
+			int w = asBC_WORDARG0(bc);
+			Gp off = m_uc.new_gp_ptr();
+			m_uc.load(off, Stack(w));
+			m_uc.shl(off, off, Imm(2));
+			Gp v = m_uc.new_gp_ptr();
+			m_uc.sub(v, m_fp, off);
+			Gp obj = m_uc.new_gp_ptr();
+			m_uc.load(obj, mem_ptr(v));
+			m_uc.store(Stack(w), obj);
+			m_uc.store_zero_reg(mem_ptr(v));
+		}
+		break;
+
+	case asBC_GETOBJREF:
+		{
+			int w = asBC_WORDARG0(bc);
+			Gp off = m_uc.new_gp_ptr();
+			m_uc.load(off, Stack(w));
+			m_uc.shl(off, off, Imm(2));
+			Gp v = m_uc.new_gp_ptr();
+			m_uc.sub(v, m_fp, off);
+			Gp obj = m_uc.new_gp_ptr();
+			m_uc.load(obj, mem_ptr(v));
+			m_uc.store(Stack(w), obj);
+		}
+		break;
+
+	case asBC_GETREF:
+		{
+			int w = asBC_WORDARG0(bc);
+			Gp off = m_uc.new_gp_ptr();
+			m_uc.load(off, Stack(w));
+			m_uc.shl(off, off, Imm(2));
+			Gp v = m_uc.new_gp_ptr();
+			m_uc.sub(v, m_fp, off);
+			m_uc.store(Stack(w), v);
+		}
+		break;
+
+	case asBC_PshNull:
+		m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+		m_uc.store_zero_reg(Stack(0));
+		break;
+
+	case asBC_OBJTYPE:
+	case asBC_PGA:
+	case asBC_FuncPtr:
+		{
+			Gp t = PtrConst(asBC_PTRARG(bc));
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_VAR:
+		{
+			Gp t = PtrConst(asPWORD(asPWORD(a0)));
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), t);
+		}
+		break;
+
+	case asBC_PshListElmnt:
+		{
+			Gp var = LoadPtr(a0);
+			m_uc.add(var, var, Imm(int(asBC_DWORDARG(bc))));
+			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), var);
+		}
+		break;
+
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+//------------------------------------------------------------------------
+// Loads and stores
+
+bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
+{
+	const asDWORD *bc = instr.bc;
+	int a0 = asBC_SWORDARG0(bc);
+	int a1 = asBC_SWORDARG1(bc);
+	int idx = m_code.FindInstruction(instr.pos);
+
+	switch( instr.op )
+	{
+	case asBC_LdGRdR4:
+		{
+			Gp p = PtrConst(asBC_PTRARG(bc));
+			StoreVRPtr(p);
+			Gp t = m_uc.new_gp32();
+			m_uc.load_u32(t, mem_ptr(p));
+			Commit32(a0, t);
+		}
+		break;
+
+	case asBC_COPY:
+		{
+			// Both pointers are verified before the stack is changed so the VM
+			// can re-execute the instruction to raise the exception
+			Gp d = m_uc.new_gp_ptr();
+			Gp s = m_uc.new_gp_ptr();
+			m_uc.load(d, Stack(0));
+			m_uc.load(s, Stack(AS_PTR_SIZE));
+			Label bail = BailLabel(idx);
+			m_uc.j(bail, test_z(d));
+			m_uc.j(bail, test_z(s));
+
+			asUINT bytes = asBC_WORDARG0(bc) * 4;
+			if( bytes <= 64 )
+			{
+				asUINT off = 0;
+				while( bytes - off >= 8 && Is64Bit() )
+				{
+					Copy64(mem_ptr(d, off), mem_ptr(s, off));
+					off += 8;
+				}
+				while( off < bytes )
+				{
+					Copy32(mem_ptr(d, off), mem_ptr(s, off));
+					off += 4;
+				}
+			}
+			else
+			{
+				InvokeNode *call = Invoke((const void*)JIT_MemCpy, FuncSignature::build<void, void*, const void*, asUINT>());
+				call->set_arg(0, d);
+				call->set_arg(1, s);
+				call->set_arg(2, Imm(int(bytes)));
+			}
+
+			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			m_uc.store(Stack(0), d);
+		}
+		break;
+
+	case asBC_RDSPtr:
+		{
+			Gp a = m_uc.new_gp_ptr();
+			m_uc.load(a, Stack(0));
+			m_uc.j(BailLabel(idx), test_z(a));
+			m_uc.load(a, mem_ptr(a));
+			m_uc.store(Stack(0), a);
+		}
+		break;
+
+	case asBC_ClrVPtr:
+		m_uc.store_zero_reg(Var(a0));
+		break;
+
+	case asBC_SetV1:
+	case asBC_SetV2:
+	case asBC_SetV4:
+		{
+			SCachedSlot *c = FindCached(a0);
+			if( c && c->kind == JIT_SLOT_I32 )
+				m_uc.mov(c->gp, Imm(int(asBC_DWORDARG(bc))));
+			else
+			{
+				Gp t = m_uc.new_gp32();
+				m_uc.mov(t, Imm(int(asBC_DWORDARG(bc))));
+				Commit32(a0, t);
+			}
+		}
+		break;
+
+	case asBC_SetV8:
+		{
+			asQWORD value = asBC_QWORDARG(bc);
+			SCachedSlot *c = FindCached(a0);
+			if( Is64Bit() )
+			{
+				if( c && c->kind == JIT_SLOT_I64 )
+					m_uc.mov(c->gp, Imm(int64_t(value)));
+				else
+				{
+					Gp t = m_uc.new_gp64();
+					m_uc.mov(t, Imm(int64_t(value)));
+					Commit64(a0, t);
+				}
+			}
+			else
+			{
+				Gp t = m_uc.new_gp32();
+				m_uc.mov(t, Imm(int(asDWORD(value))));
+				m_uc.store_u32(Var(a0), t);
+				m_uc.mov(t, Imm(int(asDWORD(value >> 32))));
+				m_uc.store_u32(Var(a0, 4), t);
+				if( c && c->kind == JIT_SLOT_F64 )
+					m_uc.v_loadu64_f64(c->vec, Var(a0));
+			}
+		}
+		break;
+
+	case asBC_ADDSi:
+		{
+			Gp a = m_uc.new_gp_ptr();
+			m_uc.load(a, Stack(0));
+			m_uc.j(BailLabel(idx), test_z(a));
+			m_uc.add(a, a, Imm(int(asBC_SWORDARG0(bc))));
+			m_uc.store(Stack(0), a);
+		}
+		break;
+
+	case asBC_CpyVtoV4:
+		Commit32(a0, Load32(a1));
+		break;
+
+	case asBC_CpyVtoV8:
+		if( Is64Bit() )
+			Commit64(a0, Load64(a1));
+		else
+			CommitF64(a0, LoadF64(a1));
+		break;
+
+	case asBC_CpyVtoR4:
+		StoreVR32(Load32(a0));
+		break;
+
+	case asBC_CpyVtoR8:
+		if( Is64Bit() )
+			StoreVR64(Load64(a0));
+		else
+			m_uc.v_storeu64_f64(VRMem(), LoadF64(a0));
+		break;
+
+	case asBC_CpyRtoV4:
+		{
+			Gp t = m_uc.new_gp32();
+			LoadVR32(t);
+			Commit32(a0, t);
+		}
+		break;
+
+	case asBC_CpyRtoV8:
+		if( Is64Bit() )
+		{
+			Gp t = m_uc.new_gp64();
+			LoadVR64(t);
+			Commit64(a0, t);
+		}
+		else
+		{
+			Vec v = m_uc.new_vec128_f64x1();
+			m_uc.v_loadu64_f64(v, VRMem());
+			CommitF64(a0, v);
+		}
+		break;
+
+	case asBC_CpyVtoG4:
+		{
+			Gp g;
+			Mem dst = Global(asBC_PTRARG(bc), g);
+			m_uc.store_u32(dst, Load32(a0));
+		}
+		break;
+
+	case asBC_CpyGtoV4:
+		{
+			Gp g;
+			Mem src = Global(asBC_PTRARG(bc), g);
+			Gp t = m_uc.new_gp32();
+			m_uc.load_u32(t, src);
+			Commit32(a0, t);
+		}
+		break;
+
+	case asBC_SetG4:
+		{
+			Gp g;
+			Mem dst = Global(asBC_PTRARG(bc), g);
+			Gp t = m_uc.new_gp32();
+			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc + AS_PTR_SIZE))));
+			m_uc.store_u32(dst, t);
+		}
+		break;
+
+	case asBC_WRTV1:
+	case asBC_WRTV2:
+	case asBC_WRTV4:
+		{
+			Gp p = m_uc.new_gp_ptr();
+			LoadVRPtr(p);
+			Gp v = Load32(a0);
+			if( instr.op == asBC_WRTV1 )
+				m_uc.store_u8(mem_ptr(p), v);
+			else if( instr.op == asBC_WRTV2 )
+				m_uc.store_u16(mem_ptr(p), v);
+			else
+				m_uc.store_u32(mem_ptr(p), v);
+		}
+		break;
+
+	case asBC_WRTV8:
+		{
+			Gp p = m_uc.new_gp_ptr();
+			LoadVRPtr(p);
+			if( Is64Bit() )
+				m_uc.store_u64(mem_ptr(p), Load64(a0));
+			else
+				m_uc.v_storeu64_f64(mem_ptr(p), LoadF64(a0));
+		}
+		break;
+
+	case asBC_RDR1:
+	case asBC_RDR2:
+	case asBC_RDR4:
+		{
+			Gp p = m_uc.new_gp_ptr();
+			LoadVRPtr(p);
+			Gp t = m_uc.new_gp32();
+			if( instr.op == asBC_RDR1 )
+				m_uc.load_u8(t, mem_ptr(p));
+			else if( instr.op == asBC_RDR2 )
+				m_uc.load_u16(t, mem_ptr(p));
+			else
+				m_uc.load_u32(t, mem_ptr(p));
+			Commit32(a0, t);
+		}
+		break;
+
+	case asBC_RDR8:
+		{
+			Gp p = m_uc.new_gp_ptr();
+			LoadVRPtr(p);
+			if( Is64Bit() )
+			{
+				Gp t = m_uc.new_gp64();
+				m_uc.load_u64(t, mem_ptr(p));
+				Commit64(a0, t);
+			}
+			else
+			{
+				Vec v = m_uc.new_vec128_f64x1();
+				m_uc.v_loadu64_f64(v, mem_ptr(p));
+				CommitF64(a0, v);
+			}
+		}
+		break;
+
+	case asBC_LDG:
+		StoreVRPtr(PtrConst(asBC_PTRARG(bc)));
+		break;
+
+	case asBC_LDV:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.lea(t, Var(a0));
+			StoreVRPtr(t);
+		}
+		break;
+
+	case asBC_ChkRefS:
+		{
+			Gp a = m_uc.new_gp_ptr();
+			m_uc.load(a, Stack(0));
+			m_uc.load(a, mem_ptr(a));
+			m_uc.j(BailLabel(idx), test_z(a));
+		}
+		break;
+
+	case asBC_ChkNullV:
+		{
+			Gp a = LoadPtr(a0);
+			m_uc.j(BailLabel(idx), test_z(a));
+		}
+		break;
+
+	case asBC_ChkNullS:
+		{
+			Gp a = m_uc.new_gp_ptr();
+			m_uc.load(a, Stack(asBC_WORDARG0(bc)));
+			m_uc.j(BailLabel(idx), test_z(a));
+		}
+		break;
+
+	case asBC_CHKREF:
+		{
+			Gp a = m_uc.new_gp_ptr();
+			m_uc.load(a, Stack(0));
+			m_uc.j(BailLabel(idx), test_z(a));
+		}
+		break;
+
+	case asBC_LoadThisR:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.load(t, Var(0));
+			m_uc.j(BailLabel(idx), test_z(t));
+			m_uc.add(t, t, Imm(int(asBC_SWORDARG0(bc))));
+			StoreVRPtr(t);
+		}
+		break;
+
+	case asBC_LoadRObjR:
+		{
+			Gp t = LoadPtr(a0);
+			m_uc.j(BailLabel(idx), test_z(t));
+			m_uc.add(t, t, Imm(int(asBC_SWORDARG1(bc))));
+			StoreVRPtr(t);
+		}
+		break;
+
+	case asBC_LoadVObjR:
+		{
+			Gp t = m_uc.new_gp_ptr();
+			m_uc.lea(t, Var(a0, asBC_SWORDARG1(bc)));
+			StoreVRPtr(t);
+		}
+		break;
+
+	case asBC_AllocMem:
+		{
+			InvokeNode *call = Invoke((const void*)JIT_AllocMem, FuncSignature::build<void*, asUINT>());
+			Gp mem = m_uc.new_gp_ptr();
+			call->set_arg(0, Imm(int(asBC_DWORDARG(bc))));
+			call->set_ret(0, mem);
+			StorePtr(a0, mem);
+		}
+		break;
+
+	case asBC_SetListSize:
+	case asBC_SetListType:
+		{
+			Gp var = LoadPtr(a0);
+			Gp t = m_uc.new_gp32();
+			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc + 1))));
+			m_uc.store_u32(mem_ptr(var, int(asBC_DWORDARG(bc))), t);
+		}
+		break;
+
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+//------------------------------------------------------------------------
+// Branches
+
+bool CJITCodeGen::EmitBranch(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+
+	if( instr.op == asBC_JMP )
+	{
+		m_uc.j(InstrLabel(instr.target));
+		return true;
+	}
+
+	if( instr.op == asBC_JMPP )
+	{
+		// Switch. The index is compared against the cases with a binary search.
+		// Out of range values return to the VM, which will misbehave the same
+		// way it would have without the JIT
+		//
+		// TODO: runtime optimize: Large switches would be faster with a jump table
+		//                         embedded in the code (label addresses via lea/adr
+		//                         and an indirect jump through the compiler escape
+		//                         hatch in jit_codegen_arch.cpp). The register
+		//                         allocator must be told about the successors, i.e.
+		//                         the node needs add_jump_annotation with the labels
+		Gp v = Load32(asBC_SWORDARG0(instr.bc));
+		const std::vector<int> &targets = m_code.GetSwitchTargets(idx);
+
+		struct SRange
+		{
+			asUINT lo, hi;
+			Label  label;
+		};
+		std::vector<SRange> work;
+		SRange all = { 0, asUINT(targets.size()), Label() };
+		work.push_back(all);
+
+		while( !work.empty() )
+		{
+			SRange r = work.back();
+			work.pop_back();
+			if( r.label.is_valid() )
+				m_uc.bind(r.label);
+
+			if( r.hi - r.lo <= 4 )
+			{
+				for( asUINT k = r.lo; k < r.hi; k++ )
+					m_uc.j(InstrLabel(targets[k]), cmp_eq(v, Imm(int(k))));
+				Bail(idx);
+			}
+			else
+			{
+				asUINT mid = (r.lo + r.hi) / 2;
+				SRange upper = { mid, r.hi, m_uc.new_label() };
+				SRange lower = { r.lo, mid, Label() };
+				m_uc.j(upper.label, ucmp_ge(v, Imm(int(mid))));
+				// Emit the lower half next (falls through), the upper half after
+				work.push_back(upper);
+				work.push_back(lower);
+			}
+		}
+		return true;
+	}
+
+	Label target = InstrLabel(instr.target);
+	Gp t = m_uc.new_gp32();
+	LoadVR32(t);
+
+	switch( instr.op )
+	{
+	case asBC_JZ:     m_uc.j(target, test_z(t)); break;
+	case asBC_JNZ:    m_uc.j(target, test_nz(t)); break;
+	case asBC_JS:     m_uc.j(target, scmp_lt(t, Imm(0))); break;
+	case asBC_JNS:    m_uc.j(target, scmp_ge(t, Imm(0))); break;
+	case asBC_JP:     m_uc.j(target, scmp_gt(t, Imm(0))); break;
+	case asBC_JNP:    m_uc.j(target, scmp_le(t, Imm(0))); break;
+	case asBC_JLowZ:  m_uc.j(target, test_z(t, Imm(0xFF))); break;
+	case asBC_JLowNZ: m_uc.j(target, test_nz(t, Imm(0xFF))); break;
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+//------------------------------------------------------------------------
+// Misc
+
+bool CJITCodeGen::EmitMisc(asUINT idx)
+{
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+
+	switch( instr.op )
+	{
+	case asBC_JitEntry:
+		// Entry stubs jump to the label bound before this instruction
+		break;
+
+	case asBC_SUSPEND:
+		if( !m_options.noSuspend && !(instr.flags & JIT_INSTR_SKIP) )
+		{
+			// Only when the VM asks for it, i.e. a line callback is set or a
+			// suspension was requested, is the helper called
+			Gp t = m_uc.new_gp32();
+			m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+			Label skip = m_uc.new_label();
+			m_uc.j(skip, test_z(t));
+
+			SyncAll(idx);
+			InvokeNode *call = Invoke((const void*)JIT_Suspend, FuncSignature::build<int, asSVMRegisters*>());
+			Gp r = m_uc.new_gp32();
+			call->set_arg(0, m_regs);
+			call->set_ret(0, r);
+
+			Label cont = m_uc.new_label();
+			m_uc.j(cont, test_z(r));
+			Leave();
+			m_uc.bind(cont);
+
+			// The line callback may have modified variables
+			ReloadAll();
+			m_uc.bind(skip);
+		}
+		break;
+
+	case asBC_STR:
+		// Deprecated instruction, never generated by the compiler
+		return false;
+
+	default:
+		return false;
+	}
+
+	return true;
+}
+
+END_AS_NAMESPACE
