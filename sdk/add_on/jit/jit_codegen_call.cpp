@@ -409,8 +409,9 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // Everything else, e.g. objects passed by value, returns false and is called
 // through the engine.
 //
-// C++ exceptions thrown by the function cannot be caught by the generated code, so
-// this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
+// C++ exceptions thrown by the function pass through the generated code and are
+// caught by JIT_GuardedEntry. Where the code has no unwind information for that
+// (see CJITUnwindInfo) this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 //
 // TODO: runtime optimize: Objects passed by value could be supported by setting up the
 //                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
@@ -420,12 +421,6 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 //                         and an AddRef of the returned handle, and asCALL_GENERIC could be
 //                         called with an asCGeneric set up inline. Each of these should be
 //                         measured against CallSystemFunction before adding the code.
-// TODO: The generated code has no unwind information, which is why C++ exceptions cannot
-//       pass through it. AsmJit doesn't emit it, but it could be registered separately
-//       (RtlAddFunctionTable on Win64, __register_frame with DWARF CFI elsewhere). With
-//       that in place the exception could be caught by a C++ function wrapping the entry
-//       into the generated code, and turned into a script exception like CallSystemFunction
-//       does, so the flag could be on by default.
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];

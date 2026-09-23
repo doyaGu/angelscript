@@ -45,12 +45,17 @@ public:
 		JIT_SYNC_EVERY_INSTR  = 0x08, // update the VM registers after every instruction (debugging aid)
 		JIT_LOG               = 0x10, // log the bytecode and generated code to the log file
 
-		// Call registered functions directly with their native calling
-		// convention instead of through the engine. This is much faster,
-		// but C++ exceptions thrown by the registered functions can no longer
-		// be caught and turned into script exceptions, so it is only enabled by
-		// default when the library is compiled with AS_NO_EXCEPTIONS
-		JIT_DIRECT_SYSTEM_CALLS = 0x20
+		// Registered functions with simple signatures are called directly with
+		// their native calling convention instead of through the engine, which is
+		// much faster. C++ exceptions thrown by them are still turned into script
+		// exceptions, but that needs unwind information for the generated code,
+		// which is only available on some platforms (see CJITUnwindInfo). Elsewhere
+		// the direct calls are only made with this flag, and the exceptions can
+		// then not pass through the generated code
+		JIT_DIRECT_SYSTEM_CALLS = 0x20,
+
+		// Never call registered functions directly
+		JIT_NO_DIRECT_SYSTEM_CALLS = 0x40
 	};
 
 	CJITCompiler(asDWORD flags = 0);

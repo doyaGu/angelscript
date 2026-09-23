@@ -22,8 +22,8 @@
 //  - Lazy or tiered compilation through asIJITCompilerV2 (CompileFunction below). The
 //    engine currently compiles every function when the module is built. A class cannot
 //    implement both interface versions, so this would be a second compiler class.
-//  - More signatures for direct system calls, and unwind information for the generated
-//    code so that C++ exceptions can pass through it (jit_codegen_call.cpp, EmitDirectSystemCall).
+//  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall), and
+//    unwind information on the platforms besides 64bit Windows and Linux (jit_unwind.h).
 //  - Inline reference counting for script objects in REFCPY/FREE (jit_codegen_call.cpp, EmitObjectOp).
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots).
 //  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
@@ -304,15 +304,16 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	options.noSuspend      = (m_impl->flags & JIT_NO_SUSPEND) != 0;
 	options.noScriptCalls  = (m_impl->flags & JIT_NO_SCRIPT_CALLS) != 0;
 	options.syncEveryInstr = (m_impl->flags & JIT_SYNC_EVERY_INSTR) != 0;
-	options.directSystemCalls = (m_impl->flags & JIT_DIRECT_SYSTEM_CALLS) != 0;
 	options.maxNativeCallDepth = m_impl->maxNativeCallDepth;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
-	options.directSystemCalls = true;
+	options.directSystemCalls = (m_impl->flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
 	options.guardedEntry = false;
 #else
 	// The C++ exceptions thrown by the functions called directly can only be caught
 	// if they can pass through the generated code
+	options.directSystemCalls = (m_impl->flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0 &&
+	                            (CJITUnwindInfo::IsSupported() || (m_impl->flags & JIT_DIRECT_SYSTEM_CALLS) != 0);
 	options.guardedEntry = options.directSystemCalls && CJITUnwindInfo::IsSupported();
 #endif
 
