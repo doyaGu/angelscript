@@ -42,12 +42,75 @@ void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
 }
 
 // Script function call through the runtime helper, which also executes the
-// called function natively when possible
+// called function natively when possible. If the called function is known the
+// call state is pushed inline and the function called directly instead, unless
+// it hasn't been compiled, the depth is exhausted, or the call stack is full
 void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
 {
-	SyncForCall(idx);
-	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
+	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	asCScriptFunction *func = m_code.GetFunction();
+	asCScriptFunction *callee = 0;
+	if( kind == JIT_CALL_SCRIPT && funcId >= 0 && asUINT(funcId) < func->engine->scriptFunctions.GetLength() )
+		callee = func->engine->scriptFunctions[funcId];
+	if( callee && (callee->funcType != asFUNC_SCRIPT || callee->scriptData == 0) )
+		callee = 0;
+
+	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	SyncStack();
+
 	Gp r = m_uc.new_gp32();
+	Label slow = m_uc.new_label();
+	Label done = m_uc.new_label();
+	if( callee )
+	{
+		const SJITContextLayout &layout = JIT_GetContextLayout();
+		m_uc.j(slow, test_z(m_depth));
+
+		// A recursive call enters this code, which exists as it is being executed
+		Gp target;
+		if( callee != func )
+		{
+			target = m_uc.new_gp_ptr();
+			m_uc.load(target, mem_ptr(PtrConst(asPWORD(&callee->scriptData->jitFunction))));
+			m_uc.j(slow, test_z(target));
+		}
+
+		// asCContext::PushCallState, when the call stack has room
+		Gp length = m_uc.new_gp_ptr();
+		Gp t      = m_uc.new_gp_ptr();
+		m_uc.load_u32(length, ContextField(layout.callStackLength));
+		m_uc.load_u32(t, ContextField(layout.callStackCapacity));
+		m_uc.j(slow, ucmp_ge(length, t));
+		Gp state = m_uc.new_gp_ptr();
+		m_uc.load(state, ContextField(layout.callStackArray));
+		m_uc.add_ext(state, state, length, PTR_BYTES);
+		m_uc.store(mem_ptr(state), m_fp);
+		m_uc.store(mem_ptr(state, PTR_BYTES), PtrConst(asPWORD(func)));
+		m_uc.store(mem_ptr(state, 2 * PTR_BYTES), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + 2)));
+		m_uc.store(mem_ptr(state, 3 * PTR_BYTES), m_sp);
+		m_uc.load_u32(t, ContextField(layout.stackIndex));
+		m_uc.store(mem_ptr(state, 4 * PTR_BYTES), t);
+		m_uc.add(length, length, Imm(layout.callStackFrameSize));
+		m_uc.store_u32(ContextField(layout.callStackLength), length);
+
+		Gp depth = m_uc.new_gp32();
+		m_uc.sub(depth, m_depth, Imm(1));
+		FuncSignature sig = FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>();
+		InvokeNode *call = 0;
+		if( callee == func )
+			m_uc.cc->invoke(Out(call), m_uc.cc->func()->label(), sig);
+		else
+			m_uc.cc->invoke(Out(call), target, sig);
+		call->set_arg(0, m_regs);
+		call->set_arg(1, Imm(0));
+		call->set_arg(2, depth);
+		call->set_ret(0, r);
+		m_uc.j(done);
+	}
+
+	m_uc.bind(slow);
+	SetPC(instr.pos);
+	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	call->set_arg(0, m_regs);
 	call->set_arg(1, Imm(kind));
 	call->set_arg(2, Imm(funcId));
@@ -58,6 +121,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	call->set_arg(4, m_depth);
 	call->set_ret(0, r);
 
+	m_uc.bind(done);
 	EmitAfterHelperCall(r, idx);
 }
 
