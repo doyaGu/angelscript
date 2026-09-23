@@ -49,6 +49,8 @@ add_library(angelscript_jit STATIC
     jit_codegen_arch.cpp
     jit_runtime.h
     jit_runtime.cpp
+    jit_unwind.h
+    jit_unwind.cpp
 )
 target_compile_features(angelscript_jit PUBLIC cxx_std_20)
 target_include_directories(angelscript_jit
