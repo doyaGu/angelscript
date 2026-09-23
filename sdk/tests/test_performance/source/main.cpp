@@ -106,19 +106,23 @@ int main(int argc, char **argv)
 {
 	DetectMemoryLeaks();
 
-	// --jit runs the tests with the JIT compiler (requires building with AS_TEST_JIT),
-	// and --direct additionally lets it call registered functions directly
-	bool useJit = false, directCalls = false;
+	// --jit runs the tests with the JIT compiler (requires building with AS_TEST_JIT).
+	// --direct makes it call registered functions directly even on platforms where
+	// C++ exceptions can't pass through the generated code, and --no-direct never does
+	bool useJit = false, directCalls = false, noDirectCalls = false;
 	for( int a = 1; a < argc; a++ )
 	{
 		if( strcmp(argv[a], "--jit") == 0 )
 			useJit = true;
 		if( strcmp(argv[a], "--direct") == 0 )
 			directCalls = true;
+		if( strcmp(argv[a], "--no-direct") == 0 )
+			noDirectCalls = true;
 	}
 #ifdef AS_TEST_JIT
 	g_useJit = useJit;
 	g_jitDirectCalls = directCalls;
+	g_jitNoDirectCalls = noDirectCalls;
 #else
 	if( useJit )
 		printf("The test wasn't built with the JIT compiler\n");
@@ -129,7 +133,7 @@ int main(int argc, char **argv)
 	printf(" (DEBUG)");
 #endif
 	if( useJit )
-		printf(directCalls ? " (JIT, direct calls)" : " (JIT)");
+		printf(noDirectCalls ? " (JIT, no direct calls)" : directCalls ? " (JIT, direct calls)" : " (JIT)");
 	printf("\n");
 	printf("AngelScript %s\n", asGetLibraryVersion()); 
 

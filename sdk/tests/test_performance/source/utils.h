@@ -9,6 +9,7 @@ asIScriptEngine *CreateEngineForTest(asDWORD version = ANGELSCRIPT_VERSION);
 void             ReleaseJitCompiler();
 extern bool      g_useJit;
 extern bool      g_jitDirectCalls;
+extern bool      g_jitNoDirectCalls;
 #define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
 #endif
 #include <stdio.h>
