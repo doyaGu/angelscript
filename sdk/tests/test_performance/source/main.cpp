@@ -5,7 +5,9 @@
 #if defined(_MSC_VER)
 #include <crtdbg.h>
 #endif
+#include <string.h>
 #include "angelscript.h"
+#include "utils.h"
 
 namespace TestBasic        { void Test(double *time); }
 namespace TestBasic2       { void Test(double *time); }
@@ -104,10 +106,30 @@ int main(int argc, char **argv)
 {
 	DetectMemoryLeaks();
 
+	// --jit runs the tests with the JIT compiler (requires building with AS_TEST_JIT),
+	// and --direct additionally lets it call registered functions directly
+	bool useJit = false, directCalls = false;
+	for( int a = 1; a < argc; a++ )
+	{
+		if( strcmp(argv[a], "--jit") == 0 )
+			useJit = true;
+		if( strcmp(argv[a], "--direct") == 0 )
+			directCalls = true;
+	}
+#ifdef AS_TEST_JIT
+	g_useJit = useJit;
+	g_jitDirectCalls = directCalls;
+#else
+	if( useJit )
+		printf("The test wasn't built with the JIT compiler\n");
+#endif
+
 	printf("Performance test");
-#ifdef _DEBUG 
+#ifdef _DEBUG
 	printf(" (DEBUG)");
 #endif
+	if( useJit )
+		printf(directCalls ? " (JIT, direct calls)" : " (JIT)");
 	printf("\n");
 	printf("AngelScript %s\n", asGetLibraryVersion()); 
 
@@ -172,9 +194,16 @@ int main(int argc, char **argv)
 	printf("RetObj.3       %.3f    %.3f    %.3f%s\n", testTimesOrig[24], testTimesOrig2[24], testTimesBest[24], testTimesBest[24] < testTimesOrig2[24] ? " +" : " -");
 
 	printf("--------------------------------------------\n");
-	printf("Press any key to quit.\n");
-#if defined(WIN32)
-	while(!_getch());
+#ifdef AS_TEST_JIT
+	ReleaseJitCompiler();
 #endif
+	// Only wait for a key when run without arguments, so that it can be scripted
+	if( argc == 1 )
+	{
+		printf("Press any key to quit.\n");
+#if defined(WIN32)
+		while(!_getch());
+#endif
+	}
 	return 0;
 }

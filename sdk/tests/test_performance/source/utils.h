@@ -2,6 +2,15 @@
 #define UTILS_H
 
 #include "angelscript.h"
+
+#ifdef AS_TEST_JIT
+// When the test is run with --jit the engines are created with the JIT compiler attached
+asIScriptEngine *CreateEngineForTest(asDWORD version = ANGELSCRIPT_VERSION);
+void             ReleaseJitCompiler();
+extern bool      g_useJit;
+extern bool      g_jitDirectCalls;
+#define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
+#endif
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>

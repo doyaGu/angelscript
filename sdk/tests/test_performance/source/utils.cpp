@@ -98,3 +98,33 @@ double GetSystemTimer()
 
 #endif
 
+
+#ifdef AS_TEST_JIT
+
+#include "../../../add_on/jit/jit.h"
+
+bool g_useJit = false;
+bool g_jitDirectCalls = false;
+static CJITCompiler *g_jit = 0;
+
+asIScriptEngine *CreateEngineForTest(asDWORD version)
+{
+	asIScriptEngine *engine = (asCreateScriptEngine)(version);
+	if( engine && g_useJit )
+	{
+		if( g_jit == 0 )
+			g_jit = new CJITCompiler(g_jitDirectCalls ? CJITCompiler::JIT_DIRECT_SYSTEM_CALLS : 0);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+		engine->SetJITCompiler(g_jit);
+	}
+	return engine;
+}
+
+// Must be called after all engines have been released
+void ReleaseJitCompiler()
+{
+	delete g_jit;
+	g_jit = 0;
+}
+
+#endif

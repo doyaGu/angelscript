@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(test_performance)
 
+option(AS_TEST_JIT "Build with the JIT compiler add-on (enabled at runtime with --jit)" OFF)
+
 add_executable(
         test_performance
         ../../source/main.cpp
@@ -35,4 +37,10 @@ set_target_properties(test_performance PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PRO
 set_target_properties(test_performance PROPERTIES CXX_STANDARD 11)
 if(WIN32)
     target_link_libraries(test_performance winmm)
+endif()
+
+if(AS_TEST_JIT)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../../add_on/jit angelscript_jit)
+    target_link_libraries(test_performance angelscript_jit)
+    target_compile_definitions(test_performance PRIVATE AS_TEST_JIT)
 endif()
