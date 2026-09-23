@@ -9,6 +9,7 @@
 #include "../../../add_on/scriptstdstring/scriptstdstring.h"
 #include "../../../add_on/scriptarray/scriptarray.h"
 #include "../../../add_on/scriptmath/scriptmath.h"
+#include <sstream>
 
 namespace TestJIT
 {
@@ -743,6 +744,233 @@ static bool TestDirectCalls()
 	return fail;
 }
 
+// Script-to-script calls made natively by the JIT compiled code. The same
+// scripts are executed without the JIT compiler, and everything that the
+// application can observe must be the same
+namespace NativeCalls
+{
+	static std::stringstream g_trace;
+	static int g_lines = 0;
+
+	// Records the call stack and the variables named 'local'
+	static int Inspect()
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		for( asUINT l = 0; l < ctx->GetCallstackSize(); l++ )
+		{
+			g_trace << ctx->GetFunction(l)->GetName() << ":" << ctx->GetLineNumber(l);
+			for( int v = 0; v < ctx->GetVarCount(l); v++ )
+			{
+				const char *name;
+				ctx->GetVar(v, l, &name);
+				if( name && std::string(name) == "local" )
+					g_trace << "=" << *(int*)ctx->GetAddressOfVar(v, l);
+			}
+			g_trace << " ";
+		}
+		return 0;
+	}
+
+	static void OnException(asIScriptContext *ctx, void *)
+	{
+		g_trace << "[" << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" <<
+		           ctx->GetExceptionLineNumber() << " depth " << ctx->GetCallstackSize() << "] ";
+	}
+
+	static void CountLines(asIScriptContext *, void *)
+	{
+		g_lines++;
+	}
+
+	static void SuspendInLeaf(asIScriptContext *ctx, void *)
+	{
+		g_lines++;
+		if( std::string(ctx->GetFunction()->GetName()) == "leaf" )
+			ctx->Suspend();
+	}
+
+	// The compiler merges the line cues of a statement and a following declaration
+	// or block only without the JIT instructions, so the functions that are
+	// executed with a line callback avoid those
+	static const char *script =
+		"interface I { int get(int); }                                                     \n"
+		"class A : I { int v; A(int a) { v = a; } int get(int a) { return v + a; } int virt(int a) { return a + 1; } } \n"
+		"class B : A { B(int a) { super(a * 2); } int virt(int a) { return a + 2; } }      \n"
+		"funcdef int FN(int);                                                              \n"
+		"int dtors = 0;                                                                    \n"
+		"class D { int v; D(int a) { v = a; } ~D() { dtors += v; } }                       \n"
+		"import int imported(int) from 'other';                                            \n"
+		"import int unbound(int) from 'other';                                             \n"
+		"int twice(int a) { return a * 2; }                                                \n"
+		"int deep(int n) { return n == 0 ? 0 : 1 + deep(n - 1); }                          \n"
+		"int probe(int n) {                                                                \n"
+		"  int local = n * 10;                                                             \n"
+		"  if( n == 0 )                                                                    \n"
+		"    return inspect();                                                             \n"
+		"  return probe(n - 1) + local;                                                    \n"
+		"}                                                                                 \n"
+		"int throwAt(int n) { D d(1); if( n == 0 ) { int z = 0; return 1 / z; } return throwAt(n - 1) + 1; } \n"
+		"int catchAt(int n) { int r = 0; try { r = throwAt(n); } catch { r = -1; } return r; } \n"
+		"int objects(int n) { D d(n); A@ a = B(n); return n == 0 ? a.get(0) : objects(n - 1) + a.virt(n); } \n"
+		"int step(A@ a, I@ i, FN@ f, FN@ dg, int n) { return i.get(n) + a.virt(n) + f(n) + dg(n) + imported(n); } \n"
+		"int dispatch() {                                                                  \n"
+		"  A@ a = B(3); I@ i = a;                                                          \n"
+		"  FN@ f = twice; FN@ dg = FN(a.virt);                                             \n"
+		"  int r = 0, n = 0;                                                               \n"
+		"  while( n < 100 )                                                                \n"
+		"    r += step(a, i, f, dg, n++);                                                  \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int blocks(int m) { int r = 0; for( int n = 0; n < m; n++ ) r += deep(n % 50) + objects(n % 7); return r; } \n"
+		"int nullIntf() { I@ i; return i.get(1); }                                         \n"
+		"int nullFunc() { FN@ f; return f(1); }                                            \n"
+		"int callUnbound() { return unbound(1); }                                          \n"
+		"int leaf(int a) { return a + 1; }                                                 \n"
+		"int suspended(int n) { int r = 0, i = 0; while( i < n ) r += leaf(i++); return r; } \n";
+
+	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_LEAF };
+	struct SCase { const char *decl; int arg; EMode mode; };
+	static const SCase cases[] =
+	{
+		{ "int deep(int)",       5000, PLAIN },
+		{ "int deep(int)",        300, COUNT_LINES },
+		{ "int probe(int)",       300, PLAIN },
+		{ "int probe(int)",         5, COUNT_LINES },
+		{ "int catchAt(int)",      10, PLAIN },
+		{ "int catchAt(int)",     300, PLAIN },
+		{ "int throwAt(int)",     300, PLAIN },
+		{ "int objects(int)",      20, PLAIN },
+		{ "int objects(int)",     300, COUNT_LINES },
+		{ "int dispatch()",         0, PLAIN },
+		{ "int dispatch()",         0, COUNT_LINES },
+		{ "int blocks(int)",      200, PLAIN },
+		{ "int nullIntf()",         0, PLAIN },
+		{ "int nullFunc()",         0, PLAIN },
+		{ "int callUnbound()",      0, PLAIN },
+		{ "int suspended(int)",    20, SUSPEND_IN_LEAF },
+	};
+
+	// Engine properties that change how the stack is managed
+	struct SConfig { const char *name; asEEngineProp prop; asPWORD value; };
+	static const SConfig configs[] =
+	{
+		{ "default",              asEP_INIT_STACK_SIZE,     4096 },
+		{ "small stack blocks",   asEP_INIT_STACK_SIZE,     64 },
+		{ "call stack limit",     asEP_MAX_CALL_STACK_SIZE, 100 },
+		{ "stack size limit",     asEP_MAX_STACK_SIZE,      4096 },
+	};
+
+	// Executes all the cases and returns what was observed, one line per case.
+	// The reference is compiled without the JIT instructions, as the compiled
+	// code invokes the line callback as the VM does for such bytecode
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, const SConfig &config, bool &fail)
+	{
+		COutStream out;
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		engine->SetEngineProperty(config.prop, config.value);
+		engine->RegisterGlobalFunction("int inspect()", asFUNCTION(Inspect), asCALL_CDECL);
+
+		asIScriptModule *other = engine->GetModule("other", asGM_ALWAYS_CREATE);
+		other->AddScriptSection("other", "int imported(int a) { return a * 3; }");
+		if( other->Build() < 0 )
+			TEST_FAILED;
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+			TEST_FAILED;
+		// The function 'unbound' doesn't exist in the other module
+		mod->BindAllImportedFunctions();
+		int *dtors = (int*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("dtors"));
+
+		std::string result;
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->SetExceptionCallback(asFUNCTION(OnException), 0, asCALL_CDECL);
+		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
+		{
+			g_trace.str("");
+			g_lines = 0;
+			*dtors = 0;
+
+			asIScriptFunction *func = mod->GetFunctionByDecl(cases[n].decl);
+			if( func == 0 ) { TEST_FAILED; continue; }
+			if( cases[n].mode == COUNT_LINES )
+				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			else if( cases[n].mode == SUSPEND_IN_LEAF )
+				ctx->SetLineCallback(asFUNCTION(SuspendInLeaf), 0, asCALL_CDECL);
+			else
+				ctx->ClearLineCallback();
+			ctx->Prepare(func);
+			if( func->GetParamCount() > 0 )
+				ctx->SetArgDWord(0, cases[n].arg);
+			int r = ctx->Execute();
+			int suspends = 0;
+			while( r == asEXECUTION_SUSPENDED && suspends < 10000 )
+			{
+				suspends++;
+				r = ctx->Execute();
+			}
+
+			std::stringstream s;
+			s << cases[n].decl << "(" << cases[n].arg << "): " << r;
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			s << " lines " << g_lines << " suspends " << suspends << " dtors " << *dtors << " " << g_trace.str() << "\n";
+			result += s.str();
+		}
+		ctx->Release();
+		return result;
+	}
+}
+
+static bool TestNativeCalls()
+{
+	using namespace NativeCalls;
+	bool fail = false;
+
+	// Suspending must work for the results to be the same as the VM's
+	asDWORD flags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		flags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+
+	// A native call depth of 3 mixes native calls with calls made by the VM
+	const asUINT depths[] = { 256, 3 };
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string expected = Run(engine, 0, configs[c], fail);		engine->ShutDownAndRelease();
+
+		for( asUINT d = 0; d < sizeof(depths)/sizeof(depths[0]); d++ )
+		{
+			// The JIT compiler must outlive the engine
+			CJITCompiler jit(flags);
+			jit.SetNativeCallDepth(depths[d]);
+			engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+			std::string actual = Run(engine, &jit, configs[c], fail);
+			engine->ShutDownAndRelease();
+
+			if( jit.GetStatistics().functionsCompiled == 0 )
+				TEST_FAILED;
+			if( actual != expected )
+			{
+				// Show the cases that differ
+				std::stringstream e(expected), a(actual);
+				std::string el, al;
+				while( std::getline(e, el) && std::getline(a, al) )
+					if( el != al )
+						PRINTF("%s, native call depth %u:\n  VM:  %s\n  JIT: %s\n", configs[c].name, depths[d],
+						       el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+				TEST_FAILED;
+			}
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -803,6 +1031,7 @@ bool Test()
 	engine->ShutDownAndRelease();
 
 	fail = TestDirectCalls() || fail;
+	fail = TestNativeCalls() || fail;
 
 	return fail;
 }
