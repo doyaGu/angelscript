@@ -108,6 +108,9 @@ public:
 	// being written when the block of the instruction is entered
 	asUINT GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
 
+	// Returns true if RET passes the return value in the value register
+	bool   RetReadsVR() const { return m_retReadsVR; }
+
 	// Instructions after which all cached variables have been written to memory
 	static bool IsSyncPoint(asEBCInstr op);
 	// How an instruction accesses the variables in its operands
@@ -150,6 +153,7 @@ protected:
 	std::vector<int>        m_noTargets;
 	std::vector<asUINT>     m_dirty;       // per instruction mask of possibly dirty cached slots
 	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
+	bool                    m_retReadsVR;
 };
 
 END_AS_NAMESPACE

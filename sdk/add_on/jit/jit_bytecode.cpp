@@ -13,6 +13,7 @@ CJITByteCode::CJITByteCode()
 	m_func     = 0;
 	m_byteCode = 0;
 	m_length   = 0;
+	m_retReadsVR = false;
 }
 
 bool CJITByteCode::IsBranch(asEBCInstr op)
@@ -263,8 +264,10 @@ int CJITByteCode::Decode(asCScriptFunction *func)
 // generated for them
 void CJITByteCode::MarkUnreachable()
 {
+	// Native callers enter at the start of the function, see CJITCodeGen::EmitDirectEntry
 	std::vector<bool> reached(m_instrs.size(), false);
 	std::vector<asUINT> work(m_entries.begin(), m_entries.end());
+	work.push_back(0);
 
 	while( !work.empty() )
 	{
@@ -680,6 +683,7 @@ void CJITByteCode::AnalyseVRLiveness()
 	// Handles are returned in the object register and objects in memory
 	const asCDataType &rt = m_func->returnType;
 	bool retReadsVR = rt.IsReference() || (rt.GetTokenType() != ttVoid && !rt.IsObject() && !rt.IsObjectHandle() && !rt.IsFuncdef());
+	m_retReadsVR = retReadsVR;
 
 	// Local use/def per block
 	for( asUINT b = 0; b < m_blocks.size(); b++ )
