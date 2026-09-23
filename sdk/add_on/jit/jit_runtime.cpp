@@ -121,14 +121,21 @@ int JIT_Thiscall1(asSVMRegisters *regs, int funcId) noexcept
 	return CheckStatusAfterSystemCall(regs, ctx);
 }
 
-int JIT_AfterDirectCall(asSVMRegisters *regs, int funcId) noexcept
+int JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noexcept
 {
 	asCContext *ctx = GetContext(regs);
 	asCScriptEngine *engine = ctx->m_engine;
 	asCScriptFunction *descr = engine->scriptFunctions[funcId];
 
-	// Like CallSystemFunction, a returned handle is released if the function raised an exception
-	if( ctx->m_status == asEXECUTION_EXCEPTION && regs->objectRegister &&
+	// Like CallSystemFunction, a returned handle is released, and a value returned
+	// on the stack is destroyed, if the function raised an exception
+	if( ctx->m_status == asEXECUTION_EXCEPTION && retPointer )
+	{
+		asCObjectType *ot = CastToObjectType(descr->returnType.GetTypeInfo());
+		if( ot && ot->beh.destruct )
+			engine->CallObjectMethod(retPointer, ot->beh.destruct);
+	}
+	else if( ctx->m_status == asEXECUTION_EXCEPTION && regs->objectRegister &&
 		(descr->returnType.IsObject() || descr->returnType.IsFuncdef()) && !descr->returnType.IsReference() )
 	{
 		asCObjectType *ot = CastToObjectType(descr->returnType.GetTypeInfo());

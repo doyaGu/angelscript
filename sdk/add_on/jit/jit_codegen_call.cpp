@@ -17,6 +17,19 @@ using namespace asmjit::ujit;
 
 static const int PTR_BYTES = AS_PTR_SIZE * 4;
 
+// Where the hidden pointer for a value returned in memory is passed, when the ABI
+// allows the direct calls to pass it like an ordinary argument. It is the first
+// argument, except that MSVC passes it after the object pointer of class methods.
+// Other compilers for 32bit x86 let the called function pop it off the stack,
+// which the generated calls can't express, and AArch64 passes it in a register
+// that isn't used for arguments
+#if defined(AS_X64_MSVC) || defined(AS_X64_GCC) || defined(AS_X64_MINGW) || (defined(AS_X86) && defined(_MSC_VER))
+#define JIT_HIDDEN_RETURN_POINTER
+#if defined(_MSC_VER)
+#define JIT_HIDDEN_RETURN_POINTER_AFTER_THIS
+#endif
+#endif
+
 // After a helper that may hand control back to the VM: leave if requested,
 // otherwise pick up the registers the helper may have changed
 void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
@@ -392,15 +405,17 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // Calls a registered function directly with its native calling convention, instead
 // of through the generic CallSystemFunction of the engine. This is only done for
 // simple signatures: primitives and pointers as arguments, a primitive, pointer,
-// or handle as return value, and nothing to clean up after the call. Everything
-// else, e.g. objects passed by value, returns false and is called through the engine.
+// handle, or value type as return value, and nothing to clean up after the call.
+// Everything else, e.g. objects passed by value, returns false and is called
+// through the engine.
 //
 // C++ exceptions thrown by the function cannot be caught by the generated code, so
 // this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 //
-// TODO: runtime optimize: Objects returned by value and objects passed by value could be
-//                         supported by setting up the return memory and the argument copies
-//                         the way CallSystemFunction and as_callfunc_*.cpp do for each ABI.
+// TODO: runtime optimize: Objects passed by value could be supported by setting up the
+//                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
+//                         do for each ABI, and value types returned in more than two
+//                         registers by reading them the way as_callfunc_x64_gcc.cpp does.
 //                         Auto handles would need a release of the parameters after the call
 //                         and an AddRef of the returned handle, and asCALL_GENERIC could be
 //                         called with an asCGeneric set up inline. Each of these should be
@@ -451,20 +466,31 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	}
 
-	if( sysFunc->hostReturnInMemory || descr->DoesReturnOnStack() || sysFunc->takesObjByVal ||
-		sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() || sysFunc->auxiliary ||
+	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() || sysFunc->auxiliary ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
 		return false;
 	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
 		if( sysFunc->paramAutoHandles[n] )
 			return false;
 
-	// Return value
+	// Return value. A value type returned by value is stored at the location that the
+	// caller put on the stack, either by the function itself through the hidden pointer,
+	// or from the registers it was returned in
 	enum { RET_VOID, RET_I32, RET_I64, RET_F32, RET_F64, RET_PTR, RET_HANDLE } retKind;
 	TypeId retType;
 	const asCDataType &rt = descr->returnType;
+	bool retOnStack = descr->DoesReturnOnStack();
+	bool retInMemory = retOnStack && sysFunc->hostReturnInMemory;
 	int expectedRetSize;
-	if( rt.GetTokenType() == ttVoid && !rt.IsReference() )       { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = 0; }
+#ifndef JIT_HIDDEN_RETURN_POINTER
+	if( retInMemory )
+		return false;
+#endif
+	if( retInMemory )                                            { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = AS_PTR_SIZE; }
+	else if( retOnStack && sysFunc->hostReturnSize == 1 )        { retKind = sysFunc->hostReturnFloat ? RET_F32 : RET_I32; retType = sysFunc->hostReturnFloat ? TypeId::kFloat32 : TypeId::kInt32; expectedRetSize = 1; }
+	else if( retOnStack && sysFunc->hostReturnSize == 2 )        { retKind = sysFunc->hostReturnFloat ? RET_F64 : RET_I64; retType = sysFunc->hostReturnFloat ? TypeId::kFloat64 : TypeId::kInt64; expectedRetSize = 2; }
+	else if( retOnStack )                                        return false;
+	else if( rt.GetTokenType() == ttVoid && !rt.IsReference() )  { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = 0; }
 	else if( rt.IsReference() )                                  { retKind = RET_PTR;    retType = TypeId::kUIntPtr; expectedRetSize = AS_PTR_SIZE; }
 	else if( rt.IsObjectHandle() )                               { retKind = RET_HANDLE; retType = TypeId::kUIntPtr; expectedRetSize = AS_PTR_SIZE; }
 	else if( rt.IsObject() || rt.IsFuncdef() )                   return false;
@@ -479,7 +505,9 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
 	struct SArg { int kind; int stackOff; TypeId type; };
 	std::vector<SArg> args;
-	int stackPos = hasObj ? AS_PTR_SIZE : 0;
+	int retOff = hasObj ? AS_PTR_SIZE : 0;
+	int firstArg = retOff + (retOnStack ? AS_PTR_SIZE : 0);
+	int stackPos = firstArg;
 	for( asUINT n = 0; n < descr->parameterTypes.GetLength(); n++ )
 	{
 		const asCDataType &pt = descr->parameterTypes[n];
@@ -494,13 +522,25 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		else                                       { arg.kind = ARG_I32; arg.type = TypeId::kInt32;   stackPos += 1; }
 		args.push_back(arg);
 	}
-	if( stackPos - (hasObj ? AS_PTR_SIZE : 0) != sysFunc->paramSize )
+	if( stackPos - firstArg != sysFunc->paramSize )
 		return false;
 	int popSize = stackPos;
 
+	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC
+	bool retFirst = retInMemory, retAfterObj = false;
+#ifdef JIT_HIDDEN_RETURN_POINTER_AFTER_THIS
+	if( retInMemory && sysFunc->callConv == ICC_THISCALL )
+	{
+		retFirst = false;
+		retAfterObj = true;
+	}
+#endif
+
 	FuncSignature sig(conv);
 	sig.set_ret(retType);
+	if( retFirst ) sig.add_arg(TypeId::kUIntPtr);
 	if( hasObj && !objLast ) sig.add_arg(TypeId::kUIntPtr);
+	if( retAfterObj ) sig.add_arg(TypeId::kUIntPtr);
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
 	if( hasObj && objLast ) sig.add_arg(TypeId::kUIntPtr);
 
@@ -511,6 +551,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		obj = m_uc.new_gp_ptr();
 		m_uc.load(obj, Stack(0));
 		m_uc.j(BailLabel(idx), test_z(obj));
+	}
+	Gp retPtr;
+	if( retOnStack )
+	{
+		retPtr = m_uc.new_gp_ptr();
+		m_uc.load(retPtr, Stack(retOff));
 	}
 
 	// Load the arguments before anything is written back so the loads can be scheduled freely
@@ -567,8 +613,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	InvokeNode *call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);
 	asUINT argIdx = 0;
+	if( retFirst )
+		call->set_arg(argIdx++, retPtr);
 	if( hasObj && !objLast )
 		call->set_arg(argIdx++, obj);
+	if( retAfterObj )
+		call->set_arg(argIdx++, retPtr);
 	for( asUINT n = 0; n < args.size(); n++ )
 	{
 		if( args[n].kind == ARG_F32 || args[n].kind == ARG_F64 )
@@ -628,7 +678,33 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Pop the arguments and store the return value like the VM does
 	m_uc.add(m_sp, m_sp, Imm(popSize * 4));
-	switch( retKind )
+	if( retOnStack )
+	{
+		switch( retKind )
+		{
+		case RET_I32:
+			m_uc.store_u32(mem_ptr(retPtr), retGp);
+			break;
+		case RET_I64:
+			if( Is64Bit() )
+				m_uc.store_u64(mem_ptr(retPtr), retGp);
+			else
+			{
+				m_uc.store_u32(mem_ptr(retPtr), retGp);
+				m_uc.store_u32(mem_ptr(retPtr, 4), retGpHi);
+			}
+			break;
+		case RET_F32:
+			m_uc.v_storeu32_f32(mem_ptr(retPtr), retVec);
+			break;
+		case RET_F64:
+			m_uc.v_storeu64_f64(mem_ptr(retPtr), retVec);
+			break;
+		default:
+			break;
+		}
+	}
+	else switch( retKind )
 	{
 	case RET_I32:
 		StoreVR32(retGp);
@@ -677,10 +753,14 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// The VM continues with the popped stack pointer if the helper returns non-zero
 	SyncStack();
 	SyncVR();
-	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int>());
+	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int, void*>());
 	Gp r = m_uc.new_gp32();
 	after->set_arg(0, m_regs);
 	after->set_arg(1, Imm(funcId));
+	if( retOnStack )
+		after->set_arg(2, retPtr);
+	else
+		after->set_arg(2, Imm(0));
 	after->set_ret(0, r);
 	EmitLeaveIf(r);
 	// With a debugger attached the variables may have been modified through the context

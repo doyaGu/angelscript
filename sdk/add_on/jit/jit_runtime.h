@@ -84,8 +84,9 @@ int    JIT_Thiscall1(asSVMRegisters *regs, int funcId) noexcept;
 // code when regs->doProcessSuspend is set, i.e. when an exception was raised, a
 // suspension was requested, or a line callback is set. The generated code sets
 // callingSystemFunction in the context around the direct calls, so that the
-// function can raise script exceptions
-int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId) noexcept;
+// function can raise script exceptions. retPointer is the location of a value
+// type returned by value, or null
+int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noexcept;
 
 // Script function calls. Performs the call and, if possible, executes the called
 // function natively before returning. depth is the depth of the calling function,
