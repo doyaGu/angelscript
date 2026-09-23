@@ -1336,6 +1336,241 @@ static bool TestCppExceptions()
 	return fail;
 }
 
+// The AddRef and Release behaviours called by asBC_FREE, asBC_REFCPY, and asBC_RefCpyV.
+// They are called directly from the generated code when possible, and everything
+// that the application can observe must be the same as with the VM
+namespace RefCounting
+{
+	static std::stringstream g_trace;
+	static int g_live = 0;
+
+	// An application type whose reference counting is traced. The behaviours of each
+	// registered type have another calling convention
+	class CRC
+	{
+	public:
+		CRC(char kind, int id) : refCount(1), id(id), kind(kind) { g_live++; }
+		virtual ~CRC() { g_trace << "~" << kind << id << " "; g_live--; }
+		void Add() { g_trace << "+" << kind << id << " "; refCount++; }
+		void Rel() { g_trace << "-" << kind << id << " "; if( --refCount == 0 ) delete this; }
+		// Overridden by CVirt, whose objects must get the calls of the overrides
+		virtual void VAdd() { g_trace << "base "; Add(); }
+		virtual void VRel() { g_trace << "base "; Rel(); }
+		int refCount, id;
+		char kind;
+	};
+	class CVirt : public CRC
+	{
+	public:
+		CVirt(int id) : CRC('V', id) {}
+		void VAdd() { Add(); }
+		void VRel() { Rel(); }
+	};
+	static CRC g_noCount('N', 0);
+
+	static CRC *MakeR(int id)   { return new CRC('R', id); }
+	static CRC *MakeV(int id)   { return new CVirt(id); }
+	static CRC *MakeL(int id)   { return new CRC('L', id); }
+	static CRC *MakeF(int id)   { return new CRC('F', id); }
+	static CRC *MakeG(int id)   { return new CRC('G', id); }
+	static CRC *GetN()          { return &g_noCount; }
+	static void AddObj(CRC *o)  { o->Add(); }
+	static void RelObj(CRC *o)  { o->Rel(); }
+	static void AddGen(asIScriptGeneric *gen) { ((CRC*)gen->GetObject())->Add(); }
+	static void RelGen(asIScriptGeneric *gen) { ((CRC*)gen->GetObject())->Rel(); }
+	static void Mark(int v)     { g_trace << "m" << v << " "; }
+
+	static void RegisterType(asIScriptEngine *engine, const char *name, asDWORD flags)
+	{
+		int r = engine->RegisterObjectType(name, 0, flags); assert( r >= 0 );
+		r = engine->RegisterObjectProperty(name, "int id", asOFFSET(CRC, id)); assert( r >= 0 );
+	}
+
+	static const char *script =
+		"class Node                                                               \n"
+		"{                                                                        \n"
+		"  int id;                                                                \n"
+		"  Node@ next;                                                            \n"
+		"  Node(int i) { id = i; Mark(i); }                                       \n"
+		"  ~Node() { Mark(-id); if( id == 3 ) @g_chain = null; }                  \n"
+		"}                                                                        \n"
+		"Node@ g_chain;                                                           \n"
+		"Node@ g_keep;                                                            \n"
+		"R@ g_r;                                                                  \n"
+		"funcdef int FN(int);                                                     \n"
+		"int twice(int a) { return a * 2; }                                       \n"
+		// The releases execute the destructors on the same context, the one of
+		// node 3 releases another node, and the list is destroyed recursively
+		"int scriptObjects(int n)                                                 \n"
+		"{                                                                        \n"
+		"  Node@ a = Node(1);                                                     \n"
+		"  Node@ b = a;                                                           \n"
+		"  @b = Node(2);                                                          \n"
+		"  @a = b;                                                                \n"
+		"  @a.next = Node(3);                                                     \n"
+		"  @g_chain = Node(4);                                                    \n"
+		"  @g_keep = a;                                                           \n"
+		"  @a = null;                                                             \n"
+		"  @b = null;                                                             \n"
+		"  @g_keep = null;                                                        \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    Node@ t = Node(10 + i);                                              \n"
+		"    @t.next = g_keep;                                                    \n"
+		"    @g_keep = t;                                                         \n"
+		"  }                                                                      \n"
+		"  int r = 0;                                                             \n"
+		"  Node@ p = g_keep;                                                      \n"
+		"  while( p !is null ) { r += p.id; @p = p.next; }                        \n"
+		"  @g_keep = null;                                                        \n"
+		"  return r;                                                              \n"
+		"}                                                                        \n"
+		"int appTypes(int n)                                                      \n"
+		"{                                                                        \n"
+		"  R@ r1 = MakeR(1); R@ r2 = r1;                                          \n"
+		"  V@ v1 = MakeV(2); V@ v2 = v1;                                          \n"
+		"  L@ l1 = MakeL(3); L@ l2 = l1;                                          \n"
+		"  F@ f1 = MakeF(4); F@ f2 = f1;                                          \n"
+		"  G@ g1 = MakeG(5); G@ g2 = g1;                                          \n"
+		"  N@ n1 = GetN();   N@ n2 = n1;                                          \n"
+		"  @r2 = null; @v2 = null; @l2 = null; @f2 = null; @g2 = null; @n2 = null; \n"
+		"  @g_r = r1;                                                             \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    R@ tr = r1; V@ tv = v1; L@ tl = l1; F@ tf = f1; G@ tg = g1; N@ tn = n1; \n"
+		"    @tr = g_r;                                                           \n"
+		"    s += tr.id + tv.id + tl.id + tf.id + tg.id + tn.id;                  \n"
+		"  }                                                                      \n"
+		"  @g_r = null;                                                           \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int funcHandles(int n)                                                   \n"
+		"{                                                                        \n"
+		"  FN@ f = twice;                                                         \n"
+		"  FN@ g = f;                                                             \n"
+		"  @f = null;                                                             \n"
+		"  int r = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ ) { FN@ t = g; r += t(i); }                 \n"
+		"  return r;                                                              \n"
+		"}                                                                        \n";
+
+	// Executes the functions and returns what was observed, one line per function
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		COutStream out;
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r;
+		RegisterType(engine, "R", asOBJ_REF);
+		r = engine->RegisterObjectBehaviour("R", asBEHAVE_ADDREF, "void f()", asMETHOD(CRC, Add), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("R", asBEHAVE_RELEASE, "void f()", asMETHOD(CRC, Rel), asCALL_THISCALL); assert( r >= 0 );
+		RegisterType(engine, "V", asOBJ_REF);
+		r = engine->RegisterObjectBehaviour("V", asBEHAVE_ADDREF, "void f()", asMETHOD(CRC, VAdd), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("V", asBEHAVE_RELEASE, "void f()", asMETHOD(CRC, VRel), asCALL_THISCALL); assert( r >= 0 );
+		RegisterType(engine, "L", asOBJ_REF);
+		r = engine->RegisterObjectBehaviour("L", asBEHAVE_ADDREF, "void f()", asFUNCTION(AddObj), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("L", asBEHAVE_RELEASE, "void f()", asFUNCTION(RelObj), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		RegisterType(engine, "F", asOBJ_REF);
+		r = engine->RegisterObjectBehaviour("F", asBEHAVE_ADDREF, "void f()", asFUNCTION(AddObj), asCALL_CDECL_OBJFIRST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("F", asBEHAVE_RELEASE, "void f()", asFUNCTION(RelObj), asCALL_CDECL_OBJFIRST); assert( r >= 0 );
+		RegisterType(engine, "G", asOBJ_REF);
+		r = engine->RegisterObjectBehaviour("G", asBEHAVE_ADDREF, "void f()", asFUNCTION(AddGen), asCALL_GENERIC); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("G", asBEHAVE_RELEASE, "void f()", asFUNCTION(RelGen), asCALL_GENERIC); assert( r >= 0 );
+		RegisterType(engine, "N", asOBJ_REF | asOBJ_NOCOUNT);
+		r = engine->RegisterGlobalFunction("R@ MakeR(int)", asFUNCTION(MakeR), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("V@ MakeV(int)", asFUNCTION(MakeV), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("L@ MakeL(int)", asFUNCTION(MakeL), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("F@ MakeF(int)", asFUNCTION(MakeF), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("G@ MakeG(int)", asFUNCTION(MakeG), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("N@ GetN()", asFUNCTION(GetN), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void Mark(int)", asFUNCTION(Mark), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+			TEST_FAILED;
+
+		const char *funcs[] = { "int scriptObjects(int)", "int appTypes(int)", "int funcHandles(int)" };
+		std::string result;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(funcs)/sizeof(funcs[0]); n++ )
+		{
+			g_trace.str("");
+			asIScriptFunction *func = mod->GetFunctionByDecl(funcs[n]);
+			if( func == 0 ) { TEST_FAILED; continue; }
+			ctx->Prepare(func);
+			ctx->SetArgDWord(0, 20);
+			r = ctx->Execute();
+
+			std::stringstream s;
+			s << funcs[n] << ": " << r;
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			ctx->Unprepare();
+			s << " live " << g_live << " " << g_trace.str() << "\n";
+			result += s.str();
+		}
+		ctx->Release();
+		return result;
+	}
+}
+
+static bool TestRefCounting()
+{
+	using namespace RefCounting;
+	bool fail = false;
+
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	g_live = 0;
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("-V2 ~V2") == std::string::npos || expected.find("base") != std::string::npos || g_live != 0 )
+		TEST_FAILED;
+
+	struct SConfig { const char *name; asDWORD flags; };
+	const SConfig configs[] =
+	{
+		{ "default",                 0 },
+		{ "no direct system calls",  CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS },
+		{ "no native script calls",  CJITCompiler::JIT_NO_SCRIPT_CALLS },
+	};
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(configs[c].flags | envFlags);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, fail);
+		engine->ShutDownAndRelease();
+		if( g_live != 0 )
+			TEST_FAILED;
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("%s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("%s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -1398,6 +1633,7 @@ bool Test()
 	fail = TestDirectCalls() || fail;
 	fail = TestNativeCalls() || fail;
 	fail = TestCppExceptions() || fail;
+	fail = TestRefCounting() || fail;
 
 	return fail;
 }
