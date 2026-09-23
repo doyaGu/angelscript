@@ -581,6 +581,15 @@ namespace DirectCalls
 			return i1 + i2 * 2 + i3 * 3 + i4 * 4 + int(f1 + f2 * 2 + f3 * 3 + f4 * 4) +
 			       i5 * 5 + i6 * 6 + i7 * 7 + i8 * 8 + int(f5 * 5 + f6 * 6 + f7 * 7 + f8 * 8) + v;
 		}
+		// More floating point arguments than vector registers for them with the System V x64 ABI
+		float Floats(float f1, float f2, float f3, float f4, float f5, float f6, float f7, float f8, float f9, float f10)
+		{
+			return f1 + f2 * 2 + f3 * 3 + f4 * 4 + f5 * 5 + f6 * 6 + f7 * 7 + f8 * 8 + f9 * 9 + f10 * 10 + v;
+		}
+		double Doubles(double d1, double d2, double d3, double d4, double d5, double d6, double d7, double d8, double d9, double d10)
+		{
+			return d1 + d2 * 2 + d3 * 3 + d4 * 4 + d5 * 5 + d6 * 6 + d7 * 7 + d8 * 8 + d9 * 9 + d10 * 10 + v;
+		}
 		// More arguments than AsmJit supports with the object pointer, so called through the engine
 		int   Sum32(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11,
 		            int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22,
@@ -710,6 +719,8 @@ namespace DirectCalls
 		r = engine->RegisterObjectMethod("CObj", "val Five(int, double, float, int)", asMETHOD(CObj, Five), asCALL_THISCALL); assert( r >= 0 );
 		r = engine->RegisterObjectMethod("CObj", "double Four(float, float, double, float)", asMETHOD(CObj, Four), asCALL_THISCALL); assert( r >= 0 );
 		r = engine->RegisterObjectMethod("CObj", "int Many(int, int, int, int, float, float, float, float, int, int, int, int, float, float, float, float)", asMETHOD(CObj, Many), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "float Floats(float, float, float, float, float, float, float, float, float, float)", asMETHOD(CObj, Floats), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "double Doubles(double, double, double, double, double, double, double, double, double, double)", asMETHOD(CObj, Doubles), asCALL_THISCALL); assert( r >= 0 );
 		r = engine->RegisterObjectMethod("CObj", "int Sum32(int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, "
 		                                         "int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int)", asMETHOD(CObj, Sum32), asCALL_THISCALL); assert( r >= 0 );
 	}
@@ -786,6 +797,8 @@ static bool TestDirectCalls()
 		"  assert( obj.Four(1, 2, 3, 4) == 15 );                       \n"
 		"  val f = obj.Five(1, 2.5, 3.5f, 4); assert( f.v == 16 );     \n"
 		"  assert( obj.Sum32(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3) == 42 ); \n"
+		"  assert( obj.Floats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 390 );  \n"
+		"  assert( obj.Doubles(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 390 ); \n"
 		"  return obj.Many(1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4); \n"
 		"}                                                             \n";
 

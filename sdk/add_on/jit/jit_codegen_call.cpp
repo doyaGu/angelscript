@@ -526,6 +526,21 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	if( args.size() + (hasObj ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
 		return false;
+	// With the System V x64 ABI AsmJit gives the floats passed on the stack 4 bytes
+	// each instead of 8, so the functions that have any are called through the engine
+	const Environment &env = m_uc.cc->environment();
+	if( Is64Bit() && !env.is_platform_windows() && !env.is_msvc_abi() )
+	{
+		asUINT vecArgs = 0;
+		for( asUINT n = 0; n < args.size(); n++ )
+		{
+			if( args[n].kind != ARG_F32 && args[n].kind != ARG_F64 )
+				continue;
+			if( args[n].kind == ARG_F32 && vecArgs >= 8 )
+				return false;
+			vecArgs++;
+		}
+	}
 	int popSize = stackPos;
 
 	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC
