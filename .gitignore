@@ -82,3 +82,6 @@ sdk/docs/manual/
 AS_DEBUG/
 
 
+
+# Local CMake build directories
+/build/
