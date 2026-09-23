@@ -140,3 +140,88 @@ jobs:
         ./test_feature
 
         
+
+  # The following jobs run the same test suite with the JIT compiler add-on
+  # attached to every engine (AS_TEST_JIT). AsmJit is downloaded by CMake.
+  Linux_x86-64_GCC_JIT:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+    - uses: actions/checkout@v4
+    - name: build angelscript, JIT & test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/projects/cmake
+        cmake . -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DAS_TEST_JIT=ON
+        cmake --build . --config ${{ matrix.build_type }}
+    - name: run test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/bin
+        ./test_feature
+
+  Linux_arm64_Clang_AS_USE_NAMESPACE_JIT:
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - uses: actions/checkout@v4
+    - name: build angelscript, JIT & test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/projects/cmake
+        cmake . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS='-DAS_USE_NAMESPACE' -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DAS_TEST_JIT=ON
+        cmake --build . --config Release
+    - name: run test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/bin
+        ./test_feature
+
+  Windows_x86-64_Clang-Cl_JIT:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: set up Clang
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: build angelscript, JIT & test_feature
+      run: |
+        cd ${{github.workspace}}/sdk/tests/test_feature/projects/cmake
+        cmake . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl -DAS_TEST_JIT=ON
+        cmake --build . --config Release
+    - name: run test_feature
+      run: |
+        cd ${{github.workspace}}/sdk/tests/test_feature/bin
+        ./test_feature.exe
+
+  Windows_x86_MSVC_JIT:
+    runs-on: windows-latest
+    # The 32bit engine currently crashes in TestForEach even without the JIT
+    # (value type passed by value to a registered function), so a failure
+    # here doesn't block the workflow
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - name: set up MSVC (x86)
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+    - name: build angelscript, JIT & test_feature
+      run: |
+        cd ${{github.workspace}}/sdk/tests/test_feature/projects/cmake
+        cmake . -G Ninja -DCMAKE_BUILD_TYPE=Release -DAS_TEST_JIT=ON
+        cmake --build . --config Release
+    - name: run test_feature
+      run: |
+        cd ${{github.workspace}}/sdk/tests/test_feature/bin
+        ./test_feature.exe
+
+  MacOS_arm64_Clang_JIT:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: build angelscript, JIT & test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/projects/cmake
+        cmake . -DCMAKE_BUILD_TYPE=Release -DAS_TEST_JIT=ON
+        cmake --build . --config Release
+    - name: run test_feature
+      run: |
+        cd $GITHUB_WORKSPACE/sdk/tests/test_feature/bin
+        ./test_feature
