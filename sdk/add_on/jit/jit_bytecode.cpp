@@ -3,6 +3,8 @@
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
 #include "as_scriptfunction.h"
+#include "as_scriptengine.h"
+#include "as_module.h"
 
 #include <algorithm>
 
@@ -15,6 +17,7 @@ CJITByteCode::CJITByteCode()
 	m_length   = 0;
 	m_retReadsVR = false;
 	m_tempMask   = 0;
+	m_staticStack = false;
 }
 
 bool CJITByteCode::IsBranch(asEBCInstr op)
@@ -321,8 +324,165 @@ void CJITByteCode::SetBailInstructions(const bool bail[asBC_MAXBYTECODE])
 			m_instrs[n].flags |= JIT_INSTR_BAIL;
 }
 
+int CJITByteCode::GetPopSize(asCScriptFunction *func)
+{
+	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+}
+
+// The funcdef of the function pointer in the variable that asBC_CallPtr calls, found
+// like asCScriptFunction::GetCalledFunction does, or 0. The compiler only lets
+// variables of the same type share a slot
+static asCScriptFunction *FindFuncdef(asCScriptFunction *func, int var)
+{
+	const asCArray<asSScriptVariable*> &vars = func->scriptData->variables;
+	for( asUINT n = 0; n < vars.GetLength(); n++ )
+		if( vars[n]->stackOffset == var )
+		{
+			asCFuncdefType *type = CastToFuncdefType(vars[n]->type.GetTypeInfo());
+			return type ? type->funcdef : 0;
+		}
+
+	int offset = -(func->objectType ? AS_PTR_SIZE : 0) - (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		if( offset == var )
+		{
+			asCFuncdefType *type = CastToFuncdefType(func->parameterTypes[n].GetTypeInfo());
+			return type ? type->funcdef : 0;
+		}
+		offset -= func->parameterTypes[n].GetSizeOnStackDWords();
+	}
+	return 0;
+}
+
+// The change of the stack depth in dwords by the instruction, as the compiler
+// computes it. Returns false if it isn't known, e.g. for the calls of variadic
+// functions, whose number of arguments varies
+bool CJITByteCode::GetStackInc(const SJITInstr &instr, int &inc) const
+{
+	asCScriptEngine *engine = m_func->engine;
+	asCScriptFunction *callee = 0;
+	int id;
+	switch( instr.op )
+	{
+	case asBC_CALL:
+	case asBC_CALLINTF:
+	case asBC_CALLSYS:
+		id = asBC_INTARG(instr.bc);
+		if( id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
+			callee = engine->scriptFunctions[id];
+		break;
+
+	case asBC_CALLBND:
+		id = asBC_INTARG(instr.bc) & ~FUNC_IMPORTED;
+		if( id >= 0 && asUINT(id) < engine->importedFunctions.GetLength() && engine->importedFunctions[id] )
+			callee = engine->importedFunctions[id]->importedFunctionSignature;
+		break;
+
+	case asBC_CallPtr:
+		callee = FindFuncdef(m_func, asBC_SWORDARG1(instr.bc));
+		break;
+
+	case asBC_ALLOC:
+		// The constructor pops the arguments and the object, which the instruction
+		// pushes, and the instruction pops the address of the variable to store the
+		// object in, except for script objects, whose factory stubs return right
+		// after. For templates the type is one of the arguments
+		id = asBC_INTARG(instr.bc + AS_PTR_SIZE);
+		if( id == 0 )
+		{
+			inc = -AS_PTR_SIZE;
+			return true;
+		}
+		if( id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
+			callee = engine->scriptFunctions[id];
+		if( callee && !callee->IsVariadic() && (((asCObjectType*)asBC_PTRARG(instr.bc))->flags & asOBJ_SCRIPT_OBJECT) )
+		{
+			inc = -GetPopSize(callee) + AS_PTR_SIZE;
+			return true;
+		}
+		break;
+
+	default:
+		inc = asBCInfo[instr.op].stackInc;
+		return inc != 0xFFFF;
+	}
+
+	if( callee == 0 || callee->IsVariadic() )
+		return false;
+	inc = -GetPopSize(callee);
+	return true;
+}
+
+// Computes the depth of the stack when each instruction is reached, which the
+// compiler makes the same on all paths, see asCByteCode::PostProcess. The catch
+// blocks start with the depth that the context sets up, see asCContext::CleanStackFrame
+void CJITByteCode::AnalyseStackDepth()
+{
+	m_staticStack = false;
+	m_stackDepth.assign(m_instrs.size(), -1);
+
+	std::vector<asUINT> work;
+	m_stackDepth[0] = 0;
+	work.push_back(0);
+	const asCArray<asSTryCatchInfo> &catches = m_func->scriptData->tryCatchInfo;
+	for( asUINT n = 0; n < catches.GetLength(); n++ )
+	{
+		int idx = FindInstruction(catches[n].catchPos);
+		int depth = int(catches[n].stackSize);
+		if( idx < 0 || (m_stackDepth[idx] >= 0 && m_stackDepth[idx] != depth) )
+			return;
+		m_stackDepth[idx] = depth;
+		work.push_back(asUINT(idx));
+	}
+
+	std::vector<int> succ;
+	while( !work.empty() )
+	{
+		asUINT n = work.back();
+		work.pop_back();
+		const SJITInstr &instr = m_instrs[n];
+		if( instr.op == asBC_RET )
+			continue;
+
+		int inc;
+		if( !GetStackInc(instr, inc) || m_stackDepth[n] + inc < 0 )
+			return;
+		int depth = m_stackDepth[n] + inc;
+
+		succ.clear();
+		if( instr.op == asBC_JMPP )
+			succ = GetSwitchTargets(n);
+		else
+		{
+			if( instr.target >= 0 )
+				succ.push_back(instr.target);
+			if( instr.op != asBC_JMP && n + 1 < m_instrs.size() )
+				succ.push_back(int(n + 1));
+		}
+		for( asUINT s = 0; s < succ.size(); s++ )
+		{
+			if( m_stackDepth[succ[s]] < 0 )
+			{
+				m_stackDepth[succ[s]] = depth;
+				work.push_back(asUINT(succ[s]));
+			}
+			else if( m_stackDepth[succ[s]] != depth )
+				return;
+		}
+	}
+
+	// Everything that gets code must have been reached
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+		if( m_stackDepth[n] < 0 && !(m_instrs[n].flags & JIT_INSTR_DEAD) )
+			return;
+
+	m_staticStack = true;
+}
+
 void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots)
 {
+	AnalyseStackDepth();
 	BuildBlocks();
 	AnalyseVRLiveness();
 	AnalyseSlots(allowRegisterCache, maxCachedSlots);

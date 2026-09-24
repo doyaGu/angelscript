@@ -77,13 +77,6 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
 	}
 }
 
-// The dwords popped by the RET instruction of a script function: the arguments, the
-// object pointer, and the pointer to the location of a value returned on the stack
-static int PopSize(asCScriptFunction *func)
-{
-	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
-}
-
 // Script function call through the runtime helper, which also executes the
 // called function natively when possible. Calls of script functions, methods,
 // and function pointers push the call state inline and call the compiled function
@@ -152,8 +145,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		EmitLeaveIf(r);
 		if( reload )
 			ReloadStack();
-		else if( PopSize(callee) )
-			m_uc.add(m_sp, m_sp, Imm(PopSize(callee) * 4));
+		else if( CJITByteCode::GetPopSize(callee) )
+			m_uc.add(m_sp, m_sp, Imm(CJITByteCode::GetPopSize(callee) * 4));
 
 		// The call through the helper is the rare path then
 		cold = BeginCold(slow);

@@ -135,6 +135,19 @@ public:
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
 
+	// Returns true if the depth of the stack is known at each instruction, i.e. the
+	// stack pointer is at a fixed distance from the frame pointer
+	bool   HasStaticStack() const { return m_staticStack; }
+
+	// Returns the number of dwords on the stack above the variables when the
+	// instruction is reached. Only valid if HasStaticStack
+	int    GetStackDepth(asUINT instrIdx) const { return m_stackDepth[instrIdx]; }
+
+	// Returns the number of dwords that a script function pops off the stack when it
+	// returns: the arguments, the object pointer, and the pointer to the location of
+	// a value returned on the stack. Registered functions pop the same
+	static int GetPopSize(asCScriptFunction *func);
+
 	// Returns true if the value register may be read before being written after
 	// the instruction, or when the instruction is reached, respectively
 	bool   IsVRLiveAfter(asUINT instrIdx) const { return (m_instrs[instrIdx].flags & JIT_INSTR_VR_LIVE) != 0; }
@@ -164,6 +177,8 @@ protected:
 	void AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots);
 	void AnalyseDirtySlots();
 	void AnalyseSlotLiveness();
+	void AnalyseStackDepth();
+	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
 	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
 	void AddSlotUse(int offset, asUINT kind);
@@ -187,6 +202,8 @@ protected:
 	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
 	std::vector<asUINT>     m_liveAfter;   // per instruction mask of cached slots live after it
 	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
+	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
+	bool                    m_staticStack;
 	bool                    m_retReadsVR;
 };
 
