@@ -615,6 +615,10 @@ void CJITCodeGen::EmitPrologue()
 {
 	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>());
 	m_func = func;
+#ifdef JIT_NATIVE_RETURN
+	// Native callers get the value register with the result, see asBC_RET
+	AddVRReturn(func->detail());
+#endif
 
 	// Only 128bit vectors are used, whose VEX encoded instructions clear the upper
 	// halves of the AVX registers, so the VZEROUPPER on return isn't needed

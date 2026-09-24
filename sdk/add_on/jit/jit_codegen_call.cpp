@@ -57,9 +57,9 @@ void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT idx)
 
 // After a call that has completed the instruction: picks up the value register if
 // it is read later, and the variables if a debugger may have modified them
-void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
+void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 {
-	if( m_code.IsVRLiveAfter(idx) )
+	if( reloadVR && m_code.IsVRLiveAfter(idx) )
 		ReloadVR();
 
 	// With a debugger attached the variables may have been modified through the context
@@ -106,6 +106,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	Label slow = m_uc.new_label();
 	Label done = m_uc.new_label();
 	BaseNode *cold = 0;
+	bool vrReturned = false;
 	if( native )
 	{
 		const SJITObjectLayout &layout = JIT_GetObjectLayout();
@@ -142,7 +143,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		// which the call state must not be marked for then. A static stack pointer
 		// is known after any call
 		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
-		EmitNativeCall(idx, target, r, slow, !reload);
+		bool vrInReg = !callee || kind == JIT_CALL_PTR || CJITByteCode::ReturnsInVR(callee);
+		vrReturned = EmitNativeCall(idx, target, r, slow, !reload, vrInReg);
 		EmitLeaveIf(r);
 		if( reload || m_staticStack )
 			ReloadStackAfter(idx);
@@ -168,11 +170,13 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
 	ReloadStackAfter(idx);
+	if( vrReturned )
+		ReloadVR();
 	if( cold )
 		EndCold(cold, done);
 
 	m_uc.bind(done);
-	EmitReloadAfterCall(idx);
+	EmitReloadAfterCall(idx, !vrReturned);
 }
 
 // Finds the implementation of a virtual or interface method for the object on the
@@ -223,8 +227,10 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 // of a script function, or this function if target isn't valid. Jumps to slow if
 // the call stack has reached the call limit, which is passed on. On 64bit hosts
 // the call state may be marked with the sign bit of the stack index, so that the
-// function doesn't restore the frame and the registers, see JITFunction
-void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark)
+// function doesn't restore the frame and the registers, see JITFunction. It then
+// returns the value register too, which is taken if vrInReg is set and the value
+// register is live, and true is returned then
+bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
@@ -260,6 +266,20 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	call->set_arg(1, Imm(0));
 	call->set_arg(2, m_callLimit);
 	call->set_ret(0, result);
+#ifdef JIT_NATIVE_RETURN
+	if( mark )
+	{
+		AddVRReturn(call->detail());
+		if( vrInReg && m_vr.is_valid() && m_code.IsVRLiveAfter(idx) )
+		{
+			call->set_ret(1, m_vr);
+			return true;
+		}
+	}
+#else
+	(void)vrInReg;
+#endif
+	return false;
 }
 
 // Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
@@ -404,13 +424,13 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			// and stack pointer need to be written back
 			const SJITContextLayout &layout = JIT_GetContextLayout();
 			int popSize = asBC_WORDARG0(bc);
-			if( m_code.RetReadsVR() )
-				SyncVR();
+			bool vr = m_code.RetReadsVR();
 
 			// Pop the call state like asCContext::PopCallState, unless the function
 			// was called by the application or as a nested call, which finishes the
 			// execution like the VM does
-			Label finish = m_uc.new_label();
+			Label finish   = m_uc.new_label();
+			Label finished = m_uc.new_label();
 			Gp length = m_uc.new_gp_ptr();
 			Gp array  = m_uc.new_gp_ptr();
 			Gp t      = m_uc.new_gp_ptr();
@@ -421,7 +441,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 #ifdef JIT_NATIVE_RETURN
 			{
 				// Native callers keep their frame and set the program pointer and the
-				// stack pointer themselves, so only the call stack is restored for them
+				// stack pointer themselves, so only the call stack is restored for them.
+				// They get the value register in the second return register
 				Label vm = m_uc.new_label();
 				Gp index = m_uc.new_gp_ptr();
 				m_uc.load(index, PtrAt(state, 4));
@@ -430,12 +451,17 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 				m_uc.store_u32(ContextField(layout.callStackLength), length);
 				Gp zero = m_uc.new_gp32();
 				m_uc.mov(zero, Imm(0));
-				m_uc.ret(zero);
+				if( vr && m_vr.is_valid() )
+					m_uc.ret(zero, m_vr);
+				else
+					m_uc.ret(zero);
 				m_uc.bind(vm);
 			}
 #endif
+			if( vr )
+				SyncVR();
 			m_uc.load(t, state);
-			m_uc.j(finish, test_z(t));
+			m_uc.j(finished, test_z(t));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), t);
 			m_uc.load(t, PtrAt(state, 1));
 			m_uc.store(ContextField(layout.currentFunction), t);
@@ -453,6 +479,9 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			m_uc.ret(zero);
 
 			m_uc.bind(finish);
+			if( vr )
+				SyncVR();
+			m_uc.bind(finished);
 			if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
 				StoreFrame();
 			SyncStack();

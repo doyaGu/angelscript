@@ -123,9 +123,9 @@ protected:
 	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
-	void EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark);
+	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
-	void EmitReloadAfterCall(asUINT idx);
+	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
 
 	// Architecture specific code (jit_codegen_arch.cpp)
 	void SetHomeRegHints(asUINT slotMask);
@@ -133,6 +133,7 @@ protected:
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 	Mem  PtrElement(const Gp &array, const Gp &index);
 	void SetSignBit(const Gp &r);
+	void AddVRReturn(asmjit::FuncDetail &detail);
 
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);
