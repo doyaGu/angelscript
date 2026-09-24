@@ -40,11 +40,19 @@ static const int PTR_BYTES = AS_PTR_SIZE * 4;
 
 // After a helper that may hand control back to the VM: leave if requested,
 // otherwise pick up the registers the helper may have changed
-void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT /*idx*/)
+void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT idx)
 {
 	EmitLeaveIf(result);
 	ReloadStack();
-	ReloadVR();
+	EmitReloadAfterCall(idx);
+}
+
+// After a call that has completed the instruction: picks up the value register if
+// it is read later, and the variables if a debugger may have modified them
+void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
+{
+	if( m_code.IsVRLiveAfter(idx) )
+		ReloadVR();
 
 	// With a debugger attached the variables may have been modified through the context
 	if( !m_cached.empty() )
@@ -698,8 +706,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	m_uc.store_zero_reg(callingFunc);
 
-	// Pop the arguments and store the return value like the VM does
+	// Pop the arguments and store the return value like the VM does, except
+	// that the value register is left alone if it isn't read afterwards
 	m_uc.add(m_sp, m_sp, Imm(popSize * 4));
+	bool vrLive = m_code.IsVRLiveAfter(idx);
 	if( retOnStack )
 	{
 		switch( retKind )
@@ -726,7 +736,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			break;
 		}
 	}
-	else switch( retKind )
+	else if( retKind == RET_HANDLE )
+	{
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), retGp);
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectType)), PtrConst(asPWORD(rt.GetTypeInfo())));
+	}
+	else if( vrLive ) switch( retKind )
 	{
 	case RET_I32:
 		StoreVR32(retGp);
@@ -761,10 +776,6 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		break;
 	case RET_PTR:
 		StoreVRPtr(retGp);
-		break;
-	case RET_HANDLE:
-		m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), retGp);
-		m_uc.store(RegsField(offsetof(asSVMRegisters, objectType)), PtrConst(asPWORD(rt.GetTypeInfo())));
 		break;
 	default:
 		break;

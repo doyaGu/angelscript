@@ -597,11 +597,10 @@ void CJITCodeGen::EmitBailStubs()
 		Bail(m_bails[n].second);
 	}
 
-	// Common tail: the cached variables have been stored by the bail sites,
-	// so only the VM registers and the program pointer remain
+	// Common tail: the cached variables and the value register have been stored
+	// by the bail sites, so only the stack pointer and the program pointer remain
 	m_uc.bind(m_bailCommon);
 	SyncStack();
-	SyncVR();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 	Leave();
 }
@@ -1008,12 +1007,15 @@ void CJITCodeGen::ReloadSlots(asUINT mask)
 	}
 }
 
+// The value register is only written back where it is live, so that the register
+// isn't kept alive for this, e.g. across calls returning nothing
 void CJITCodeGen::SyncAll(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
 	StoreDirtySlots(m_code.GetDirtyMask(idx));
 	SyncStack();
-	SyncVR();
+	if( m_code.IsVRLiveBefore(idx) )
+		SyncVR();
 	SetPC(instr.pos);
 }
 
@@ -1034,10 +1036,11 @@ void CJITCodeGen::SyncAllSlots(asUINT pos)
 	SetPC(pos);
 }
 
-void CJITCodeGen::ReloadAll()
+void CJITCodeGen::ReloadAll(asUINT idx)
 {
 	ReloadStack();
-	ReloadVR();
+	if( m_code.IsVRLiveAfter(idx) )
+		ReloadVR();
 	ReloadCachedSlots();
 }
 
@@ -1055,6 +1058,8 @@ void CJITCodeGen::Bail(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
 	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	if( m_code.IsVRLiveBefore(idx) )
+		SyncVR();
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
 	m_uc.j(m_bailCommon);
 }
@@ -1812,7 +1817,7 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			EmitLeaveIf(r);
 
 			// The line callback may have modified variables
-			ReloadAll();
+			ReloadAll(idx);
 			EndCold(cold, cont);
 			m_uc.bind(cont);
 		}

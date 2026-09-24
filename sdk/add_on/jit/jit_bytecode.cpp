@@ -759,6 +759,14 @@ void CJITByteCode::AnalyseVRLiveness()
 	}
 }
 
+bool CJITByteCode::IsVRLiveBefore(asUINT instrIdx) const
+{
+	asEBCInstr op = m_instrs[instrIdx].op;
+	if( ReadsVR(op) && (op != asBC_RET || m_retReadsVR) )
+		return true;
+	return !WritesVR(op) && IsVRLiveAfter(instrIdx);
+}
+
 SJITSlot *CJITByteCode::FindSlot(int offset)
 {
 	std::map<int, int>::iterator it = m_slotIndex.find(offset);

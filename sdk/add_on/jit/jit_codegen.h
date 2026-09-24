@@ -121,6 +121,7 @@ protected:
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
 	void EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
+	void EmitReloadAfterCall(asUINT idx);
 
 	// Architecture specific code (jit_codegen_arch.cpp)
 	void SetHomeRegHints();
@@ -181,7 +182,7 @@ protected:
 	void SyncAll(asUINT idx);        // writes back what the VM may observe at the instruction
 	void SyncForCall(asUINT idx);    // like SyncAll but without the value register, which calls clobber
 	void SyncAllSlots(asUINT pos);   // writes back everything, program pointer set to pos
-	void ReloadAll();
+	void ReloadAll(asUINT idx);      // loads what the VM may have changed when continuing after the instruction
 
 	// Leaves native code. Bail makes the VM re-execute the instruction
 	void  Bail(asUINT idx);

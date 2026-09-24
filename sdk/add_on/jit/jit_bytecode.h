@@ -111,6 +111,11 @@ public:
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
 
+	// Returns true if the value register may be read before being written after
+	// the instruction, or when the instruction is reached, respectively
+	bool   IsVRLiveAfter(asUINT instrIdx) const { return (m_instrs[instrIdx].flags & JIT_INSTR_VR_LIVE) != 0; }
+	bool   IsVRLiveBefore(asUINT instrIdx) const;
+
 	// Instructions after which all cached variables have been written to memory
 	static bool IsSyncPoint(asEBCInstr op);
 	// How an instruction accesses the variables in its operands
