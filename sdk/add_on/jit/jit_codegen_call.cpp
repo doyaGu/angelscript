@@ -98,9 +98,13 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	else if( kind == JIT_CALL_PTR )
 		native = true;
 
-	// The native calls push the frame on the call stack, only the helper needs it
+	// The native calls push the frame and the stack pointer on the call stack and
+	// pass the stack pointer, only the helper needs them in the VM registers.
+	// Arguments passed on the stack cost a store too though
 	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
-	SyncStack();
+	int spOffset = m_spOffset;
+	if( !m_spInArg )
+		SyncStack();
 
 	Gp r = m_uc.new_gp32();
 	Label slow = m_uc.new_label();
@@ -155,6 +159,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		cold = BeginCold(slow);
 	}
 
+	m_spOffset = spOffset;
+	if( m_spInArg )
+		SyncStack();
 	if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
 		StoreFrame();
 	SetPC(instr.pos);
@@ -244,7 +251,8 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.store(state, m_fp);
 	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code.GetFunction())));
 	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
-	m_uc.store(PtrAt(state, 3), StackPointer());
+	Gp sp = StackPointer();
+	m_uc.store(PtrAt(state, 3), sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
@@ -256,7 +264,8 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.add(length, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
 
-	FuncSignature sig = FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>();
+	FuncSignature sig = m_spInArg ? FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT, asDWORD*>() :
+	                                FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>();
 	InvokeNode *call = 0;
 	if( target.is_valid() )
 		m_uc.cc->invoke(Out(call), target, sig);
@@ -265,6 +274,8 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	call->set_arg(0, m_regs);
 	call->set_arg(1, Imm(0));
 	call->set_arg(2, m_callLimit);
+	if( m_spInArg )
+		call->set_arg(3, sp);
 	call->set_ret(0, result);
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
@@ -291,17 +302,19 @@ void CJITCodeGen::EmitDirectEntry()
 	asCScriptFunction *func = m_code.GetFunction();
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 
-	// The frame starts at the stack pointer of the caller, which a static stack
-	// pointer is computed from, and the arguments are above it
+	// The frame starts at the stack pointer of the caller, and the arguments are
+	// above it. JIT_PrepareFrame takes it from the VM registers, see JITFunction
 	Label slow  = m_uc.new_label();
 	Label ready = m_uc.new_label();
 	Gp blocks = m_uc.new_gp_ptr();
 	Gp index  = m_uc.new_gp_ptr();
 	Gp limit  = m_uc.new_gp_ptr();
-	if( m_staticStack )
-		m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	if( m_spInArg )
+		m_uc.mov(m_fp, m_callerSp);
 	else
-		m_uc.mov(m_fp, m_sp);
+		m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	if( !m_staticStack )
+		m_uc.mov(m_sp, m_fp);
 	m_uc.load(blocks, ContextField(layout.stackBlocks));
 	m_uc.load_u32(index, ContextField(layout.stackIndex));
 	m_uc.sub(limit, m_fp, Imm(int(func->scriptData->stackNeeded + layout.reserveStack) * 4));
@@ -334,6 +347,8 @@ void CJITCodeGen::EmitDirectEntry()
 	m_uc.j(InstrLabel(0));
 
 	m_uc.bind(slow);
+	if( m_spInArg )
+		m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), m_fp);
 	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(func)));
 	SetPC(0);
 	InvokeNode *call = Invoke((const void*)JIT_PrepareFrame, FuncSignature::build<int, asSVMRegisters*>());

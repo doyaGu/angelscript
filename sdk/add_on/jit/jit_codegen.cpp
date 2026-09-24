@@ -22,6 +22,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_func       = 0;
 	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
+	m_spInArg    = uc.is_64bit();
 	m_staticStack = code.HasStaticStack();
 	m_spOffset   = 0;
 	m_vrAddrValid = false;
@@ -95,6 +96,7 @@ bool CJITCodeGen::Generate()
 	// Entered by the VM, which has set up the frame. Jump to the requested entry point
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
+	ReloadStack();
 	if( m_callLimit.is_valid() )
 	{
 		// The native calls may push call states as long as the call stack doesn't
@@ -613,7 +615,7 @@ bool CJITCodeGen::EmitInstruction(asUINT idx)
 
 void CJITCodeGen::EmitPrologue()
 {
-	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>());
+	FuncNode *func = m_uc.add_func(FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT, asDWORD*>());
 	m_func = func;
 #ifdef JIT_NATIVE_RETURN
 	// Native callers get the value register with the result, see asBC_RET
@@ -628,6 +630,11 @@ void CJITCodeGen::EmitPrologue()
 	m_arg  = m_uc.new_gp_ptr("jitArg");
 	func->set_arg(0, m_regs);
 	func->set_arg(1, m_arg);
+	if( m_spInArg )
+	{
+		m_callerSp = m_uc.new_gp_ptr("callerSp");
+		func->set_arg(3, m_callerSp);
+	}
 
 	// The call limit is only needed for the calls of script functions
 	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
@@ -649,13 +656,10 @@ void CJITCodeGen::EmitPrologue()
 		m_guarded = m_callLimit.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1 ||
 		            CallsBehaviourDirectly(instrs[n]);
 
-	// The frame pointer is set up by the entry paths
+	// The frame and stack pointers are set up by the entry paths
 	m_fp = m_uc.new_gp_ptr("fp");
 	if( !m_staticStack )
-	{
 		m_sp = m_uc.new_gp_ptr("sp");
-		m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
-	}
 
 	if( m_vrInReg )
 		m_vr = m_uc.new_gp64("vr");

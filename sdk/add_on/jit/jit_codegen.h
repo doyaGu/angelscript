@@ -238,12 +238,14 @@ protected:
 
 	Gp  m_regs;     // asSVMRegisters*
 	Gp  m_arg;      // jitArg
+	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_sp;       // stack pointer, unless the stack is static
 	Gp  m_vr;       // value register (64bit hosts only)
 	Gp  m_bailPC;   // program pointer to set when bailing
 	bool m_vrInReg;
+	bool m_spInArg;     // native callers pass the stack pointer as argument (64bit hosts only)
 	bool m_staticStack;
 	int  m_spOffset;    // offset of the stack pointer from fp if the stack is static
 	bool m_guarded;

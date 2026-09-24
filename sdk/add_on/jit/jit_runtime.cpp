@@ -154,11 +154,11 @@ int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 	asCContext *ctx = GetContext(regs);
 	JITFunction func = reinterpret_cast<JITFunction>(ctx->m_currentFunction->scriptData->jitFunction);
 #ifdef AS_NO_EXCEPTIONS
-	return func(regs, jitArg | JIT_GUARDED_ENTRY, 0);
+	return func(regs, jitArg | JIT_GUARDED_ENTRY, 0, 0);
 #else
 	try
 	{
-		return func(regs, jitArg | JIT_GUARDED_ENTRY, 0);
+		return func(regs, jitArg | JIT_GUARDED_ENTRY, 0, 0);
 	}
 	catch(...)
 	{
@@ -211,7 +211,7 @@ static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptF
 
 	if( ctx->PushCallState() < 0 )
 		return 1;
-	return jitFunc(regs, 0, callLimit);
+	return jitFunc(regs, 0, callLimit, regs->stackPointer);
 }
 
 // Finds the implementation of a virtual or interface method for the object on

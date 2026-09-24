@@ -25,8 +25,11 @@ class asCObjectType;
 // Signature of the generated functions. The VM calls them as asJITFunction, with
 // the 1-based index of the entry point in jitArg, and ignores the return value.
 // Native callers push the call state of the caller like asCContext::PushCallState
-// and call them with jitArg 0, the arguments on the script stack, and the stack
-// pointer in the VM registers. The function then sets up its frame the way
+// and call them with jitArg 0, the arguments on the script stack, and their stack
+// pointer in stackPointer, which the VM registers may not have on 64bit hosts. On
+// 32bit hosts the generated code leaves stackPointer out and has the stack pointer
+// in the VM registers. The VM leaves callLimit and stackPointer undefined. The
+// function then sets up its frame the way
 // asCContext::PrepareScriptFunction does, but writes the frame, i.e. the stack
 // frame pointer and the current function of the context, back only where the VM
 // or the engine may see it. On 64bit hosts native callers may mark the call state
@@ -41,7 +44,7 @@ class asCObjectType;
 // native calls. The return value is 0 if the function returned to its caller, and
 // non-zero if the VM must take over, in which case the VM registers describe where
 // to continue.
-typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit);
+typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 
 // Layout of the context members that the generated code accesses directly. The
 // offsets are relative to the VM registers, which are embedded in the context
