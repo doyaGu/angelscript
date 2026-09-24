@@ -283,7 +283,8 @@ void CJITCodeGen::EmitDirectEntry()
 	for( asUINT n = 0; n < vars.GetLength(); n++ )
 		if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
 			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
-	m_uc.sub(m_sp, m_sp, Imm(int(func->scriptData->variableSpace) * 4));
+	if( func->scriptData->variableSpace )
+		m_uc.sub(m_sp, m_sp, Imm(int(func->scriptData->variableSpace) * 4));
 	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
@@ -414,7 +415,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			m_uc.load(t, mem_ptr(state, 2 * PTR_BYTES));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
 			m_uc.load(t, mem_ptr(state, 3 * PTR_BYTES));
-			m_uc.add(t, t, Imm(popSize * 4));
+			if( popSize )
+				m_uc.add(t, t, Imm(popSize * 4));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), t);
 			m_uc.load_u32(t, mem_ptr(state, 4 * PTR_BYTES));
 			m_uc.store_u32(ContextField(layout.stackIndex), t);
@@ -726,7 +728,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Pop the arguments and store the return value like the VM does, except
 	// that the value register is left alone if it isn't read afterwards
-	m_uc.add(m_sp, m_sp, Imm(popSize * 4));
+	if( popSize )
+		m_uc.add(m_sp, m_sp, Imm(popSize * 4));
 	bool vrLive = m_code.IsVRLiveAfter(idx);
 	if( retOnStack )
 	{
