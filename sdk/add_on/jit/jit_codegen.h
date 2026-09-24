@@ -86,7 +86,8 @@ protected:
 	void EmitEntryStubs();
 	void EmitBailStubs();
 	void EmitDirectEntry();
-	void AssignHomeRegs();
+	void AssignHomeRegs(asUINT slotMask);
+	void SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount);
 	void CopyLiveArgs();
 	bool IsLiveThrough(const asmjit::Reg &reg) const;
 
@@ -124,7 +125,7 @@ protected:
 	void EmitReloadAfterCall(asUINT idx);
 
 	// Architecture specific code (jit_codegen_arch.cpp)
-	void SetHomeRegHints();
+	void SetHomeRegHints(asUINT slotMask);
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 

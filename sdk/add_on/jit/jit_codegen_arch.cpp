@@ -14,18 +14,23 @@ using namespace asmjit::ujit;
 // Callee-saved home registers for the registers used all through the function,
 // see AssignHomeRegs. The allocator uses the scratch registers ECX|RCX and EDI|R15
 // for jumps, so they are avoided. Otherwise these are only hints, so if a register
-// isn't available, e.g. EBP|RBP as frame pointer, the allocator picks another one
-void CJITCodeGen::SetHomeRegHints()
+// isn't available, e.g. EBP|RBP as frame pointer, the allocator picks another one.
+// The cached variables in the mask get the rest, of which 32bit x86 has none
+void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 {
 	x86::Compiler *cc = m_uc.cc;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(x86::Gp::kIdBx);
 	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(x86::Gp::kIdBp);
 	if( Is64Bit() )
 	{
-		// RSI and RDI aren't callee-saved on System V
+		// RSI and RDI aren't callee-saved on System V, and neither are XMM6-15
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdR14);
 		if( m_depth.is_valid() )
 			cc->virt_reg_by_reg(m_depth)->set_home_id_hint(x86::Gp::kIdR12);
+
+		static const uint32_t gpIds[] = { x86::Gp::kIdSi, x86::Gp::kIdDi, x86::Gp::kIdR13, x86::Gp::kIdR12 };
+		static const uint32_t vecIds[] = { 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+		SetSlotHomeHints(slotMask, gpIds, m_depth.is_valid() ? 3 : 4, vecIds, 10);
 	}
 	else
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdSi);
@@ -111,8 +116,9 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 #elif defined(ASMJIT_UJIT_AARCH64)
 
 // Callee-saved home registers, see the x86 version. The allocator's scratch
-// registers are X27 and X28
-void CJITCodeGen::SetHomeRegHints()
+// registers are X27 and X28. Only the lower halves of V8-V15 are preserved, which
+// doesn't suffice for the 128bit registers of cached float variables
+void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 {
 	a64::Compiler *cc = m_uc.cc;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(19);
@@ -120,6 +126,9 @@ void CJITCodeGen::SetHomeRegHints()
 	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
 	if( m_depth.is_valid() )
 		cc->virt_reg_by_reg(m_depth)->set_home_id_hint(22);
+
+	static const uint32_t gpIds[] = { 23, 24, 25, 26 };
+	SetSlotHomeHints(slotMask, gpIds, 4, 0, 0);
 }
 
 void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod)
@@ -160,7 +169,7 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 
 #else
 
-void CJITCodeGen::SetHomeRegHints()
+void CJITCodeGen::SetHomeRegHints(asUINT)
 {
 }
 

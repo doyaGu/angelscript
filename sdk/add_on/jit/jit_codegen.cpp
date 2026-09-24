@@ -158,11 +158,27 @@ bool CJITCodeGen::Generate()
 	// Callee-saved registers must be saved and restored on each entry, which only
 	// pays off for the registers used all through the function if calls are made
 	// repeatedly, i.e. in loops. Short functions that are called often, like
-	// recursive ones, get slower otherwise
+	// recursive ones, get slower otherwise. The cached variables read after the calls
+	// in loops would be saved and reloaded around each call too
+	std::vector<int> loopDepth(instrs.size() + 1);
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+		{
+			loopDepth[instrs[n].target]++;
+			loopDepth[n + 1]--;
+		}
 	bool callsInLoop = false;
-	for( asUINT n = 0; n < instrs.size() && !callsInLoop; n++ )
-		for( int t = instrs[n].target; t >= 0 && asUINT(t) <= n && !callsInLoop; t++ )
-			callsInLoop = calls[t];
+	asUINT liveAcrossCalls = 0;
+	int depth = 0;
+	for( asUINT n = 0; n < instrs.size(); n++ )
+	{
+		depth += loopDepth[n];
+		if( depth > 0 && calls[n] )
+		{
+			callsInLoop = true;
+			liveAcrossCalls |= m_code.GetLiveAfterMask(n);
+		}
+	}
 
 	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
 	Leave();
@@ -181,7 +197,7 @@ bool CJITCodeGen::Generate()
 
 	m_uc.end_func();
 	if( callsInLoop )
-		AssignHomeRegs();
+		AssignHomeRegs(liveAcrossCalls);
 	return true;
 }
 
@@ -189,8 +205,9 @@ bool CJITCodeGen::Generate()
 // through the function. AsmJit prefers the registers that calls clobber though, so
 // they would be saved and reloaded around every call. This gives them callee-saved
 // home registers instead. The allocator assigns the arguments to the registers they
-// are passed in, so they are copied to the registers used by the function first
-void CJITCodeGen::AssignHomeRegs()
+// are passed in, so they are copied to the registers used by the function first.
+// The cached variables in the mask get the callee-saved registers left over
+void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
 {
 	BaseNode *cursor = m_uc.cc->set_cursor(m_func);
 	Gp regsArg = m_uc.new_gp_ptr("regsArg");
@@ -204,8 +221,47 @@ void CJITCodeGen::AssignHomeRegs()
 	}
 	m_uc.cc->set_cursor(cursor);
 
-	SetHomeRegHints();
+	SetHomeRegHints(slotMask);
 	CopyLiveArgs();
+}
+
+// Gives the cached variables in the mask, the most used first, home registers from
+// the ones passed as far as the calling convention preserves them whole
+void CJITCodeGen::SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount)
+{
+	const CallConv &conv = m_func->detail().call_conv();
+	const std::vector<SJITSlot> &slots = m_code.GetSlots();
+	asUINT gpNext = 0, vecNext = 0;
+	for( ;; )
+	{
+		int best = -1;
+		for( asUINT n = 0; n < slots.size(); n++ )
+			if( slots[n].cacheBit >= 0 && (slotMask & (asUINT(1) << slots[n].cacheBit)) &&
+			    (best < 0 || slots[n].useCount > slots[best].useCount) )
+				best = int(n);
+		if( best < 0 )
+			break;
+		slotMask &= ~(asUINT(1) << slots[best].cacheBit);
+
+		const SCachedSlot &cached = m_cached[m_cachedIndex[slots[best].offset]];
+		if( cached.gp.is_valid() )
+		{
+			while( gpNext < gpCount && !(conv.preserved_regs(RegGroup::kGp) & (RegMask(1) << gpIds[gpNext])) )
+				gpNext++;
+			if( gpNext < gpCount )
+				m_uc.cc->virt_reg_by_reg(cached.gp)->set_home_id_hint(gpIds[gpNext++]);
+		}
+		else
+		{
+			VirtReg *vreg = m_uc.cc->virt_reg_by_reg(cached.vec);
+			if( conv.save_restore_reg_size(RegGroup::kVec) < vreg->virt_size() )
+				continue;
+			while( vecNext < vecCount && !(conv.preserved_regs(RegGroup::kVec) & (RegMask(1) << vecIds[vecNext])) )
+				vecNext++;
+			if( vecNext < vecCount )
+				vreg->set_home_id_hint(vecIds[vecNext++]);
+		}
+	}
 }
 
 // AsmJit moves a register passed to a call into the argument register, so if it is
