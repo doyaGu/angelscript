@@ -104,6 +104,11 @@ public:
 	// a newer value than the memory when the instruction is reached
 	asUINT GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
 
+	// Returns the mask of the register cached variables to store before or after
+	// the instruction, because a loop is entered in which they aren't modified
+	asUINT GetStoresBefore(asUINT instrIdx) const { return m_storeBefore[instrIdx]; }
+	asUINT GetStoresAfter(asUINT instrIdx) const  { return m_storeAfter[instrIdx]; }
+
 	// Returns the mask of the register cached variables that may be read before
 	// being written when the block of the instruction is entered
 	asUINT GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
@@ -140,6 +145,7 @@ protected:
 	void AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots);
 	void AnalyseDirtySlots();
 	void AnalyseSlotLiveness();
+	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
 	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
 	void AddSlotUse(int offset, asUINT kind);
 	void CollectSlotUses(const SJITInstr &instr);
@@ -157,6 +163,8 @@ protected:
 	std::map<asUINT, std::vector<int> > m_switchTargets;
 	std::vector<int>        m_noTargets;
 	std::vector<asUINT>     m_dirty;       // per instruction mask of possibly dirty cached slots
+	std::vector<asUINT>     m_storeBefore; // per instruction mask of cached slots stored before it
+	std::vector<asUINT>     m_storeAfter;  // per instruction mask of cached slots stored after it
 	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
 	bool                    m_retReadsVR;
 };

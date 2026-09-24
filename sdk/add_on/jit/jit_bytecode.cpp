@@ -581,19 +581,114 @@ void CJITByteCode::AnalyseSlotLiveness()
 	}
 }
 
+// The instructions that the code generator may emit together with a following conditional jump
+static bool IsCompare(asEBCInstr op)
+{
+	switch( op )
+	{
+	case asBC_CMPd:
+	case asBC_CMPu:
+	case asBC_CMPf:
+	case asBC_CMPi:
+	case asBC_CMPIi:
+	case asBC_CMPIf:
+	case asBC_CMPIu:
+	case asBC_CMPi64:
+	case asBC_CMPu64:
+	case asBC_CmpPtr:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void CJITByteCode::GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const
+{
+	succ.clear();
+	const SJITBlock &block = m_blocks[blockIdx];
+	const SJITInstr &last = m_instrs[block.last];
+	if( last.op == asBC_JMPP )
+	{
+		const std::vector<int> &targets = GetSwitchTargets(block.last);
+		for( asUINT t = 0; t < targets.size(); t++ )
+			succ.push_back(m_instrs[targets[t]].block);
+	}
+	else if( last.op != asBC_RET )
+	{
+		if( last.target >= 0 )
+			succ.push_back(m_instrs[last.target].block);
+		if( last.op != asBC_JMP && block.last + 1 < m_instrs.size() )
+			succ.push_back(m_instrs[block.last + 1].block);
+	}
+}
+
 // Forward data flow over the blocks to find out which register cached
 // variables may hold a newer value than the memory at each instruction. Only
 // those need to be stored when the VM must see the variables
 void CJITByteCode::AnalyseDirtySlots()
 {
 	m_dirty.assign(m_instrs.size(), 0);
+	m_storeBefore.assign(m_instrs.size(), 0);
+	m_storeAfter.assign(m_instrs.size(), 0);
 
-	bool anyCached = false;
+	asUINT cachedMask = 0;
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheBit >= 0 )
-			anyCached = true;
-	if( !anyCached )
+			cachedMask |= 1u << m_slots[n].cacheBit;
+	if( cachedMask == 0 )
 		return;
+
+	// The calls in a loop store the dirty variables on every iteration, also those
+	// that are only modified before the loop. The variables that a loop with calls
+	// doesn't modify are stored where it is entered instead: before the branch into
+	// it, or the compare emitted together with the branch, or after the instruction
+	// that falls into it. Loops are the ranges from the target of a backward branch
+	// to the branch
+	std::vector<asUINT> keepBefore(m_instrs.size(), 0), keepAfter(m_instrs.size(), 0);
+	std::vector<asUINT> succ;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		int top = m_instrs[n].target;
+		if( !IsBranch(m_instrs[n].op) || top < 0 || asUINT(top) > n )
+			continue;
+
+		asUINT written = 0;
+		bool calls = false;
+		for( asUINT k = asUINT(top); k <= n; k++ )
+		{
+			asUINT uses, defs;
+			GetSlotMasks(m_instrs[k], uses, defs);
+			written |= defs;
+			calls = calls || IsSyncPoint(m_instrs[k].op);
+		}
+		asUINT keep = cachedMask & ~written;
+		if( !calls || keep == 0 )
+			continue;
+
+		for( asUINT b = 0; b < m_blocks.size(); b++ )
+		{
+			const SJITBlock &block = m_blocks[b];
+			if( block.last >= asUINT(top) && block.last <= n )
+				continue;
+
+			GetSuccessors(b, succ);
+			bool enters = false;
+			for( asUINT k = 0; k < succ.size(); k++ )
+				enters = enters || (m_blocks[succ[k]].first >= asUINT(top) && m_blocks[succ[k]].first <= n);
+			if( !enters )
+				continue;
+
+			asUINT last = block.last;
+			if( IsBranch(m_instrs[last].op) || m_instrs[last].op == asBC_JMPP )
+			{
+				if( m_instrs[last].op != asBC_JMP && last > block.first && IsCompare(m_instrs[last - 1].op) )
+					last--;
+				keepBefore[last] |= keep;
+			}
+			else
+				keepAfter[last] |= keep;
+		}
+	}
 
 	std::vector<asUINT> in(m_blocks.size(), 0);
 	bool changed = true;
@@ -602,11 +697,13 @@ void CJITByteCode::AnalyseDirtySlots()
 		changed = false;
 		for( asUINT b = 0; b < m_blocks.size(); b++ )
 		{
-			SJITBlock &block = m_blocks[b];
+			const SJITBlock &block = m_blocks[b];
 			asUINT mask = in[b];
 			for( asUINT n = block.first; n <= block.last; n++ )
 			{
 				const SJITInstr &instr = m_instrs[n];
+				m_storeBefore[n] = mask & keepBefore[n];
+				mask &= ~keepBefore[n];
 				m_dirty[n] = mask;
 
 				if( IsSyncPoint(instr.op) )
@@ -617,30 +714,15 @@ void CJITByteCode::AnalyseDirtySlots()
 					GetSlotMasks(instr, uses, defs);
 					mask |= defs;
 				}
+
+				m_storeAfter[n] = mask & keepAfter[n];
+				mask &= ~keepAfter[n];
 			}
 
 			// Propagate to the successors
-			const SJITInstr &last = m_instrs[block.last];
-			int succ[2] = { -1, -1 };
-			if( last.op == asBC_JMPP )
+			GetSuccessors(b, succ);
+			for( asUINT k = 0; k < succ.size(); k++ )
 			{
-				const std::vector<int> &targets = GetSwitchTargets(block.last);
-				for( asUINT t = 0; t < targets.size(); t++ )
-				{
-					asUINT s = m_instrs[targets[t]].block;
-					if( (in[s] | mask) != in[s] ) { in[s] |= mask; changed = true; }
-				}
-			}
-			else if( last.op != asBC_RET )
-			{
-				if( last.target >= 0 )
-					succ[0] = m_instrs[last.target].block;
-				if( last.op != asBC_JMP && block.last + 1 < m_instrs.size() )
-					succ[1] = m_instrs[block.last + 1].block;
-			}
-			for( int k = 0; k < 2; k++ )
-			{
-				if( succ[k] < 0 ) continue;
 				if( (in[succ[k]] | mask) != in[succ[k]] )
 				{
 					in[succ[k]] |= mask;

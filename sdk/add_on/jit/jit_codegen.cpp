@@ -94,6 +94,9 @@ bool CJITCodeGen::Generate()
 		if( m_uc.cc->has_logger() )
 			m_uc.commentf("%d %s", instr.pos, asBCInfo[instr.op].name);
 #endif
+		// Variables that the loop entered next doesn't modify are stored before it
+		StoreDirtySlots(m_code.GetStoresBefore(idx));
+
 		BaseNode *start = m_uc.cc->cursor();
 		if( instr.flags & JIT_INSTR_BAIL )
 		{
@@ -131,6 +134,10 @@ bool CJITCodeGen::Generate()
 			// An address left to the next instruction must not outlive it
 			assert( !addrPending || !m_vrAddrValid );
 			(void)addrPending;
+
+			// The stores planned for the second instruction of a group would be missed
+			assert( consumed == 1 || m_code.GetStoresBefore(idx + 1) == 0 );
+			StoreDirtySlots(m_code.GetStoresAfter(idx + consumed - 1));
 
 			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
 				SyncAllSlots(instrs[idx + consumed].pos);
