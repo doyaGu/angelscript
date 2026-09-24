@@ -63,7 +63,8 @@ bool CJITCodeGen::Generate()
 
 	m_entryLabels.resize(entries.size());
 	for( asUINT n = 0; n < entries.size(); n++ )
-		m_entryLabels[n] = m_uc.new_label();
+		if( EntryNeedsStub(n) )
+			m_entryLabels[n] = m_uc.new_label();
 
 	m_bailCommon = m_uc.new_label();
 	m_leave = m_uc.new_label();
@@ -637,21 +638,45 @@ void CJITCodeGen::EmitPrologue()
 	}
 }
 
-// Binary search on the 1-based entry index in jitArg
+// Whether entering at the entry point needs to load anything, otherwise the
+// dispatch goes straight to its instruction
+bool CJITCodeGen::EntryNeedsStub(asUINT n) const
+{
+	if( m_options.syncEveryInstr )
+		return m_vrInReg || !m_cached.empty();
+	asUINT entry = m_code.GetEntries()[n];
+	const SJITBlock &block = m_code.GetBlocks()[m_code.GetInstructions()[entry].block];
+	return (m_vrInReg && block.vrLiveIn) || m_code.GetLiveInMask(entry) != 0;
+}
+
+Label CJITCodeGen::EntryTarget(asUINT n)
+{
+	return EntryNeedsStub(n) ? m_entryLabels[n] : InstrLabel(m_code.GetEntries()[n]);
+}
+
+// Binary search on the 1-based entry index in jitArg. The lowest entry comes
+// last, so that the first instruction, which follows, is entered without a jump
 void CJITCodeGen::EmitEntryDispatch(asUINT lo, asUINT hi)
 {
 	if( lo == hi )
 	{
-		m_uc.j(m_entryLabels[lo]);
+		const SJITInstr &first = m_code.GetInstructions()[0];
+		if( lo != 0 || EntryNeedsStub(0) || m_code.GetEntries()[0] != 0 || (first.flags & JIT_INSTR_DEAD) )
+			m_uc.j(EntryTarget(lo));
 		return;
 	}
 
 	asUINT mid = (lo + hi) / 2;
-	Label upper = m_uc.new_label();
-	m_uc.j(upper, ucmp_gt(m_arg, Imm(int(mid + 1))));
+	if( hi == mid + 1 )
+		m_uc.j(EntryTarget(hi), ucmp_gt(m_arg, Imm(int(mid + 1))));
+	else
+	{
+		Label lower = m_uc.new_label();
+		m_uc.j(lower, ucmp_le(m_arg, Imm(int(mid + 1))));
+		EmitEntryDispatch(mid + 1, hi);
+		m_uc.bind(lower);
+	}
 	EmitEntryDispatch(lo, mid);
-	m_uc.bind(upper);
-	EmitEntryDispatch(mid + 1, hi);
 }
 
 void CJITCodeGen::EmitEntryStubs()
@@ -661,6 +686,8 @@ void CJITCodeGen::EmitEntryStubs()
 	const std::vector<SJITBlock> &blocks = m_code.GetBlocks();
 	for( asUINT n = 0; n < entries.size(); n++ )
 	{
+		if( !EntryNeedsStub(n) )
+			continue;
 		m_uc.bind(m_entryLabels[n]);
 
 		// Only what may be read before being written needs to be loaded

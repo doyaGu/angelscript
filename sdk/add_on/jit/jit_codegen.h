@@ -82,6 +82,8 @@ protected:
 
 	// Prologue, entry dispatch, and epilogue
 	void EmitPrologue();
+	bool  EntryNeedsStub(asUINT n) const;
+	Label EntryTarget(asUINT n);
 	void EmitEntryDispatch(asUINT lo, asUINT hi);
 	void EmitEntryStubs();
 	void EmitBailStubs();
