@@ -41,6 +41,26 @@ bool CJITCodeGen::Generate()
 		if( instrs[n].flags & JIT_INSTR_BLOCK_START )
 			m_labels[n] = m_uc.new_label();
 
+	// The heads of the innermost loops, i.e. the targets of backward branches with no
+	// other loop head up to the branch, start a cache line, so that the loops take up
+	// as few as possible
+	std::vector<bool> alignHead(instrs.size());
+	{
+		std::vector<bool> isHead(instrs.size());
+		for( asUINT n = 0; n < instrs.size(); n++ )
+			if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+				isHead[instrs[n].target] = true;
+		std::vector<asUINT> headsBefore(instrs.size() + 1);
+		for( asUINT n = 0; n < instrs.size(); n++ )
+			headsBefore[n + 1] = headsBefore[n] + (isHead[n] ? 1 : 0);
+		for( asUINT n = 0; n < instrs.size(); n++ )
+		{
+			int t = instrs[n].target;
+			if( t >= 0 && asUINT(t) <= n && headsBefore[n + 1] == headsBefore[t + 1] )
+				alignHead[t] = true;
+		}
+	}
+
 	m_entryLabels.resize(entries.size());
 	for( asUINT n = 0; n < entries.size(); n++ )
 		m_entryLabels[n] = m_uc.new_label();
@@ -84,6 +104,8 @@ bool CJITCodeGen::Generate()
 			continue;
 		}
 
+		if( alignHead[idx] )
+			m_uc.cc->align(AlignMode::kCode, 64);
 		if( instrs[idx].flags & JIT_INSTR_BLOCK_START )
 			m_uc.bind(m_labels[idx]);
 
