@@ -69,6 +69,13 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
 	}
 }
 
+// The dwords popped by the RET instruction of a script function: the arguments, the
+// object pointer, and the pointer to the location of a value returned on the stack
+static int PopSize(asCScriptFunction *func)
+{
+	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+}
+
 // Script function call through the runtime helper, which also executes the
 // called function natively when possible. Calls of script functions, methods,
 // and function pointers push the call state inline and call the compiled function
@@ -131,6 +138,14 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 
 		EmitNativeCall(idx, target, r, slow);
 
+		// The called function has popped the arguments. Unless the size isn't known
+		// the stack pointer is adjusted instead of waiting for the one it stored
+		EmitLeaveIf(r);
+		if( kind == JIT_CALL_PTR || callee->IsVariadic() )
+			ReloadStack();
+		else if( PopSize(callee) )
+			m_uc.add(m_sp, m_sp, Imm(PopSize(callee) * 4));
+
 		// The call through the helper is the rare path then
 		cold = BeginCold(slow);
 	}
@@ -146,11 +161,13 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		call->set_arg(3, Imm(int64_t(extraImm)));
 	call->set_arg(4, m_depth);
 	call->set_ret(0, r);
+	EmitLeaveIf(r);
+	ReloadStack();
 	if( cold )
 		EndCold(cold, done);
 
 	m_uc.bind(done);
-	EmitAfterHelperCall(r, idx);
+	EmitReloadAfterCall(idx);
 }
 
 // Finds the implementation of a virtual or interface method for the object on the
@@ -790,7 +807,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	BaseNode *cold = BeginCold(check);
 	// The VM continues with the popped stack pointer if the helper returns non-zero
 	SyncStack();
-	SyncVR();
+	if( vrLive )
+		SyncVR();
 	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int, void*>());
 	Gp r = m_uc.new_gp32();
 	after->set_arg(0, m_regs);
