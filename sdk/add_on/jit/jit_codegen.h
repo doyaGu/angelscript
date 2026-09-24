@@ -130,6 +130,7 @@ protected:
 	void SetHomeRegHints(asUINT slotMask);
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
+	Mem  PtrElement(const Gp &array, const Gp &index);
 
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);

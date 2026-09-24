@@ -52,6 +52,13 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 	cc->mov(dst, isMod ? hi : lo);
 }
 
+// The element of an array of pointers, which x86 addresses with the scaled index
+// directly, also with the displacements added to the result
+Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
+{
+	return mem_ptr(array, index, Is64Bit() ? 3 : 2);
+}
+
 // Branch on the result of a floating point compare. The VM compares as
 // (a == b) ? 0 : (a < b) ? -1 : 1, so an unordered compare counts as greater
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
@@ -142,6 +149,14 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 		cc->mov(dst, q);
 }
 
+// A scaled index can't be combined with a displacement, so the address is computed
+Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
+{
+	Gp p = m_uc.new_gp_ptr();
+	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
+	return mem_ptr(p);
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -181,6 +196,13 @@ void CJITCodeGen::EmitSignedDiv(const Gp &, const Gp &, const Gp &, bool)
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &, const Vec &, bool, asEBCInstr, const Label &)
 {
 	return false;
+}
+
+Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
+{
+	Gp p = m_uc.new_gp_ptr();
+	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
+	return mem_ptr(p);
 }
 
 #endif

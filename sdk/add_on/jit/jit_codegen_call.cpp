@@ -17,6 +17,14 @@ using namespace asmjit::ujit;
 
 static const int PTR_BYTES = AS_PTR_SIZE * 4;
 
+// The nth pointer from the address, e.g. of a call state on the call stack
+static Mem PtrAt(const Mem &mem, int n)
+{
+	Mem m = mem;
+	m.add_offset(n * PTR_BYTES);
+	return m;
+}
+
 // The compilers for 32bit x86 that pass the object pointer of class methods in ECX
 // also let the called function pop the arguments, i.e. use the thiscall convention.
 // These are MSVC and MinGW since version 4.7. The others pass it on the stack like
@@ -226,15 +234,15 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.load_u32(length, ContextField(layout.callStackLength));
 	m_uc.load_u32(t, ContextField(layout.callStackCapacity));
 	m_uc.j(slow, ucmp_ge(length, t));
-	Gp state = m_uc.new_gp_ptr();
-	m_uc.load(state, ContextField(layout.callStackArray));
-	m_uc.add_ext(state, state, length, PTR_BYTES);
-	m_uc.store(mem_ptr(state), m_fp);
-	m_uc.store(mem_ptr(state, PTR_BYTES), PtrConst(asPWORD(m_code.GetFunction())));
-	m_uc.store(mem_ptr(state, 2 * PTR_BYTES), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
-	m_uc.store(mem_ptr(state, 3 * PTR_BYTES), m_sp);
+	Gp array = m_uc.new_gp_ptr();
+	m_uc.load(array, ContextField(layout.callStackArray));
+	Mem state = PtrElement(array, length);
+	m_uc.store(state, m_fp);
+	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code.GetFunction())));
+	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
+	m_uc.store(PtrAt(state, 3), m_sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
-	m_uc.store(mem_ptr(state, 4 * PTR_BYTES), t);
+	m_uc.store(PtrAt(state, 4), t);
 	m_uc.add(length, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
 
@@ -264,15 +272,13 @@ void CJITCodeGen::EmitDirectEntry()
 
 	Label slow  = m_uc.new_label();
 	Label ready = m_uc.new_label();
-	Gp block = m_uc.new_gp_ptr();
-	Gp index = m_uc.new_gp_ptr();
-	Gp limit = m_uc.new_gp_ptr();
-	m_uc.load(block, ContextField(layout.stackBlocks));
+	Gp blocks = m_uc.new_gp_ptr();
+	Gp index  = m_uc.new_gp_ptr();
+	Gp limit  = m_uc.new_gp_ptr();
+	m_uc.load(blocks, ContextField(layout.stackBlocks));
 	m_uc.load_u32(index, ContextField(layout.stackIndex));
-	m_uc.add_ext(block, block, index, PTR_BYTES);
-	m_uc.load(block, mem_ptr(block));
 	m_uc.sub(limit, m_sp, Imm(int(func->scriptData->stackNeeded + layout.reserveStack) * 4));
-	m_uc.j(slow, ucmp_lt(limit, block));
+	m_uc.j(slow, ucmp_lt(limit, PtrElement(blocks, index)));
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 	m_uc.j(slow, test_nz(flag));
@@ -400,25 +406,25 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			// execution like the VM does
 			Label finish = m_uc.new_label();
 			Gp length = m_uc.new_gp_ptr();
-			Gp state  = m_uc.new_gp_ptr();
+			Gp array  = m_uc.new_gp_ptr();
 			Gp t      = m_uc.new_gp_ptr();
 			m_uc.load_u32(length, ContextField(layout.callStackLength));
 			m_uc.j(finish, test_z(length));
 			m_uc.sub(length, length, Imm(layout.callStackFrameSize));
-			m_uc.load(state, ContextField(layout.callStackArray));
-			m_uc.add_ext(state, state, length, PTR_BYTES);
-			m_uc.load(t, mem_ptr(state));
+			m_uc.load(array, ContextField(layout.callStackArray));
+			Mem state = PtrElement(array, length);
+			m_uc.load(t, state);
 			m_uc.j(finish, test_z(t));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), t);
-			m_uc.load(t, mem_ptr(state, PTR_BYTES));
+			m_uc.load(t, PtrAt(state, 1));
 			m_uc.store(ContextField(layout.currentFunction), t);
-			m_uc.load(t, mem_ptr(state, 2 * PTR_BYTES));
+			m_uc.load(t, PtrAt(state, 2));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
-			m_uc.load(t, mem_ptr(state, 3 * PTR_BYTES));
+			m_uc.load(t, PtrAt(state, 3));
 			if( popSize )
 				m_uc.add(t, t, Imm(popSize * 4));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), t);
-			m_uc.load_u32(t, mem_ptr(state, 4 * PTR_BYTES));
+			m_uc.load_u32(t, PtrAt(state, 4));
 			m_uc.store_u32(ContextField(layout.stackIndex), t);
 			m_uc.store_u32(ContextField(layout.callStackLength), length);
 			Gp zero = m_uc.new_gp32();
