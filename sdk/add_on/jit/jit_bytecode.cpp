@@ -356,6 +356,18 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 	}
 }
 
+// The script calls that may be native calls, after which the frame hasn't been
+// restored, see JIT_NATIVE_RETURN. The function pointers are always restored
+static bool LeavesFrameDirty(asEBCInstr op)
+{
+#ifdef JIT_NATIVE_RETURN
+	return op == asBC_CALL || op == asBC_CALLINTF;
+#else
+	(void)op;
+	return false;
+#endif
+}
+
 // Only the instructions that can have register cached variables as operands
 // matter here, i.e. those working on primitives. Pointers and objects are never
 // cached, so their instructions don't have to be described
@@ -662,6 +674,8 @@ void CJITByteCode::AnalyseDirtySlots()
 			asUINT uses, defs;
 			GetSlotMasks(m_instrs[k], uses, defs);
 			written |= defs;
+			if( LeavesFrameDirty(m_instrs[k].op) )
+				written |= JIT_FRAME_BIT;
 			calls = calls || IsSyncPoint(m_instrs[k].op);
 		}
 		asUINT keep = cachedMask & ~written;
@@ -718,7 +732,7 @@ void CJITByteCode::AnalyseDirtySlots()
 				m_dirty[n] = mask;
 
 				if( IsSyncPoint(instr.op) )
-					mask = 0;
+					mask = LeavesFrameDirty(instr.op) ? JIT_FRAME_BIT : 0;
 				else
 					mask = (mask | defs) & (~m_tempMask | m_liveAfter[n]);
 

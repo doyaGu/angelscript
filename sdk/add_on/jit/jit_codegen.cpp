@@ -88,13 +88,13 @@ bool CJITCodeGen::Generate()
 	}
 
 	// Entered by the VM, which has set up the frame. Jump to the requested entry point
+	const SJITContextLayout &layout = JIT_GetContextLayout();
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
 	if( m_callLimit.is_valid() )
 	{
 		// The native calls may push call states as long as the call stack doesn't
 		// have to grow, and up to the maximum depth. The capacity is a multiple of
 		// the size of a call state and doesn't shrink, see JITFunction
-		const SJITContextLayout &layout = JIT_GetContextLayout();
 		asQWORD words = asQWORD(m_options.maxNativeCallDepth) * layout.callStackFrameSize;
 		Gp capacity = m_uc.new_gp32();
 		m_uc.load_u32(m_callLimit, ContextField(layout.callStackLength));
@@ -102,6 +102,24 @@ bool CJITCodeGen::Generate()
 		m_uc.add(m_callLimit, m_callLimit, Imm(int(words < 0x40000000 ? words : 0x40000000)));
 		m_uc.umin(m_callLimit, m_callLimit, capacity);
 	}
+#ifdef JIT_NATIVE_RETURN
+	{
+		// The function returns to the VM now, also if it was called natively and
+		// has left the rest of the call to the VM. The mark is in the upper half of
+		// the stack index, where the call states pushed by the VM have zeros, also
+		// the ones for nested calls, which have the size of the arguments there
+		Label unmarked = m_uc.new_label();
+		Gp length = m_uc.new_gp_ptr();
+		Gp array  = m_uc.new_gp_ptr();
+		m_uc.load_u32(length, ContextField(layout.callStackLength));
+		m_uc.j(unmarked, sub_c(length, Imm(layout.callStackFrameSize)));
+		m_uc.load(array, ContextField(layout.callStackArray));
+		Mem mark = PtrElement(array, length);
+		mark.add_offset(4 * PTR_BYTES + 4);
+		m_uc.store_zero_u32(mark);
+		m_uc.bind(unmarked);
+	}
+#endif
 	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
 
 	// The body in bytecode order. Notes the instructions that call functions

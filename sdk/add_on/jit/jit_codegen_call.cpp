@@ -144,12 +144,13 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		if( target.is_valid() )
 			m_uc.j(slow, test_z(target));
 
-		EmitNativeCall(idx, target, r, slow);
-
 		// The called function has popped the arguments. Unless the size isn't known
-		// the stack pointer is adjusted instead of waiting for the one it stored
+		// the stack pointer is adjusted instead of waiting for the one it stored,
+		// which the call state must not be marked for then
+		bool reload = kind == JIT_CALL_PTR || callee->IsVariadic();
+		EmitNativeCall(idx, target, r, slow, !reload);
 		EmitLeaveIf(r);
-		if( kind == JIT_CALL_PTR || callee->IsVariadic() )
+		if( reload )
 			ReloadStack();
 		else if( PopSize(callee) )
 			m_uc.add(m_sp, m_sp, Imm(PopSize(callee) * 4));
@@ -226,8 +227,10 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 
 // Pushes the call state like asCContext::PushCallState and calls the native code
 // of a script function, or this function if target isn't valid. Jumps to slow if
-// the call stack has reached the call limit, which is passed on
-void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow)
+// the call stack has reached the call limit, which is passed on. On 64bit hosts
+// the call state may be marked with the sign bit of the stack index, so that the
+// function doesn't restore the frame and the registers, see JITFunction
+void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
@@ -243,6 +246,12 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
 	m_uc.store(PtrAt(state, 3), m_sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
+#ifdef JIT_NATIVE_RETURN
+	if( mark )
+		SetSignBit(t);
+#else
+	(void)mark;
+#endif
 	m_uc.store(PtrAt(state, 4), t);
 	m_uc.add(length, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
@@ -410,6 +419,22 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			m_uc.j(finish, sub_c(length, Imm(layout.callStackFrameSize)));
 			m_uc.load(array, ContextField(layout.callStackArray));
 			Mem state = PtrElement(array, length);
+#ifdef JIT_NATIVE_RETURN
+			{
+				// Native callers keep their frame and set the program pointer and the
+				// stack pointer themselves, so only the call stack is restored for them
+				Label vm = m_uc.new_label();
+				Gp index = m_uc.new_gp_ptr();
+				m_uc.load(index, PtrAt(state, 4));
+				m_uc.j(vm, scmp_ge(index, Imm(0)));
+				m_uc.store_u32(ContextField(layout.stackIndex), index);
+				m_uc.store_u32(ContextField(layout.callStackLength), length);
+				Gp zero = m_uc.new_gp32();
+				m_uc.mov(zero, Imm(0));
+				m_uc.ret(zero);
+				m_uc.bind(vm);
+			}
+#endif
 			m_uc.load(t, state);
 			m_uc.j(finish, test_z(t));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), t);

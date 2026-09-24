@@ -59,6 +59,12 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	return mem_ptr(array, index, Is64Bit() ? 3 : 2);
 }
 
+// The sign bit of a 64bit register isn't an immediate that OR can take
+void CJITCodeGen::SetSignBit(const Gp &r)
+{
+	m_uc.cc->bts(r, Imm(r.size() * 8 - 1));
+}
+
 // Branch on the result of a floating point compare. The VM compares as
 // (a == b) ? 0 : (a < b) ? -1 : 1, so an unordered compare counts as greater
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
@@ -157,6 +163,11 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	return mem_ptr(p);
 }
 
+void CJITCodeGen::SetSignBit(const Gp &r)
+{
+	m_uc.cc->orr(r, r, Imm(uint64_t(1) << (r.size() * 8 - 1)));
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -203,6 +214,11 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	Gp p = m_uc.new_gp_ptr();
 	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
 	return mem_ptr(p);
+}
+
+void CJITCodeGen::SetSignBit(const Gp &)
+{
+	m_failed = true;
 }
 
 #endif

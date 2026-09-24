@@ -75,6 +75,13 @@ struct SJITSlot
 // the first place where the VM or the engine may see it
 static const asUINT JIT_FRAME_BIT = 0x80000000u;
 
+// On 64bit hosts the script functions called natively return without restoring
+// the frame of the caller, see asBC_RET, so it is dirty after the calls. They mark
+// the call states that native callers push, see JITFunction
+#if AS_PTR_SIZE == 2
+#define JIT_NATIVE_RETURN
+#endif
+
 // Decodes the bytecode of a script function and gathers the information
 // needed by the code generator: instructions, basic blocks, branch targets,
 // switch tables, JIT entry points, variable usage, and value register liveness

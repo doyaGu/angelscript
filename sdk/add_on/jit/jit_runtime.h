@@ -29,7 +29,12 @@ class asCObjectType;
 // pointer in the VM registers. The function then sets up its frame the way
 // asCContext::PrepareScriptFunction does, but writes the frame, i.e. the stack
 // frame pointer and the current function of the context, back only where the VM
-// or the engine may see it. callLimit is the length of the call
+// or the engine may see it. On 64bit hosts native callers may mark the call state
+// by setting the sign bit of the stack index, whose upper half the VM ignores. The
+// function then returns without restoring the frame, the program pointer, and the
+// stack pointer of the caller, which keeps them itself. The VM entry clears the
+// mark of the call state on top, as the function doesn't return to a native caller
+// once the VM has executed it. callLimit is the length of the call
 // stack up to which further native calls may push call states. The VM entry sets it
 // to the capacity of the call stack, which is a multiple of the size of a call state
 // and doesn't shrink, or less to allow no more than the maximum number of nested
