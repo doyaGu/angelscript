@@ -966,7 +966,8 @@ namespace NativeCalls
 	static void SuspendInLeaf(asIScriptContext *ctx, void *)
 	{
 		g_lines++;
-		if( std::string(ctx->GetFunction()->GetName()) == "leaf" )
+		std::string name = ctx->GetFunction()->GetName();
+		if( name == "leaf" || name == "S" )
 			ctx->Suspend();
 	}
 
@@ -1007,7 +1008,36 @@ namespace NativeCalls
 		"int nullFunc() { FN@ f; return f(1); }                                            \n"
 		"int callUnbound() { return unbound(1); }                                          \n"
 		"int leaf(int a) { return a + 1; }                                                 \n"
-		"int suspended(int n) { int r = 0, i = 0; while( i < n ) r += leaf(i++); return r; } \n";
+		"int suspended(int n) { int r = 0, i = 0; while( i < n ) r += leaf(i++); return r; } \n"
+		// The objects of garbage collected classes are destroyed by the allocation of
+		// new ones, which runs their destructors in the context of the allocation
+		"class G {                                                                         \n"
+		"  G@ next;                                                                        \n"
+		"  int v;                                                                          \n"
+		"  G(int a) {                                                                      \n"
+		"    v = a;                                                                        \n"
+		"  }                                                                               \n"
+		"  ~G() {                                                                          \n"
+		"    dtors += v;                                                                   \n"
+		"  }                                                                               \n"
+		"}                                                                                 \n"
+		"int gcNested(int n) {                                                             \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += G(++i).v * 2;                                                            \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"class E { int v; E(int a) { D d(10); v = 10 / a; } ~E() { dtors += 1000; } }      \n"
+		"int ctorThrow(int n) { D d(1); E e(n); return e.v; }                              \n"
+		"class P { int v; P(int n) { int local = n * 7; v = inspect() + local; } }         \n"
+		"int ctorInspect(int n) { int local = n; P p(n); return p.v + local; }             \n"
+		"class S { int v; S(int a) { v = a + 1; } }                                        \n"
+		"int suspendedCtor(int n) {                                                        \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += S(i++).v;                                                                \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n";
 
 	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_LEAF };
 	struct SCase { const char *decl; int arg; EMode mode; };
@@ -1029,6 +1059,12 @@ namespace NativeCalls
 		{ "int nullFunc()",         0, PLAIN },
 		{ "int callUnbound()",      0, PLAIN },
 		{ "int suspended(int)",    20, SUSPEND_IN_LEAF },
+		{ "int gcNested(int)",     50, PLAIN },
+		{ "int gcNested(int)",     50, COUNT_LINES },
+		{ "int ctorThrow(int)",     0, PLAIN },
+		{ "int ctorThrow(int)",     2, PLAIN },
+		{ "int ctorInspect(int)",   3, PLAIN },
+		{ "int suspendedCtor(int)", 20, SUSPEND_IN_LEAF },
 	};
 
 	// Engine properties that change how the stack is managed
