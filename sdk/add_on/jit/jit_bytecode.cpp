@@ -627,20 +627,19 @@ void CJITByteCode::GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) con
 }
 
 // Forward data flow over the blocks to find out which register cached
-// variables may hold a newer value than the memory at each instruction. Only
-// those need to be stored when the VM must see the variables
+// variables may hold a newer value than the memory at each instruction, and
+// where the frame may not have been written back, see JIT_FRAME_BIT. Only those
+// need to be stored when the VM must see the variables
 void CJITByteCode::AnalyseDirtySlots()
 {
 	m_dirty.assign(m_instrs.size(), 0);
 	m_storeBefore.assign(m_instrs.size(), 0);
 	m_storeAfter.assign(m_instrs.size(), 0);
 
-	asUINT cachedMask = 0;
+	asUINT cachedMask = JIT_FRAME_BIT;
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheBit >= 0 )
 			cachedMask |= 1u << m_slots[n].cacheBit;
-	if( cachedMask == 0 )
-		return;
 
 	// The calls in a loop store the dirty variables on every iteration, also those
 	// that are only modified before the loop. The variables that a loop with calls
@@ -695,6 +694,8 @@ void CJITByteCode::AnalyseDirtySlots()
 	}
 
 	std::vector<asUINT> in(m_blocks.size(), 0);
+	if( !m_instrs.empty() )
+		in[m_instrs[0].block] = JIT_FRAME_BIT;
 	bool changed = true;
 	while( changed )
 	{

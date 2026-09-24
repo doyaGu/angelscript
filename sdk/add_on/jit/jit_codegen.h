@@ -184,6 +184,7 @@ protected:
 	void SetPC(asUINT pos);
 	void SyncStack();
 	void ReloadStack();
+	void StoreFrame();
 	void StoreCachedSlots();
 	void StoreDirtySlots(asUINT mask);
 	void ReloadCachedSlots();

@@ -17,16 +17,19 @@ class asCObjectType;
 // code should continue, and a non-zero value when the native code must return
 // to the VM immediately. The VM registers have then been updated by the helper.
 //
-// Unless otherwise noted the generated code must have stored the current stack
-// pointer and value register in the VM registers, and set the program pointer to
-// the instruction being executed, before calling a helper.
+// Unless otherwise noted the generated code must have stored the frame, see
+// JITFunction, and the current stack pointer and value register in the VM
+// registers, and set the program pointer to the instruction being executed, before
+// calling a helper.
 
 // Signature of the generated functions. The VM calls them as asJITFunction, with
 // the 1-based index of the entry point in jitArg, and ignores the return value.
 // Native callers push the call state of the caller like asCContext::PushCallState
 // and call them with jitArg 0, the arguments on the script stack, and the stack
 // pointer in the VM registers. The function then sets up its frame the way
-// asCContext::PrepareScriptFunction does. callLimit is the length of the call
+// asCContext::PrepareScriptFunction does, but writes the frame, i.e. the stack
+// frame pointer and the current function of the context, back only where the VM
+// or the engine may see it. callLimit is the length of the call
 // stack up to which further native calls may push call states. The VM entry sets it
 // to the capacity of the call stack, which is a multiple of the size of a call state
 // and doesn't shrink, or less to allow no more than the maximum number of nested

@@ -105,7 +105,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	else if( kind == JIT_CALL_PTR )
 		native = true;
 
-	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	// The native calls push the frame on the call stack, only the helper needs it
+	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	SyncStack();
 
 	Gp r = m_uc.new_gp32();
@@ -157,6 +158,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		cold = BeginCold(slow);
 	}
 
+	if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
+		StoreFrame();
 	SetPC(instr.pos);
 	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	call->set_arg(0, m_regs);
@@ -258,13 +261,12 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 
 // Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
 // up like asCContext::PrepareScriptFunction does when the current stack block has
-// enough space and the VM has nothing to do, otherwise by JIT_PrepareFrame
+// enough space and the VM has nothing to do, otherwise by JIT_PrepareFrame. It is
+// written back where the VM or the engine may see it, see JIT_FRAME_BIT
 void CJITCodeGen::EmitDirectEntry()
 {
 	asCScriptFunction *func = m_code.GetFunction();
 	const SJITContextLayout &layout = JIT_GetContextLayout();
-
-	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(func)));
 
 	Label slow  = m_uc.new_label();
 	Label ready = m_uc.new_label();
@@ -287,7 +289,6 @@ void CJITCodeGen::EmitDirectEntry()
 			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
 	if( func->scriptData->variableSpace )
 		m_uc.sub(m_sp, m_sp, Imm(int(func->scriptData->variableSpace) * 4));
-	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
 	m_uc.bind(ready);
@@ -305,6 +306,7 @@ void CJITCodeGen::EmitDirectEntry()
 	m_uc.j(InstrLabel(0));
 
 	m_uc.bind(slow);
+	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(func)));
 	SetPC(0);
 	InvokeNode *call = Invoke((const void*)JIT_PrepareFrame, FuncSignature::build<int, asSVMRegisters*>());
 	Gp r = m_uc.new_gp32();
@@ -427,6 +429,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			m_uc.ret(zero);
 
 			m_uc.bind(finish);
+			if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
+				StoreFrame();
 			SyncStack();
 			Gp status = m_uc.new_gp32();
 			m_uc.mov(status, Imm(int(asEXECUTION_FINISHED)));

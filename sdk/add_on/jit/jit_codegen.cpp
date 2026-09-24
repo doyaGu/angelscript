@@ -727,8 +727,10 @@ void CJITCodeGen::EmitBailStubs()
 	}
 
 	// Common tail: the cached variables and the value register have been stored
-	// by the bail sites, so only the stack pointer and the program pointer remain
+	// by the bail sites, so only the frame, the stack pointer, and the program
+	// pointer remain
 	m_uc.bind(m_bailCommon);
+	StoreFrame();
 	SyncStack();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 	Leave();
@@ -1122,6 +1124,13 @@ void CJITCodeGen::ReloadStack()
 	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
 }
 
+// Writes back the frame, see JIT_FRAME_BIT
+void CJITCodeGen::StoreFrame()
+{
+	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
+	m_uc.store(ContextField(JIT_GetContextLayout().currentFunction), PtrConst(asPWORD(m_code.GetFunction())));
+}
+
 void CJITCodeGen::StoreCachedSlots()
 {
 	for( asUINT n = 0; n < m_cached.size(); n++ )
@@ -1164,9 +1173,12 @@ void CJITCodeGen::ReloadCachedSlot(int offset)
 	}
 }
 
-// Stores the cached slots in the mask, see CJITByteCode::GetDirtyMask
+// Stores the cached slots in the mask, and the frame if it has the bit, see
+// CJITByteCode::GetDirtyMask
 void CJITCodeGen::StoreDirtySlots(asUINT mask)
 {
+	if( mask & JIT_FRAME_BIT )
+		StoreFrame();
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
 		int bit = m_code.GetCacheBit(m_cached[n].offset);
@@ -1210,6 +1222,7 @@ void CJITCodeGen::SyncForCall(asUINT idx)
 void CJITCodeGen::SyncAllSlots(asUINT pos)
 {
 	StoreCachedSlots();
+	StoreFrame();
 	SyncStack();
 	SyncVR();
 	SetPC(pos);
@@ -1242,11 +1255,12 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 	return m_labels[idx];
 }
 
-// Returns to the VM which will re-execute the instruction
+// Returns to the VM which will re-execute the instruction. The frame is stored by
+// the common tail of the bail sites
 void CJITCodeGen::Bail(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	if( m_code.IsVRLiveBefore(idx) )
 		SyncVR();
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));

@@ -266,8 +266,8 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		m_impl->stats.functionsFailed++;
 		return asERROR;
 	}
-	// The dirty masks hold one bit per cached slot
-	asUINT maxCachedSlots = m_impl->maxCachedSlots < 32 ? m_impl->maxCachedSlots : 32;
+	// The dirty masks hold one bit per cached slot, and the bit of the frame
+	asUINT maxCachedSlots = m_impl->maxCachedSlots < 31 ? m_impl->maxCachedSlots : 31;
 	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots);
 	code.SetBailInstructions(m_impl->bailOps);
 

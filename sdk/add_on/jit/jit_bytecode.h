@@ -69,6 +69,12 @@ struct SJITSlot
 	int    cacheBit;  // bit in the dirty masks for cached slots, else -1
 };
 
+// The frame of the function, i.e. the stack frame pointer in the VM registers and
+// the current function of the context, is written back like the register cached
+// variables, and has this bit in the dirty masks. The native entry leaves it to
+// the first place where the VM or the engine may see it
+static const asUINT JIT_FRAME_BIT = 0x80000000u;
+
 // Decodes the bytecode of a script function and gathers the information
 // needed by the code generator: instructions, basic blocks, branch targets,
 // switch tables, JIT entry points, variable usage, and value register liveness
@@ -101,8 +107,9 @@ public:
 	int  GetCacheBit(int offset) const;
 
 	// Returns the mask of the register cached variables whose register may hold
-	// a newer value than the memory when the instruction is reached. Temporary
-	// variables that won't be read anymore are left out
+	// a newer value than the memory when the instruction is reached, and of the
+	// frame, see JIT_FRAME_BIT. Temporary variables that won't be read anymore are
+	// left out
 	asUINT GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
 
 	// Returns the mask of the register cached variables to store before or after
