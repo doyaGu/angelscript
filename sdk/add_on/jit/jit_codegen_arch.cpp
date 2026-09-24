@@ -20,7 +20,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 {
 	x86::Compiler *cc = m_uc.cc;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(x86::Gp::kIdBx);
-	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(x86::Gp::kIdBp);
+	if( m_sp.is_valid() )
+		cc->virt_reg_by_reg(m_sp)->set_home_id_hint(x86::Gp::kIdBp);
 	if( Is64Bit() )
 	{
 		// RSI and RDI aren't callee-saved on System V, and neither are XMM6-15
@@ -136,7 +137,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 	a64::Compiler *cc = m_uc.cc;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(19);
 	cc->virt_reg_by_reg(m_fp)->set_home_id_hint(20);
-	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
+	if( m_sp.is_valid() )
+		cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
 	if( m_callLimit.is_valid() )
 		cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(22);
 

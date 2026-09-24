@@ -32,8 +32,9 @@ struct SJITCodeGenOptions
 // pass 0 to enter at the start of the function.
 //
 // Register usage: the stack frame pointer, stack pointer, and value register
-// are kept in virtual registers while executing natively, and primitive
-// variables that are never accessed by address may be kept in registers too.
+// are kept in virtual registers while executing natively, except for the stack
+// pointer if the depth of the stack is static, and primitive variables that
+// are never accessed by address may be kept in registers too.
 // They are written back to the VM registers/stack before anything that can
 // observe them, and reloaded whenever execution comes back from the VM.
 class CJITCodeGen
@@ -185,6 +186,15 @@ protected:
 	void SetPC(asUINT pos);
 	void SyncStack();
 	void ReloadStack();
+	void ReloadStackAfter(asUINT idx); // after a call that has completed the instruction
+
+	// The stack pointer. If the stack is static, it is the frame pointer minus a
+	// constant, else it is kept in m_sp
+	int  StackOffset(asUINT idx) const; // static offset from fp when the instruction is reached
+	void PushStack(int bytes);
+	void PopStack(int bytes);
+	Gp   StackPointer();                // the stack pointer in a register
+
 	void StoreFrame();
 	void StoreCachedSlots();
 	void StoreDirtySlots(asUINT mask);
@@ -229,10 +239,12 @@ protected:
 	Gp  m_arg;      // jitArg
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_fp;       // stack frame pointer
-	Gp  m_sp;       // stack pointer
+	Gp  m_sp;       // stack pointer, unless the stack is static
 	Gp  m_vr;       // value register (64bit hosts only)
 	Gp  m_bailPC;   // program pointer to set when bailing
 	bool m_vrInReg;
+	bool m_staticStack;
+	int  m_spOffset;    // offset of the stack pointer from fp if the stack is static
 	bool m_guarded;
 	Mem  m_vrAddr;      // the address left to the next instruction by SetVRAddr
 	bool m_vrAddrValid;

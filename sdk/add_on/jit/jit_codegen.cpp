@@ -1,6 +1,9 @@
 #include "jit_codegen.h"
 #include "jit_runtime.h"
 
+// For the size of the variables, which the stack starts below
+#include "as_scriptfunction.h"
+
 #include <stddef.h>
 #include <assert.h>
 #include <stdio.h>
@@ -19,6 +22,8 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_func       = 0;
 	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
+	m_staticStack = code.HasStaticStack();
+	m_spOffset   = 0;
 	m_vrAddrValid = false;
 	m_instrCount = 0;
 	m_bailCount  = 0;
@@ -138,6 +143,8 @@ bool CJITCodeGen::Generate()
 			m_uc.cc->align(AlignMode::kCode, 64);
 		if( instrs[idx].flags & JIT_INSTR_BLOCK_START )
 			m_uc.bind(m_labels[idx]);
+		if( m_staticStack )
+			m_spOffset = StackOffset(idx);
 
 		asUINT consumed = 1;
 		const SJITInstr &instr = instrs[idx];
@@ -186,6 +193,12 @@ bool CJITCodeGen::Generate()
 			// An address left to the next instruction must not outlive it
 			assert( !addrPending || !m_vrAddrValid );
 			(void)addrPending;
+
+			// The stack pointer must be where the next instruction expects it, unless
+			// the instruction returns to the VM
+			assert( !m_staticStack || m_options.noScriptCalls || CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) ||
+			        idx + consumed >= instrs.size() || (instrs[idx + consumed].flags & JIT_INSTR_DEAD) ||
+			        m_spOffset == StackOffset(idx + consumed) );
 
 			// The stores planned for the second instruction of a group would be missed
 			assert( consumed == 1 || m_code.GetStoresBefore(idx + 1) == 0 );
@@ -634,8 +647,11 @@ void CJITCodeGen::EmitPrologue()
 
 	// The frame pointer is set up by the entry paths
 	m_fp = m_uc.new_gp_ptr("fp");
-	m_sp = m_uc.new_gp_ptr("sp");
-	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	if( !m_staticStack )
+	{
+		m_sp = m_uc.new_gp_ptr("sp");
+		m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	}
 
 	if( m_vrInReg )
 		m_vr = m_uc.new_gp64("vr");
@@ -746,10 +762,11 @@ void CJITCodeGen::EmitBailStubs()
 
 	// Common tail: the cached variables and the value register have been stored
 	// by the bail sites, so only the frame, the stack pointer, and the program
-	// pointer remain
+	// pointer remain. A static stack pointer is stored by the bail sites too
 	m_uc.bind(m_bailCommon);
 	StoreFrame();
-	SyncStack();
+	if( !m_staticStack )
+		SyncStack();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 	Leave();
 }
@@ -779,7 +796,39 @@ Mem CJITCodeGen::Var(int offset, int byteDisp)
 
 Mem CJITCodeGen::Stack(int dwordOffset)
 {
+	if( m_staticStack )
+		return mem_ptr(m_fp, m_spOffset + dwordOffset * 4);
 	return mem_ptr(m_sp, dwordOffset * 4);
+}
+
+int CJITCodeGen::StackOffset(asUINT idx) const
+{
+	return -int(m_code.GetFunction()->scriptData->variableSpace + m_code.GetStackDepth(idx)) * 4;
+}
+
+void CJITCodeGen::PushStack(int bytes)
+{
+	if( m_staticStack )
+		m_spOffset -= bytes;
+	else if( bytes )
+		m_uc.sub(m_sp, m_sp, Imm(bytes));
+}
+
+void CJITCodeGen::PopStack(int bytes)
+{
+	if( m_staticStack )
+		m_spOffset += bytes;
+	else if( bytes )
+		m_uc.add(m_sp, m_sp, Imm(bytes));
+}
+
+CJITCodeGen::Gp CJITCodeGen::StackPointer()
+{
+	if( !m_staticStack )
+		return m_sp;
+	Gp t = m_uc.new_gp_ptr();
+	m_uc.lea(t, mem_ptr(m_fp, m_spOffset));
+	return t;
 }
 
 Mem CJITCodeGen::Global(asPWORD address, Gp &tmp)
@@ -1134,12 +1183,25 @@ void CJITCodeGen::SetPC(asUINT pos)
 
 void CJITCodeGen::SyncStack()
 {
-	m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), m_sp);
+	m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), StackPointer());
 }
 
+// A static stack pointer doesn't need the one the VM or the helper has left, which
+// is lower if the callee leaves something on the stack, like the default copy
+// constructors do with their argument
 void CJITCodeGen::ReloadStack()
 {
-	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	if( !m_staticStack )
+		m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+}
+
+// After a call has completed the instruction, the static stack pointer is the one
+// of the next instruction, which exists as calls don't end the bytecode
+void CJITCodeGen::ReloadStackAfter(asUINT idx)
+{
+	if( m_staticStack )
+		m_spOffset = StackOffset(idx + 1);
+	ReloadStack();
 }
 
 // Writes back the frame, see JIT_FRAME_BIT
@@ -1281,6 +1343,12 @@ void CJITCodeGen::Bail(asUINT idx)
 	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	if( m_code.IsVRLiveBefore(idx) )
 		SyncVR();
+	if( m_staticStack )
+	{
+		// The stubs are emitted after the body
+		m_spOffset = StackOffset(idx);
+		SyncStack();
+	}
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
 	m_uc.j(m_bailCommon);
 }
@@ -1351,7 +1419,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	switch( instr.op )
 	{
 	case asBC_PopPtr:
-		m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+		PopStack(PTR_BYTES);
 		break;
 
 	case asBC_PshGPtr:
@@ -1360,7 +1428,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Mem src = Global(asBC_PTRARG(bc), g);
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.load(t, src);
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1370,7 +1438,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		{
 			Gp t = m_uc.new_gp32();
 			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc))));
-			m_uc.sub(m_sp, m_sp, Imm(4));
+			PushStack(4);
 			m_uc.store_u32(Stack(0), t);
 		}
 		break;
@@ -1378,14 +1446,14 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_PshV4:
 		{
 			Gp t = Load32(a0);
-			m_uc.sub(m_sp, m_sp, Imm(4));
+			PushStack(4);
 			m_uc.store_u32(Stack(0), t);
 		}
 		break;
 
 	case asBC_PshV8:
 		{
-			m_uc.sub(m_sp, m_sp, Imm(8));
+			PushStack(8);
 			SCachedSlot *c = FindCached(a0);
 			if( c && c->kind == JIT_SLOT_I64 )
 				m_uc.store_u64(Stack(0), c->gp);
@@ -1400,7 +1468,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		{
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.lea(t, Var(a0));
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1422,14 +1490,14 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Mem src = Global(asBC_PTRARG(bc), g);
 			Gp t = m_uc.new_gp32();
 			m_uc.load_u32(t, src);
-			m_uc.sub(m_sp, m_sp, Imm(4));
+			PushStack(4);
 			m_uc.store_u32(Stack(0), t);
 		}
 		break;
 
 	case asBC_PshC8:
 		{
-			m_uc.sub(m_sp, m_sp, Imm(8));
+			PushStack(8);
 			asQWORD value = asBC_QWORDARG(bc);
 			if( Is64Bit() )
 			{
@@ -1451,7 +1519,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_PshVPtr:
 		{
 			Gp t = LoadPtr(a0);
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1461,7 +1529,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.load(t, Stack(0));
 			StoreVRPtr(t);
-			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			PopStack(PTR_BYTES);
 		}
 		break;
 
@@ -1469,7 +1537,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		{
 			Gp t = m_uc.new_gp_ptr();
 			LoadVRPtr(t);
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1517,7 +1585,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		break;
 
 	case asBC_PshNull:
-		m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+		PushStack(PTR_BYTES);
 		m_uc.store_zero_reg(Stack(0));
 		break;
 
@@ -1526,7 +1594,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_FuncPtr:
 		{
 			Gp t = PtrConst(asBC_PTRARG(bc));
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1534,7 +1602,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_VAR:
 		{
 			Gp t = PtrConst(asPWORD(asPWORD(a0)));
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
 		break;
@@ -1543,7 +1611,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		{
 			Gp var = LoadPtr(a0);
 			m_uc.add(var, var, Imm(int(asBC_DWORDARG(bc))));
-			m_uc.sub(m_sp, m_sp, Imm(PTR_BYTES));
+			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), var);
 		}
 		break;
@@ -1612,7 +1680,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 				call->set_arg(2, Imm(int(bytes)));
 			}
 
-			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			PopStack(PTR_BYTES);
 			m_uc.store(Stack(0), d);
 		}
 		break;

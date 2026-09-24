@@ -51,7 +51,7 @@ static Mem PtrAt(const Mem &mem, int n)
 void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT idx)
 {
 	EmitLeaveIf(result);
-	ReloadStack();
+	ReloadStackAfter(idx);
 	EmitReloadAfterCall(idx);
 }
 
@@ -144,9 +144,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		EmitNativeCall(idx, target, r, slow, !reload);
 		EmitLeaveIf(r);
 		if( reload )
-			ReloadStack();
-		else if( CJITByteCode::GetPopSize(callee) )
-			m_uc.add(m_sp, m_sp, Imm(CJITByteCode::GetPopSize(callee) * 4));
+			ReloadStackAfter(idx);
+		else
+			PopStack(CJITByteCode::GetPopSize(callee) * 4);
 
 		// The call through the helper is the rare path then
 		cold = BeginCold(slow);
@@ -166,7 +166,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	call->set_arg(4, m_callLimit);
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
-	ReloadStack();
+	ReloadStackAfter(idx);
 	if( cold )
 		EndCold(cold, done);
 
@@ -237,7 +237,7 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.store(state, m_fp);
 	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code.GetFunction())));
 	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
-	m_uc.store(PtrAt(state, 3), m_sp);
+	m_uc.store(PtrAt(state, 3), StackPointer());
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
@@ -270,27 +270,32 @@ void CJITCodeGen::EmitDirectEntry()
 	asCScriptFunction *func = m_code.GetFunction();
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 
+	// The frame starts at the stack pointer of the caller, which a static stack
+	// pointer is computed from, and the arguments are above it
 	Label slow  = m_uc.new_label();
 	Label ready = m_uc.new_label();
 	Gp blocks = m_uc.new_gp_ptr();
 	Gp index  = m_uc.new_gp_ptr();
 	Gp limit  = m_uc.new_gp_ptr();
+	if( m_staticStack )
+		m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	else
+		m_uc.mov(m_fp, m_sp);
 	m_uc.load(blocks, ContextField(layout.stackBlocks));
 	m_uc.load_u32(index, ContextField(layout.stackIndex));
-	m_uc.sub(limit, m_sp, Imm(int(func->scriptData->stackNeeded + layout.reserveStack) * 4));
+	m_uc.sub(limit, m_fp, Imm(int(func->scriptData->stackNeeded + layout.reserveStack) * 4));
 	m_uc.j(slow, ucmp_lt(limit, PtrElement(blocks, index)));
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 	m_uc.j(slow, test_nz(flag));
 
 	// Only the object variables on the heap are cleared, the others are initialized by their constructors
-	m_uc.mov(m_fp, m_sp);
 	const asCArray<asSScriptVariable*> &vars = func->scriptData->variables;
 	for( asUINT n = 0; n < vars.GetLength(); n++ )
 		if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
 			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
-	if( func->scriptData->variableSpace )
-		m_uc.sub(m_sp, m_sp, Imm(int(func->scriptData->variableSpace) * 4));
+	m_spOffset = 0;
+	PushStack(int(func->scriptData->variableSpace) * 4);
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
 	m_uc.bind(ready);
@@ -316,7 +321,7 @@ void CJITCodeGen::EmitDirectEntry()
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
-	m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	ReloadStack();
 	m_uc.j(ready);
 }
 
@@ -751,8 +756,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Pop the arguments and store the return value like the VM does, except
 	// that the value register is left alone if it isn't read afterwards
-	if( popSize )
-		m_uc.add(m_sp, m_sp, Imm(popSize * 4));
+	PopStack(popSize * 4);
 	bool vrLive = m_code.IsVRLiveAfter(idx);
 	if( retOnStack )
 	{
@@ -1035,7 +1039,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			if( instr.op == asBC_REFCPY )
 			{
 				m_uc.load(d, Stack(0));
-				m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+				PopStack(PTR_BYTES);
 			}
 			else
 				m_uc.lea(d, Var(a0));
@@ -1080,7 +1084,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			call->set_arg(0, m_regs);
 			call->set_arg(1, a);
 			call->set_arg(2, Imm(int(asBC_DWORDARG(bc))));
-			m_uc.add(m_sp, m_sp, Imm(PTR_BYTES));
+			PopStack(PTR_BYTES);
 		}
 		break;
 
