@@ -134,6 +134,7 @@ protected:
 	Mem  PtrElement(const Gp &array, const Gp &index);
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
+	void StoreImm32(const Mem &dst, int value);
 
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);

@@ -1443,12 +1443,8 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 
 	case asBC_PshC4:
 	case asBC_TYPEID:
-		{
-			Gp t = m_uc.new_gp32();
-			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc))));
-			PushStack(4);
-			m_uc.store_u32(Stack(0), t);
-		}
+		PushStack(4);
+		StoreImm32(Stack(0), int(asBC_DWORDARG(bc)));
 		break;
 
 	case asBC_PshV4:
@@ -1714,12 +1710,14 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			SCachedSlot *c = FindCached(a0);
 			if( c && c->kind == JIT_SLOT_I32 )
 				m_uc.mov(c->gp, Imm(int(asBC_DWORDARG(bc))));
-			else
+			else if( c )
 			{
 				Gp t = m_uc.new_gp32();
 				m_uc.mov(t, Imm(int(asBC_DWORDARG(bc))));
 				Commit32(a0, t);
 			}
+			else
+				StoreImm32(Var(a0), int(asBC_DWORDARG(bc)));
 		}
 		break;
 
@@ -1828,9 +1826,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		{
 			Gp g;
 			Mem dst = Global(asBC_PTRARG(bc), g);
-			Gp t = m_uc.new_gp32();
-			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc + AS_PTR_SIZE))));
-			m_uc.store_u32(dst, t);
+			StoreImm32(dst, int(asBC_DWORDARG(bc + AS_PTR_SIZE)));
 		}
 		break;
 

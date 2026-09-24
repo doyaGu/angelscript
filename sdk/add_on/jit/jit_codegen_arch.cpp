@@ -86,6 +86,14 @@ void CJITCodeGen::AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, x86::Gp::kIdDx, TypeId::kUInt64);
 }
 
+// x86 stores an immediate without a register
+void CJITCodeGen::StoreImm32(const Mem &dst, int value)
+{
+	x86::Mem m(dst);
+	m.set_size(4);
+	m_uc.cc->mov(m, Imm(value));
+}
+
 // Branch on the result of a floating point compare. The VM compares as
 // (a == b) ? 0 : (a < b) ? -1 : 1, so an unordered compare counts as greater
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
@@ -199,6 +207,19 @@ void CJITCodeGen::AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, 1, TypeId::kUInt64);
 }
 
+// Zero is stored from the zero register
+void CJITCodeGen::StoreImm32(const Mem &dst, int value)
+{
+	if( value == 0 )
+	{
+		m_uc.store_zero_u32(dst);
+		return;
+	}
+	Gp t = m_uc.new_gp32();
+	m_uc.mov(t, Imm(value));
+	m_uc.store_u32(dst, t);
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -255,6 +276,13 @@ void CJITCodeGen::SetSignBit(const Gp &)
 void CJITCodeGen::AddVRReturn(FuncDetail &)
 {
 	m_failed = true;
+}
+
+void CJITCodeGen::StoreImm32(const Mem &dst, int value)
+{
+	Gp t = m_uc.new_gp32();
+	m_uc.mov(t, Imm(value));
+	m_uc.store_u32(dst, t);
 }
 
 #endif
