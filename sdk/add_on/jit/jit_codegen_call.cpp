@@ -409,8 +409,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			Gp array  = m_uc.new_gp_ptr();
 			Gp t      = m_uc.new_gp_ptr();
 			m_uc.load_u32(length, ContextField(layout.callStackLength));
-			m_uc.j(finish, test_z(length));
-			m_uc.sub(length, length, Imm(layout.callStackFrameSize));
+			m_uc.j(finish, sub_c(length, Imm(layout.callStackFrameSize)));
 			m_uc.load(array, ContextField(layout.callStackArray));
 			Mem state = PtrElement(array, length);
 			m_uc.load(t, state);
