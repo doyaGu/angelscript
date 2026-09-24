@@ -395,7 +395,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 				SyncVR();
 
 			// Pop the call state like asCContext::PopCallState, unless the function
-			// was called by the application or as a nested call
+			// was called by the application or as a nested call, which finishes the
+			// execution like the VM does
 			Label finish = m_uc.new_label();
 			Gp length = m_uc.new_gp_ptr();
 			Gp state  = m_uc.new_gp_ptr();
@@ -424,9 +425,9 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 
 			m_uc.bind(finish);
 			SyncStack();
-			InvokeNode *call = Invoke((const void*)JIT_Return, FuncSignature::build<void, asSVMRegisters*, asUINT>());
-			call->set_arg(0, m_regs);
-			call->set_arg(1, Imm(popSize));
+			Gp status = m_uc.new_gp32();
+			m_uc.mov(status, Imm(int(asEXECUTION_FINISHED)));
+			m_uc.store_u32(ContextField(layout.status), status);
 			Leave();
 		}
 		break;

@@ -43,6 +43,7 @@ struct SJITContextLayout
 	int stackIndex;            // asUINT, index of the current stack block
 	int stackBlocks;           // asDWORD**, the stack blocks
 	int callingSystemFunction; // asCScriptFunction*, the registered function being called
+	int status;                // asEContextState, 32 bits
 	int callStackFrameSize;    // words per call state
 	int reserveStack;          // dwords that must remain free on the stack block
 };
@@ -111,10 +112,6 @@ int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra,
 // registers must be the one the function was called with, and the program pointer
 // the start of the function
 int    JIT_PrepareFrame(asSVMRegisters *regs) noexcept;
-
-// asBC_RET in a function called by the application or as a nested call. The
-// generated code must return to the VM afterwards
-void   JIT_Return(asSVMRegisters *regs, asUINT popSize) noexcept;
 
 // asBC_SUSPEND, when regs->doProcessSuspend is set
 int    JIT_Suspend(asSVMRegisters *regs) noexcept;

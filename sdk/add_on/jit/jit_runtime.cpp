@@ -32,6 +32,7 @@ const SJITContextLayout &JIT_GetContextLayout() noexcept
 		JIT_CTX_OFFSET(m_stackIndex),
 		JIT_CTX_OFFSET(m_stackBlocks) + int(offsetof(asCArray<asDWORD*>, array)),
 		JIT_CTX_OFFSET(m_callingSystemFunction),
+		JIT_CTX_OFFSET(m_status),
 		CALLSTACK_FRAME_SIZE,
 		RESERVE_STACK
 	};
@@ -376,22 +377,6 @@ int JIT_PrepareFrame(asSVMRegisters *regs) noexcept
 	asCContext *ctx = GetContext(regs);
 	ctx->PrepareScriptFunction();
 	return ctx->m_status != asEXECUTION_ACTIVE ? 1 : 0;
-}
-
-void JIT_Return(asSVMRegisters *regs, asUINT popSize) noexcept
-{
-	asCContext *ctx = GetContext(regs);
-
-	asUINT length = ctx->m_callStack.GetLength();
-	if( length == 0 || ctx->m_callStack[length - CALLSTACK_FRAME_SIZE] == 0 )
-	{
-		// The function was called by the application, or as a nested call
-		ctx->m_status = asEXECUTION_FINISHED;
-		return;
-	}
-
-	ctx->PopCallState();
-	regs->stackPointer += popSize;
 }
 
 int JIT_Suspend(asSVMRegisters *regs) noexcept
