@@ -15,10 +15,13 @@ using namespace asmjit::ujit;
 // see AssignHomeRegs. The allocator uses the scratch registers ECX|RCX and EDI|R15
 // for jumps, so they are avoided. Otherwise these are only hints, so if a register
 // isn't available, e.g. EBP|RBP as frame pointer, the allocator picks another one.
-// The cached variables in the mask get the rest, of which 32bit x86 has none
+// The cached variables in the mask get the rest, including the ones of the stack
+// pointer and the call limit if the function doesn't need them
 void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 {
 	x86::Compiler *cc = m_uc.cc;
+	uint32_t gpIds[5];
+	asUINT gpCount = 0;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(x86::Gp::kIdBx);
 	if( m_sp.is_valid() )
 		cc->virt_reg_by_reg(m_sp)->set_home_id_hint(x86::Gp::kIdBp);
@@ -29,12 +32,23 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 		if( m_callLimit.is_valid() )
 			cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(x86::Gp::kIdR12);
 
-		static const uint32_t gpIds[] = { x86::Gp::kIdSi, x86::Gp::kIdDi, x86::Gp::kIdR13, x86::Gp::kIdR12 };
 		static const uint32_t vecIds[] = { 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-		SetSlotHomeHints(slotMask, gpIds, m_callLimit.is_valid() ? 3 : 4, vecIds, 10);
+		gpIds[gpCount++] = x86::Gp::kIdSi;
+		gpIds[gpCount++] = x86::Gp::kIdDi;
+		gpIds[gpCount++] = x86::Gp::kIdR13;
+		if( !m_sp.is_valid() )
+			gpIds[gpCount++] = x86::Gp::kIdBp;
+		if( !m_callLimit.is_valid() )
+			gpIds[gpCount++] = x86::Gp::kIdR12;
+		SetSlotHomeHints(slotMask, gpIds, gpCount, vecIds, 10);
 	}
 	else
+	{
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdSi);
+		if( !m_sp.is_valid() )
+			gpIds[gpCount++] = x86::Gp::kIdBp;
+		SetSlotHomeHints(slotMask, gpIds, gpCount, 0, 0);
+	}
 }
 
 // dst = a / b or a % b for signed integers. The operands must have been
@@ -135,15 +149,19 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 {
 	a64::Compiler *cc = m_uc.cc;
+	uint32_t gpIds[6] = { 23, 24, 25, 26 };
+	asUINT gpCount = 4;
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(19);
 	cc->virt_reg_by_reg(m_fp)->set_home_id_hint(20);
 	if( m_sp.is_valid() )
 		cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
+	else
+		gpIds[gpCount++] = 21;
 	if( m_callLimit.is_valid() )
 		cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(22);
-
-	static const uint32_t gpIds[] = { 23, 24, 25, 26 };
-	SetSlotHomeHints(slotMask, gpIds, 4, 0, 0);
+	else
+		gpIds[gpCount++] = 22;
+	SetSlotHomeHints(slotMask, gpIds, gpCount, 0, 0);
 }
 
 void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod)
