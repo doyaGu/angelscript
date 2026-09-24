@@ -79,9 +79,9 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 
 // Script function call through the runtime helper, which also executes the
 // called function natively when possible. Calls of script functions, methods,
-// and function pointers push the call state inline and call the compiled function
-// directly instead, unless it hasn't been compiled or the call stack has reached
-// the call limit
+// function pointers, and the constructors of script classes push the call state
+// inline and call the compiled function directly instead, unless it hasn't been
+// compiled or the call stack has reached the call limit
 void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -91,17 +91,42 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		callee = func->engine->scriptFunctions[funcId];
 
 	bool native = false;
-	if( kind == JIT_CALL_SCRIPT )
+	if( kind == JIT_CALL_SCRIPT || kind == JIT_CALL_ALLOC )
 		native = callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData;
 	else if( kind == JIT_CALL_INTERFACE )
 		native = callee && (callee->funcType == asFUNC_VIRTUAL || callee->funcType == asFUNC_INTERFACE);
 	else if( kind == JIT_CALL_PTR )
 		native = true;
 
+	// The object of a script class is allocated first, with everything synced like
+	// the VM does, as the allocation may reuse the context for nested calls. Then
+	// it is stored in the variable, and pushed for the constructor
+	bool synced = false;
+	if( native && kind == JIT_CALL_ALLOC )
+	{
+		SyncForCall(idx);
+		InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
+		Gp obj = m_uc.new_gp_ptr();
+		alloc->set_arg(0, Imm(int64_t(extraImm)));
+		alloc->set_ret(0, obj);
+
+		Gp var = m_uc.new_gp_ptr();
+		Label noVar = m_uc.new_label();
+		m_uc.load(var, Stack(int(callee->GetSpaceNeededForArguments())));
+		m_uc.j(noVar, test_z(var));
+		m_uc.store(mem_ptr(var), obj);
+		m_uc.bind(noVar);
+		PushStack(PTR_BYTES);
+		m_uc.store(Stack(0), obj);
+		kind = JIT_CALL_CONSTRUCT;
+		synced = true;
+	}
+
 	// The native calls push the frame and the stack pointer on the call stack and
 	// pass the stack pointer, only the helper needs them in the VM registers.
 	// Arguments passed on the stack cost a store too though
-	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+	if( !synced )
+		StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	int spOffset = m_spOffset;
 	if( !m_spInArg )
 		SyncStack();
@@ -117,7 +142,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 
 		// A recursive call enters this code, which exists as it is being executed
 		Gp target;
-		if( kind == JIT_CALL_SCRIPT && callee != func )
+		if( (kind == JIT_CALL_SCRIPT || kind == JIT_CALL_CONSTRUCT) && callee != func )
 		{
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, mem_ptr(PtrConst(asPWORD(&callee->scriptData->jitFunction))));
@@ -162,9 +187,12 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	m_spOffset = spOffset;
 	if( m_spInArg )
 		SyncStack();
-	if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
-		StoreFrame();
-	SetPC(instr.pos);
+	if( !synced )
+	{
+		if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
+			StoreFrame();
+		SetPC(instr.pos);
+	}
 	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	call->set_arg(0, m_regs);
 	call->set_arg(1, Imm(kind));

@@ -86,7 +86,9 @@ enum EJITCallKind
 	JIT_CALL_INTERFACE = 1, // asBC_CALLINTF: funcId is the function id
 	JIT_CALL_BOUND     = 2, // asBC_CALLBND:  funcId is the imported function id
 	JIT_CALL_PTR       = 3, // asBC_CallPtr:  extra is the function pointer (may be null)
-	JIT_CALL_ALLOC     = 4  // asBC_ALLOC:    funcId is the constructor, extra is the asCObjectType
+	JIT_CALL_ALLOC     = 4, // asBC_ALLOC:    funcId is the constructor, extra is the asCObjectType
+	JIT_CALL_CONSTRUCT = 5  // asBC_ALLOC:    funcId is the constructor, the object has been
+	                        //                allocated and pushed already, see JIT_NewScriptObject
 };
 
 // asBC_CALLSYS
@@ -132,6 +134,10 @@ int    JIT_Suspend(asSVMRegisters *regs) noexcept;
 
 // asBC_ALLOC for registered types
 int    JIT_Alloc(asSVMRegisters *regs, asCObjectType *objType, int funcId) noexcept;
+
+// asBC_ALLOC for script classes, before the constructor is called. The registers
+// must have been synced, as the allocation may reuse the context for nested calls
+void  *JIT_NewScriptObject(asCObjectType *objType) noexcept;
 
 // asBC_FREE. var is the address of the variable holding the object
 void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noexcept;

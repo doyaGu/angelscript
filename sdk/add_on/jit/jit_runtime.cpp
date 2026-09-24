@@ -351,9 +351,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 
 	case JIT_CALL_ALLOC:
 		{
-			asCObjectType *objType = reinterpret_cast<asCObjectType*>(extra);
-			asDWORD *mem = (asDWORD*)engine->CallAlloc(objType);
-			ScriptObject_Construct(objType, (asCScriptObject*)mem);
+			asDWORD *mem = (asDWORD*)JIT_NewScriptObject(reinterpret_cast<asCObjectType*>(extra));
 
 			asCScriptFunction *f = engine->scriptFunctions[funcId];
 			asDWORD **a = (asDWORD**)*(asPWORD*)(regs->stackPointer + f->GetSpaceNeededForArguments());
@@ -364,6 +362,10 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 			regs->programPointer += 2 + AS_PTR_SIZE;
 			return EnterScriptFunction(regs, ctx, f, callLimit);
 		}
+
+	case JIT_CALL_CONSTRUCT:
+		regs->programPointer += 2 + AS_PTR_SIZE;
+		return EnterScriptFunction(regs, ctx, engine->scriptFunctions[funcId], callLimit);
 
 	default:
 		return 1;
@@ -395,6 +397,13 @@ int JIT_Suspend(asSVMRegisters *regs) noexcept
 	}
 
 	return 0;
+}
+
+void *JIT_NewScriptObject(asCObjectType *objType) noexcept
+{
+	asDWORD *mem = (asDWORD*)objType->engine->CallAlloc(objType);
+	ScriptObject_Construct(objType, (asCScriptObject*)mem);
+	return mem;
 }
 
 int JIT_Alloc(asSVMRegisters *regs, asCObjectType *objType, int funcId) noexcept
