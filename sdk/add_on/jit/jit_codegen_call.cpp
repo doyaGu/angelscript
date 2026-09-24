@@ -139,11 +139,12 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 
 		// The called function has popped the arguments. Unless the size isn't known
 		// the stack pointer is adjusted instead of waiting for the one it stored,
-		// which the call state must not be marked for then
-		bool reload = kind == JIT_CALL_PTR || callee->IsVariadic();
+		// which the call state must not be marked for then. A static stack pointer
+		// is known after any call
+		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
 		EmitNativeCall(idx, target, r, slow, !reload);
 		EmitLeaveIf(r);
-		if( reload )
+		if( reload || m_staticStack )
 			ReloadStackAfter(idx);
 		else
 			PopStack(CJITByteCode::GetPopSize(callee) * 4);

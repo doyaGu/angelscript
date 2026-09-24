@@ -517,13 +517,15 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 }
 
 // The script calls that may be native calls, after which the frame hasn't been
-// restored, see JIT_NATIVE_RETURN. The function pointers are always restored
-static bool LeavesFrameDirty(asEBCInstr op)
+// restored, see JIT_NATIVE_RETURN. The function pointers are restored unless the
+// stack is static, see CJITCodeGen::EmitScriptCall
+static bool LeavesFrameDirty(asEBCInstr op, bool staticStack)
 {
 #ifdef JIT_NATIVE_RETURN
-	return op == asBC_CALL || op == asBC_CALLINTF;
+	return op == asBC_CALL || op == asBC_CALLINTF || (op == asBC_CallPtr && staticStack);
 #else
 	(void)op;
+	(void)staticStack;
 	return false;
 #endif
 }
@@ -834,7 +836,7 @@ void CJITByteCode::AnalyseDirtySlots()
 			asUINT uses, defs;
 			GetSlotMasks(m_instrs[k], uses, defs);
 			written |= defs;
-			if( LeavesFrameDirty(m_instrs[k].op) )
+			if( LeavesFrameDirty(m_instrs[k].op, m_staticStack) )
 				written |= JIT_FRAME_BIT;
 			calls = calls || IsSyncPoint(m_instrs[k].op);
 		}
@@ -892,7 +894,7 @@ void CJITByteCode::AnalyseDirtySlots()
 				m_dirty[n] = mask;
 
 				if( IsSyncPoint(instr.op) )
-					mask = LeavesFrameDirty(instr.op) ? JIT_FRAME_BIT : 0;
+					mask = LeavesFrameDirty(instr.op, m_staticStack) ? JIT_FRAME_BIT : 0;
 				else
 					mask = (mask | defs) & (~m_tempMask | m_liveAfter[n]);
 
