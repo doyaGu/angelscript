@@ -19,6 +19,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_func       = 0;
 	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
+	m_vrAddrValid = false;
 	m_instrCount = 0;
 	m_bailCount  = 0;
 	m_failed     = false;
@@ -88,6 +89,7 @@ bool CJITCodeGen::Generate()
 
 		asUINT consumed = 1;
 		const SJITInstr &instr = instrs[idx];
+		bool addrPending = m_vrAddrValid;
 #ifndef ASMJIT_NO_LOGGING
 		if( m_uc.cc->has_logger() )
 			m_uc.commentf("%d %s", instr.pos, asBCInfo[instr.op].name);
@@ -125,6 +127,10 @@ bool CJITCodeGen::Generate()
 				m_failed = true;
 				break;
 			}
+
+			// An address left to the next instruction must not outlive it
+			assert( !addrPending || !m_vrAddrValid );
+			(void)addrPending;
 
 			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
 				SyncAllSlots(instrs[idx + consumed].pos);
@@ -924,6 +930,56 @@ void CJITCodeGen::ReloadVR()
 		m_uc.load_u64(m_vr, VRMem());
 }
 
+bool CJITCodeGen::CanFoldVRAddr(asUINT idx) const
+{
+	// The next instruction must be emitted right after this one without anything
+	// in between that may give the value register to the VM
+	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	if( m_options.syncEveryInstr || idx + 1 >= instrs.size() ||
+		(instrs[idx + 1].flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_SKIP | JIT_INSTR_DEAD)) ||
+		m_code.IsVRLiveAfter(idx + 1) )
+		return false;
+
+	switch( instrs[idx + 1].op )
+	{
+	case asBC_RDR1: case asBC_RDR2: case asBC_RDR4: case asBC_RDR8:
+	case asBC_WRTV1: case asBC_WRTV2: case asBC_WRTV4: case asBC_WRTV8:
+	case asBC_INCi8: case asBC_DECi8: case asBC_INCi16: case asBC_DECi16:
+	case asBC_INCi: case asBC_DECi: case asBC_INCi64: case asBC_DECi64:
+	case asBC_INCf: case asBC_DECf: case asBC_INCd: case asBC_DECd:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void CJITCodeGen::SetVRAddr(asUINT idx, const Mem &addr)
+{
+	if( CanFoldVRAddr(idx) )
+	{
+		m_vrAddr = addr;
+		m_vrAddrValid = true;
+		return;
+	}
+
+	Gp t = m_uc.new_gp_ptr();
+	m_uc.lea(t, addr);
+	StoreVRPtr(t);
+}
+
+Mem CJITCodeGen::VRAddr()
+{
+	if( m_vrAddrValid )
+	{
+		m_vrAddrValid = false;
+		return m_vrAddr;
+	}
+
+	Gp p = m_uc.new_gp_ptr();
+	LoadVRPtr(p);
+	return mem_ptr(p);
+}
+
 //------------------------------------------------------------------------
 // Synchronization with the VM
 
@@ -1541,26 +1597,28 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 	case asBC_WRTV2:
 	case asBC_WRTV4:
 		{
-			Gp p = m_uc.new_gp_ptr();
-			LoadVRPtr(p);
-			Gp v = Load32(a0);
-			if( instr.op == asBC_WRTV1 )
-				m_uc.store_u8(mem_ptr(p), v);
+			// Floats kept in vector registers are stored from there
+			Mem dst = VRAddr();
+			SCachedSlot *c = FindCached(a0);
+			if( instr.op == asBC_WRTV4 && c && c->kind == JIT_SLOT_F32 )
+				m_uc.v_storeu32_f32(dst, c->vec);
+			else if( instr.op == asBC_WRTV1 )
+				m_uc.store_u8(dst, Load32(a0));
 			else if( instr.op == asBC_WRTV2 )
-				m_uc.store_u16(mem_ptr(p), v);
+				m_uc.store_u16(dst, Load32(a0));
 			else
-				m_uc.store_u32(mem_ptr(p), v);
+				m_uc.store_u32(dst, Load32(a0));
 		}
 		break;
 
 	case asBC_WRTV8:
 		{
-			Gp p = m_uc.new_gp_ptr();
-			LoadVRPtr(p);
-			if( Is64Bit() )
-				m_uc.store_u64(mem_ptr(p), Load64(a0));
+			Mem dst = VRAddr();
+			SCachedSlot *c = FindCached(a0);
+			if( Is64Bit() && !(c && c->kind == JIT_SLOT_F64) )
+				m_uc.store_u64(dst, Load64(a0));
 			else
-				m_uc.v_storeu64_f64(mem_ptr(p), LoadF64(a0));
+				m_uc.v_storeu64_f64(dst, LoadF64(a0));
 		}
 		break;
 
@@ -1568,48 +1626,55 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 	case asBC_RDR2:
 	case asBC_RDR4:
 		{
-			Gp p = m_uc.new_gp_ptr();
-			LoadVRPtr(p);
-			Gp t = m_uc.new_gp32();
-			if( instr.op == asBC_RDR1 )
-				m_uc.load_u8(t, mem_ptr(p));
-			else if( instr.op == asBC_RDR2 )
-				m_uc.load_u16(t, mem_ptr(p));
+			Mem src = VRAddr();
+			SCachedSlot *c = FindCached(a0);
+			if( instr.op == asBC_RDR4 && c && c->kind == JIT_SLOT_F32 )
+				m_uc.v_loadu32_f32(c->vec, src);
 			else
-				m_uc.load_u32(t, mem_ptr(p));
-			Commit32(a0, t);
+			{
+				Gp t = Dst32(a0);
+				if( instr.op == asBC_RDR1 )
+					m_uc.load_u8(t, src);
+				else if( instr.op == asBC_RDR2 )
+					m_uc.load_u16(t, src);
+				else
+					m_uc.load_u32(t, src);
+				Commit32(a0, t);
+			}
 		}
 		break;
 
 	case asBC_RDR8:
 		{
-			Gp p = m_uc.new_gp_ptr();
-			LoadVRPtr(p);
-			if( Is64Bit() )
+			Mem src = VRAddr();
+			SCachedSlot *c = FindCached(a0);
+			if( Is64Bit() && !(c && c->kind == JIT_SLOT_F64) )
 			{
-				Gp t = m_uc.new_gp64();
-				m_uc.load_u64(t, mem_ptr(p));
+				Gp t = Dst64(a0);
+				m_uc.load_u64(t, src);
 				Commit64(a0, t);
 			}
 			else
 			{
-				Vec v = m_uc.new_vec128_f64x1();
-				m_uc.v_loadu64_f64(v, mem_ptr(p));
+				Vec v = DstF64(a0);
+				m_uc.v_loadu64_f64(v, src);
 				CommitF64(a0, v);
 			}
 		}
 		break;
 
 	case asBC_LDG:
-		StoreVRPtr(PtrConst(asBC_PTRARG(bc)));
+		if( CanFoldVRAddr(idx) )
+		{
+			Gp g;
+			SetVRAddr(idx, Global(asBC_PTRARG(bc), g));
+		}
+		else
+			StoreVRPtr(PtrConst(asBC_PTRARG(bc)));
 		break;
 
 	case asBC_LDV:
-		{
-			Gp t = m_uc.new_gp_ptr();
-			m_uc.lea(t, Var(a0));
-			StoreVRPtr(t);
-		}
+		SetVRAddr(idx, Var(a0));
 		break;
 
 	case asBC_ChkRefS:
@@ -1649,8 +1714,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.load(t, Var(0));
 			m_uc.j(BailLabel(idx), test_z(t));
-			m_uc.add(t, t, Imm(int(asBC_SWORDARG0(bc))));
-			StoreVRPtr(t);
+			SetVRAddr(idx, mem_ptr(t, asBC_SWORDARG0(bc)));
 		}
 		break;
 
@@ -1658,17 +1722,12 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		{
 			Gp t = LoadPtr(a0);
 			m_uc.j(BailLabel(idx), test_z(t));
-			m_uc.add(t, t, Imm(int(asBC_SWORDARG1(bc))));
-			StoreVRPtr(t);
+			SetVRAddr(idx, mem_ptr(t, asBC_SWORDARG1(bc)));
 		}
 		break;
 
 	case asBC_LoadVObjR:
-		{
-			Gp t = m_uc.new_gp_ptr();
-			m_uc.lea(t, Var(a0, asBC_SWORDARG1(bc)));
-			StoreVRPtr(t);
-		}
+		SetVRAddr(idx, Var(a0, asBC_SWORDARG1(bc)));
 		break;
 
 	case asBC_AllocMem:

@@ -169,6 +169,13 @@ protected:
 	void SyncVR();
 	void ReloadVR();
 
+	// Addresses in the value register. SetVRAddr leaves the address to the memory
+	// operand of the next instruction if that only dereferences it and the register
+	// isn't read afterwards, and VRAddr returns the memory the register points to
+	bool CanFoldVRAddr(asUINT idx) const;
+	void SetVRAddr(asUINT idx, const Mem &addr);
+	Mem  VRAddr();
+
 	// Synchronization with the VM
 	void SetPC(asUINT pos);
 	void SyncStack();
@@ -220,6 +227,8 @@ protected:
 	Gp  m_bailPC;   // program pointer to set when bailing
 	bool m_vrInReg;
 	bool m_guarded;
+	Mem  m_vrAddr;      // the address left to the next instruction by SetVRAddr
+	bool m_vrAddrValid;
 
 	std::vector<SCachedSlot>   m_cached;
 	std::map<int, asUINT>      m_cachedIndex;

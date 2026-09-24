@@ -665,9 +665,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 
 bool CJITCodeGen::EmitIncDec(const SJITInstr &instr)
 {
-	Gp p = m_uc.new_gp_ptr();
-	LoadVRPtr(p);
-	Mem m = mem_ptr(p);
+	Mem m = VRAddr();
 
 	switch( instr.op )
 	{
@@ -715,6 +713,8 @@ bool CJITCodeGen::EmitIncDec(const SJITInstr &instr)
 		}
 		else
 		{
+			Gp p = m_uc.new_gp_ptr();
+			m_uc.lea(p, m);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
 			call->set_arg(0, Imm(int(instr.op)));
 			call->set_arg(1, p);
