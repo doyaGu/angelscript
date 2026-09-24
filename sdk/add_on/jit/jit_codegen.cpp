@@ -1104,7 +1104,17 @@ void CJITCodeGen::ReloadAll(asUINT idx)
 	ReloadStack();
 	if( m_code.IsVRLiveAfter(idx) )
 		ReloadVR();
-	ReloadCachedSlots();
+	ReloadLiveSlots(idx);
+}
+
+// Temporary variables that won't be read anymore may not have been stored, but
+// loading them again doesn't matter. All are loaded when syncing every instruction
+void CJITCodeGen::ReloadLiveSlots(asUINT idx)
+{
+	if( m_options.syncEveryInstr )
+		ReloadCachedSlots();
+	else
+		ReloadSlots(m_code.GetLiveAfterMask(idx));
 }
 
 //------------------------------------------------------------------------

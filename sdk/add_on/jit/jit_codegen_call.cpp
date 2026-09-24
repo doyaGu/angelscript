@@ -55,7 +55,7 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
 		ReloadVR();
 
 	// With a debugger attached the variables may have been modified through the context
-	if( !m_cached.empty() )
+	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code.GetLiveAfterMask(idx)) )
 	{
 		Gp t = m_uc.new_gp32();
 		m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
@@ -63,7 +63,7 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx)
 		Label cont = m_uc.new_label();
 		m_uc.j(reload, test_nz(t));
 		BaseNode *cold = BeginCold(reload);
-		ReloadCachedSlots();
+		ReloadLiveSlots(idx);
 		EndCold(cold, cont);
 		m_uc.bind(cont);
 	}
@@ -820,7 +820,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	after->set_ret(0, r);
 	EmitLeaveIf(r);
 	// With a debugger attached the variables may have been modified through the context
-	ReloadCachedSlots();
+	ReloadLiveSlots(idx);
 	EndCold(cold, cont);
 	m_uc.bind(cont);
 

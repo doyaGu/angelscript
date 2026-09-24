@@ -190,6 +190,7 @@ protected:
 	void SyncForCall(asUINT idx);    // like SyncAll but without the value register, which calls clobber
 	void SyncAllSlots(asUINT pos);   // writes back everything, program pointer set to pos
 	void ReloadAll(asUINT idx);      // loads what the VM may have changed when continuing after the instruction
+	void ReloadLiveSlots(asUINT idx); // loads the cached slots read after the instruction
 
 	// Leaves native code. Bail makes the VM re-execute the instruction
 	void  Bail(asUINT idx);

@@ -101,7 +101,8 @@ public:
 	int  GetCacheBit(int offset) const;
 
 	// Returns the mask of the register cached variables whose register may hold
-	// a newer value than the memory when the instruction is reached
+	// a newer value than the memory when the instruction is reached. Temporary
+	// variables that won't be read anymore are left out
 	asUINT GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
 
 	// Returns the mask of the register cached variables to store before or after
@@ -112,6 +113,10 @@ public:
 	// Returns the mask of the register cached variables that may be read before
 	// being written when the block of the instruction is entered
 	asUINT GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
+
+	// Returns the mask of the register cached variables that may be read before
+	// being written after the instruction
+	asUINT GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
 
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
@@ -166,6 +171,8 @@ protected:
 	std::vector<asUINT>     m_storeBefore; // per instruction mask of cached slots stored before it
 	std::vector<asUINT>     m_storeAfter;  // per instruction mask of cached slots stored after it
 	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
+	std::vector<asUINT>     m_liveAfter;   // per instruction mask of cached slots live after it
+	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
 	bool                    m_retReadsVR;
 };
 

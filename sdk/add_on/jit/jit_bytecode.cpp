@@ -14,6 +14,7 @@ CJITByteCode::CJITByteCode()
 	m_byteCode = 0;
 	m_length   = 0;
 	m_retReadsVR = false;
+	m_tempMask   = 0;
 }
 
 bool CJITByteCode::IsBranch(asEBCInstr op)
@@ -325,8 +326,8 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots)
 	BuildBlocks();
 	AnalyseVRLiveness();
 	AnalyseSlots(allowRegisterCache, maxCachedSlots);
-	AnalyseDirtySlots();
 	AnalyseSlotLiveness();
+	AnalyseDirtySlots();
 }
 
 bool CJITByteCode::IsSyncPoint(asEBCInstr op)
@@ -530,10 +531,12 @@ void CJITByteCode::GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &de
 }
 
 // Backward data flow to find which cached slots may be read before being
-// written in each block. Entry stubs only need to load those
+// written in each block and after each instruction. Entry stubs only need to
+// load those, and the VM only reads those when it takes over
 void CJITByteCode::AnalyseSlotLiveness()
 {
 	m_liveIn.assign(m_blocks.size(), 0);
+	m_liveAfter.assign(m_instrs.size(), 0);
 
 	std::vector<asUINT> use(m_blocks.size(), 0), def(m_blocks.size(), 0);
 	for( asUINT b = 0; b < m_blocks.size(); b++ )
@@ -547,36 +550,37 @@ void CJITByteCode::AnalyseSlotLiveness()
 		}
 	}
 
+	std::vector<asUINT> liveOut(m_blocks.size(), 0);
+	std::vector<asUINT> succ;
 	bool changed = true;
 	while( changed )
 	{
 		changed = false;
 		for( int b = int(m_blocks.size()) - 1; b >= 0; b-- )
 		{
-			const SJITBlock &block = m_blocks[b];
-			const SJITInstr &last = m_instrs[block.last];
+			GetSuccessors(b, succ);
+			liveOut[b] = 0;
+			for( asUINT k = 0; k < succ.size(); k++ )
+				liveOut[b] |= m_liveIn[succ[k]];
 
-			asUINT liveOut = 0;
-			if( last.op == asBC_JMPP )
-			{
-				const std::vector<int> &targets = GetSwitchTargets(block.last);
-				for( asUINT t = 0; t < targets.size(); t++ )
-					liveOut |= m_liveIn[m_instrs[targets[t]].block];
-			}
-			else if( last.op != asBC_RET )
-			{
-				if( last.target >= 0 )
-					liveOut |= m_liveIn[m_instrs[last.target].block];
-				if( last.op != asBC_JMP && block.last + 1 < m_instrs.size() )
-					liveOut |= m_liveIn[m_instrs[block.last + 1].block];
-			}
-
-			asUINT liveIn = use[b] | (liveOut & ~def[b]);
+			asUINT liveIn = use[b] | (liveOut[b] & ~def[b]);
 			if( liveIn != m_liveIn[b] )
 			{
 				m_liveIn[b] = liveIn;
 				changed = true;
 			}
+		}
+	}
+
+	for( asUINT b = 0; b < m_blocks.size(); b++ )
+	{
+		asUINT live = liveOut[b];
+		for( asUINT n = m_blocks[b].last + 1; n-- > m_blocks[b].first; )
+		{
+			m_liveAfter[n] = live;
+			asUINT uses, defs;
+			GetSlotMasks(m_instrs[n], uses, defs);
+			live = uses | (live & ~defs);
 		}
 	}
 }
@@ -701,7 +705,13 @@ void CJITByteCode::AnalyseDirtySlots()
 			asUINT mask = in[b];
 			for( asUINT n = block.first; n <= block.last; n++ )
 			{
+				// Temporary variables that won't be read anymore don't need to be
+				// stored, nothing else can see them
 				const SJITInstr &instr = m_instrs[n];
+				asUINT uses, defs;
+				GetSlotMasks(instr, uses, defs);
+				mask &= ~m_tempMask | uses | (m_liveAfter[n] & ~defs);
+
 				m_storeBefore[n] = mask & keepBefore[n];
 				mask &= ~keepBefore[n];
 				m_dirty[n] = mask;
@@ -709,11 +719,7 @@ void CJITByteCode::AnalyseDirtySlots()
 				if( IsSyncPoint(instr.op) )
 					mask = 0;
 				else
-				{
-					asUINT uses, defs;
-					GetSlotMasks(instr, uses, defs);
-					mask |= defs;
-				}
+					mask = (mask | defs) & (~m_tempMask | m_liveAfter[n]);
 
 				m_storeAfter[n] = mask & keepAfter[n];
 				mask &= ~keepAfter[n];
@@ -1147,6 +1153,7 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 {
 	m_slots.clear();
 	m_slotIndex.clear();
+	m_tempMask = 0;
 
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 		CollectSlotUses(m_instrs[n]);
@@ -1233,6 +1240,20 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheKind != JIT_SLOT_NONE )
 			m_slots[n].cacheBit = bit++;
+
+	// Temporary variables have no name. Named variables and parameters may be
+	// inspected through the debug interface
+	const asCArray<asSScriptVariable*> &vars = m_func->scriptData->variables;
+	for( asUINT n = 0; n < m_slots.size(); n++ )
+	{
+		if( m_slots[n].cacheBit < 0 || m_slots[n].offset <= 0 )
+			continue;
+		bool named = false;
+		for( asUINT v = 0; v < vars.GetLength() && !named; v++ )
+			named = vars[v]->stackOffset == m_slots[n].offset && vars[v]->name.GetLength() > 0;
+		if( !named )
+			m_tempMask |= asUINT(1) << m_slots[n].cacheBit;
+	}
 }
 
 int CJITByteCode::GetCacheKind(int offset) const
