@@ -942,12 +942,17 @@ void CJITByteCode::BuildBlocks()
 	}
 }
 
+// RET only passes the value register to the caller for primitives and references.
+// Handles are returned in the object register and objects in memory
+bool CJITByteCode::ReturnsInVR(asCScriptFunction *func)
+{
+	const asCDataType &rt = func->returnType;
+	return rt.IsReference() || (rt.GetTokenType() != ttVoid && !rt.IsObject() && !rt.IsObjectHandle() && !rt.IsFuncdef());
+}
+
 void CJITByteCode::AnalyseVRLiveness()
 {
-	// RET only passes the value register to the caller for primitives and references.
-	// Handles are returned in the object register and objects in memory
-	const asCDataType &rt = m_func->returnType;
-	bool retReadsVR = rt.IsReference() || (rt.GetTokenType() != ttVoid && !rt.IsObject() && !rt.IsObjectHandle() && !rt.IsFuncdef());
+	bool retReadsVR = ReturnsInVR(m_func);
 	m_retReadsVR = retReadsVR;
 
 	// Local use/def per block

@@ -134,6 +134,7 @@ public:
 
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
+	static bool ReturnsInVR(asCScriptFunction *func);
 
 	// Returns true if the depth of the stack is known at each instruction, i.e. the
 	// stack pointer is at a fixed distance from the frame pointer
