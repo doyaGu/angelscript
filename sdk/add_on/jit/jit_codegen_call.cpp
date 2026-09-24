@@ -87,8 +87,8 @@ static int PopSize(asCScriptFunction *func)
 // Script function call through the runtime helper, which also executes the
 // called function natively when possible. Calls of script functions, methods,
 // and function pointers push the call state inline and call the compiled function
-// directly instead, unless it hasn't been compiled, the depth is exhausted, or
-// the call stack must grow
+// directly instead, unless it hasn't been compiled or the call stack has reached
+// the call limit
 void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -115,7 +115,6 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	if( native )
 	{
 		const SJITObjectLayout &layout = JIT_GetObjectLayout();
-		m_uc.j(slow, test_z(m_depth));
 
 		// A recursive call enters this code, which exists as it is being executed
 		Gp target;
@@ -167,7 +166,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		call->set_arg(3, *extra);
 	else
 		call->set_arg(3, Imm(int64_t(extraImm)));
-	call->set_arg(4, m_depth);
+	call->set_arg(4, m_callLimit);
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
 	ReloadStack();
@@ -224,7 +223,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 
 // Pushes the call state like asCContext::PushCallState and calls the native code
 // of a script function, or this function if target isn't valid. Jumps to slow if
-// the call stack must grow
+// the call stack has reached the call limit, which is passed on
 void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -232,8 +231,7 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	Gp length = m_uc.new_gp_ptr();
 	Gp t      = m_uc.new_gp_ptr();
 	m_uc.load_u32(length, ContextField(layout.callStackLength));
-	m_uc.load_u32(t, ContextField(layout.callStackCapacity));
-	m_uc.j(slow, ucmp_ge(length, t));
+	m_uc.j(slow, ucmp_ge(length.r32(), m_callLimit));
 	Gp array = m_uc.new_gp_ptr();
 	m_uc.load(array, ContextField(layout.callStackArray));
 	Mem state = PtrElement(array, length);
@@ -246,8 +244,6 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.add(length, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
 
-	Gp depth = m_uc.new_gp32();
-	m_uc.sub(depth, m_depth, Imm(1));
 	FuncSignature sig = FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>();
 	InvokeNode *call = 0;
 	if( target.is_valid() )
@@ -256,7 +252,7 @@ void CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 		m_uc.cc->invoke(Out(call), m_uc.cc->func()->label(), sig);
 	call->set_arg(0, m_regs);
 	call->set_arg(1, Imm(0));
-	call->set_arg(2, depth);
+	call->set_arg(2, m_callLimit);
 	call->set_ret(0, result);
 }
 

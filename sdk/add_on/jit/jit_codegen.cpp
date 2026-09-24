@@ -89,8 +89,19 @@ bool CJITCodeGen::Generate()
 
 	// Entered by the VM, which has set up the frame. Jump to the requested entry point
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
-	if( m_depth.is_valid() )
-		m_uc.mov(m_depth, Imm(m_options.maxNativeCallDepth));
+	if( m_callLimit.is_valid() )
+	{
+		// The native calls may push call states as long as the call stack doesn't
+		// have to grow, and up to the maximum depth. The capacity is a multiple of
+		// the size of a call state and doesn't shrink, see JITFunction
+		const SJITContextLayout &layout = JIT_GetContextLayout();
+		asQWORD words = asQWORD(m_options.maxNativeCallDepth) * layout.callStackFrameSize;
+		Gp capacity = m_uc.new_gp32();
+		m_uc.load_u32(m_callLimit, ContextField(layout.callStackLength));
+		m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
+		m_uc.add(m_callLimit, m_callLimit, Imm(int(words < 0x40000000 ? words : 0x40000000)));
+		m_uc.umin(m_callLimit, m_callLimit, capacity);
+	}
 	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
 
 	// The body in bytecode order. Notes the instructions that call functions
@@ -224,7 +235,7 @@ bool CJITCodeGen::Generate()
 	return true;
 }
 
-// The registers pointer, the frame and stack pointers, and the depth are used all
+// The registers pointer, the frame and stack pointers, and the call limit are used all
 // through the function. AsmJit prefers the registers that calls clobber though, so
 // they would be saved and reloaded around every call. This gives them callee-saved
 // home registers instead. The allocator assigns the arguments to the registers they
@@ -236,11 +247,11 @@ void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
 	Gp regsArg = m_uc.new_gp_ptr("regsArg");
 	m_func->set_arg(0, regsArg);
 	m_uc.mov(m_regs, regsArg);
-	if( m_depth.is_valid() )
+	if( m_callLimit.is_valid() )
 	{
-		Gp depthArg = m_uc.new_gp32("depthArg");
-		m_func->set_arg(2, depthArg);
-		m_uc.mov(m_depth, depthArg);
+		Gp limitArg = m_uc.new_gp32("callLimitArg");
+		m_func->set_arg(2, limitArg);
+		m_uc.mov(m_callLimit, limitArg);
 	}
 	m_uc.cc->set_cursor(cursor);
 
@@ -329,7 +340,7 @@ void CJITCodeGen::CopyLiveArgs()
 
 bool CJITCodeGen::IsLiveThrough(const Reg &reg) const
 {
-	if( reg.id() == m_regs.id() || (m_depth.is_valid() && reg.id() == m_depth.id()) )
+	if( reg.id() == m_regs.id() || (m_callLimit.is_valid() && reg.id() == m_callLimit.id()) )
 		return true;
 	for( size_t n = 0; n < m_cached.size(); n++ )
 		if( reg.id() == (m_cached[n].gp.is_valid() ? m_cached[n].gp.id() : m_cached[n].vec.id()) )
@@ -583,15 +594,15 @@ void CJITCodeGen::EmitPrologue()
 	func->set_arg(0, m_regs);
 	func->set_arg(1, m_arg);
 
-	// The depth is only needed for the calls of script functions
+	// The call limit is only needed for the calls of script functions
 	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
 	for( asUINT n = 0; n < instrs.size() && !m_options.noScriptCalls; n++ )
 	{
 		asEBCInstr op = instrs[n].op;
 		if( op == asBC_CALL || op == asBC_CALLINTF || op == asBC_CALLBND || op == asBC_CallPtr || op == asBC_ALLOC )
 		{
-			m_depth = m_uc.new_gp32("depth");
-			func->set_arg(2, m_depth);
+			m_callLimit = m_uc.new_gp32("callLimit");
+			func->set_arg(2, m_callLimit);
 			break;
 		}
 	}
@@ -600,7 +611,7 @@ void CJITCodeGen::EmitPrologue()
 	// or behaviours directly, or script functions natively
 	m_guarded = false;
 	for( asUINT n = 0; n < instrs.size() && m_options.guardedEntry && !m_guarded; n++ )
-		m_guarded = m_depth.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1 ||
+		m_guarded = m_callLimit.is_valid() || instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1 ||
 		            CallsBehaviourDirectly(instrs[n]);
 
 	// The frame pointer is set up by the entry paths

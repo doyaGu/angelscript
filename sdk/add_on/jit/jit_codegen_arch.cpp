@@ -25,12 +25,12 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 	{
 		// RSI and RDI aren't callee-saved on System V, and neither are XMM6-15
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdR14);
-		if( m_depth.is_valid() )
-			cc->virt_reg_by_reg(m_depth)->set_home_id_hint(x86::Gp::kIdR12);
+		if( m_callLimit.is_valid() )
+			cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(x86::Gp::kIdR12);
 
 		static const uint32_t gpIds[] = { x86::Gp::kIdSi, x86::Gp::kIdDi, x86::Gp::kIdR13, x86::Gp::kIdR12 };
 		static const uint32_t vecIds[] = { 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-		SetSlotHomeHints(slotMask, gpIds, m_depth.is_valid() ? 3 : 4, vecIds, 10);
+		SetSlotHomeHints(slotMask, gpIds, m_callLimit.is_valid() ? 3 : 4, vecIds, 10);
 	}
 	else
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdSi);
@@ -131,8 +131,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 	cc->virt_reg_by_reg(m_regs)->set_home_id_hint(19);
 	cc->virt_reg_by_reg(m_fp)->set_home_id_hint(20);
 	cc->virt_reg_by_reg(m_sp)->set_home_id_hint(21);
-	if( m_depth.is_valid() )
-		cc->virt_reg_by_reg(m_depth)->set_home_id_hint(22);
+	if( m_callLimit.is_valid() )
+		cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(22);
 
 	static const uint32_t gpIds[] = { 23, 24, 25, 26 };
 	SetSlotHomeHints(slotMask, gpIds, 4, 0, 0);

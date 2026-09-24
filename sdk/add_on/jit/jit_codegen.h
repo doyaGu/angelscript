@@ -225,7 +225,7 @@ protected:
 
 	Gp  m_regs;     // asSVMRegisters*
 	Gp  m_arg;      // jitArg
-	Gp  m_depth;    // nested native calls allowed, only if the function calls script functions
+	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_sp;       // stack pointer
 	Gp  m_vr;       // value register (64bit hosts only)

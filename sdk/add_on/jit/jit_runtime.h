@@ -26,11 +26,14 @@ class asCObjectType;
 // Native callers push the call state of the caller like asCContext::PushCallState
 // and call them with jitArg 0, the arguments on the script stack, and the stack
 // pointer in the VM registers. The function then sets up its frame the way
-// asCContext::PrepareScriptFunction does. depth is the number of further nested
-// native calls allowed. The return value is 0 if the function returned to its
-// caller, and non-zero if the VM must take over, in which case the VM registers
-// describe where to continue.
-typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT depth);
+// asCContext::PrepareScriptFunction does. callLimit is the length of the call
+// stack up to which further native calls may push call states. The VM entry sets it
+// to the capacity of the call stack, which is a multiple of the size of a call state
+// and doesn't shrink, or less to allow no more than the maximum number of nested
+// native calls. The return value is 0 if the function returned to its caller, and
+// non-zero if the VM must take over, in which case the VM registers describe where
+// to continue.
+typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit);
 
 // Layout of the context members that the generated code accesses directly. The
 // offsets are relative to the VM registers, which are embedded in the context
@@ -102,10 +105,10 @@ const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
 int    JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg);
 
 // Script function calls. Performs the call and, if possible, executes the called
-// function natively before returning. depth is the depth of the calling function,
+// function natively before returning. callLimit is the one of the calling function,
 // see JITFunction. Returns 0 if the call completed. Not noexcept, as the C++
 // exceptions caught by JIT_GuardedEntry may pass through it
-int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth);
+int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT callLimit);
 
 // Sets up the frame of a function entered natively with jitArg 0, when the stack
 // block is too small or regs->doProcessSuspend is set. The stack pointer in the VM

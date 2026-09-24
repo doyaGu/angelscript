@@ -196,13 +196,14 @@ int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 }
 
 // Calls a script function. The program pointer must be after the call instruction
-// and the arguments on the stack. If the function has been compiled and the depth
-// allows it the function is executed natively, otherwise the VM is left to do it.
+// and the arguments on the stack. If the function has been compiled and the call
+// stack is below the call limit the function is executed natively, otherwise the VM
+// is left to do it.
 // Returns 0 if the function has returned already
-static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *func, asUINT depth)
+static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *func, asUINT callLimit)
 {
 	JITFunction jitFunc = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
-	if( jitFunc == 0 || depth == 0 )
+	if( jitFunc == 0 || ctx->m_callStack.GetLength() >= callLimit )
 	{
 		ctx->CallScriptFunction(func);
 		return 1;
@@ -210,7 +211,7 @@ static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptF
 
 	if( ctx->PushCallState() < 0 )
 		return 1;
-	return jitFunc(regs, 0, depth - 1);
+	return jitFunc(regs, 0, callLimit);
 }
 
 // Finds the implementation of a virtual or interface method for the object on
@@ -239,7 +240,7 @@ static asCScriptFunction *ResolveVirtual(asSVMRegisters *regs, asCContext *ctx, 
 	return 0;
 }
 
-int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT depth)
+int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT callLimit)
 {
 	asCContext *ctx = GetContext(regs);
 	asCScriptEngine *engine = ctx->m_engine;
@@ -250,7 +251,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 	{
 	case JIT_CALL_SCRIPT:
 		regs->programPointer += 2;
-		return EnterScriptFunction(regs, ctx, engine->scriptFunctions[funcId], depth);
+		return EnterScriptFunction(regs, ctx, engine->scriptFunctions[funcId], callLimit);
 
 	case JIT_CALL_INTERFACE:
 		{
@@ -258,7 +259,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 			asCScriptFunction *func = ResolveVirtual(regs, ctx, engine->scriptFunctions[funcId]);
 			if( func == 0 )
 				return 1;
-			return EnterScriptFunction(regs, ctx, func, depth);
+			return EnterScriptFunction(regs, ctx, func, callLimit);
 		}
 
 	case JIT_CALL_BOUND:
@@ -276,7 +277,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 			if( func->funcType == asFUNC_SCRIPT )
 			{
 				regs->programPointer += 2;
-				return EnterScriptFunction(regs, ctx, func, depth);
+				return EnterScriptFunction(regs, ctx, func, callLimit);
 			}
 			else if( func->funcType == asFUNC_SYSTEM )
 			{
@@ -305,7 +306,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 			if( func->funcType == asFUNC_SCRIPT )
 			{
 				regs->programPointer += 2;
-				return EnterScriptFunction(regs, ctx, func, depth);
+				return EnterScriptFunction(regs, ctx, func, callLimit);
 			}
 			else if( func->funcType == asFUNC_DELEGATE )
 			{
@@ -322,7 +323,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 					asCScriptFunction *method = ResolveVirtual(regs, ctx, func->funcForDelegate);
 					if( method == 0 )
 						return 1;
-					return EnterScriptFunction(regs, ctx, method, depth);
+					return EnterScriptFunction(regs, ctx, method, callLimit);
 				}
 			}
 			else if( func->funcType == asFUNC_SYSTEM )
@@ -335,7 +336,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 				regs->programPointer += 2;
 				int boundId = engine->importedFunctions[func->id & ~FUNC_IMPORTED]->boundFunctionId;
 				if( boundId > 0 )
-					return EnterScriptFunction(regs, ctx, engine->scriptFunctions[boundId], depth);
+					return EnterScriptFunction(regs, ctx, engine->scriptFunctions[boundId], callLimit);
 				else
 				{
 					ctx->m_needToCleanupArgs = true;
@@ -361,7 +362,7 @@ int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, as
 			regs->stackPointer -= AS_PTR_SIZE;
 			*(asPWORD*)regs->stackPointer = (asPWORD)mem;
 			regs->programPointer += 2 + AS_PTR_SIZE;
-			return EnterScriptFunction(regs, ctx, f, depth);
+			return EnterScriptFunction(regs, ctx, f, callLimit);
 		}
 
 	default:
