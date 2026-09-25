@@ -34,8 +34,8 @@ void Test(double *testTime)
 
 	for( int n = 0; n < 10000000; n++ )
 	{
-		ctx->Prepare(func);
-		r = ctx->Execute();
+		PrepareForTest(ctx, func);
+		r = ExecuteForTest(ctx);
 		if( r != 0 ) break;
 	}
 

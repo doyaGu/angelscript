@@ -12,6 +12,13 @@ extern bool      g_jitDirectCalls;
 extern bool      g_jitNoDirectCalls;
 extern const char *g_jitLogFilter;
 #define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
+
+// Prepare and Execute of the JIT compiler when the test is run with --jit, otherwise of the context
+int PrepareForTest(asIScriptContext *ctx, asIScriptFunction *func);
+int ExecuteForTest(asIScriptContext *ctx);
+#else
+inline int PrepareForTest(asIScriptContext *ctx, asIScriptFunction *func) { return ctx->Prepare(func); }
+inline int ExecuteForTest(asIScriptContext *ctx) { return ctx->Execute(); }
 #endif
 #include <stdio.h>
 #include <stddef.h>

@@ -39,11 +39,11 @@ void Test(double *testTime)
 
 	for( int n = 0; n < 5000000; n++ )
 	{
-		ctx->Prepare(func_A);
-		r = ctx->Execute();
+		PrepareForTest(ctx, func_A);
+		r = ExecuteForTest(ctx);
 		if( r != 0 ) break;
-		ctx->Prepare(func_B);
-		r = ctx->Execute();
+		PrepareForTest(ctx, func_B);
+		r = ExecuteForTest(ctx);
 		if( r != 0 ) break;
 	}
 
