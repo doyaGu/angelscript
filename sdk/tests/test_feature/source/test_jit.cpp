@@ -1866,8 +1866,9 @@ namespace CppExceptions
 		{ "int args(int)",        -1 },
 	};
 
-	// Executes all the cases and returns what was observed, one line per case
-	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	// Executes all the cases and returns what was observed, one line per case. With
+	// host, the functions are called through the methods of the JIT compiler
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool host, bool &fail)
 	{
 		COutStream out;
 		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
@@ -1902,9 +1903,12 @@ namespace CppExceptions
 
 			asIScriptFunction *func = mod->GetFunctionByDecl(cases[n].decl);
 			if( func == 0 ) { TEST_FAILED; continue; }
-			ctx->Prepare(func);
+			if( host )
+				jit->Prepare(ctx, func);
+			else
+				ctx->Prepare(func);
 			ctx->SetArgDWord(0, cases[n].arg);
-			r = ctx->Execute();
+			r = host ? jit->Execute(ctx) : ctx->Execute();
 
 			std::stringstream s;
 			s << cases[n].decl << "(" << cases[n].arg << "): " << r;
@@ -1935,20 +1939,25 @@ static bool TestCppExceptions()
 		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
 
 	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
-	std::string expected = Run(engine, 0, fail);
+	std::string expected = Run(engine, 0, false, fail);
 	engine->ShutDownAndRelease();
 	if( expected.find("'negative' in direct:3") == std::string::npos )
 		TEST_FAILED;
 
 	// The default, a native call depth that mixes native calls with calls made by
-	// the VM, and the calls through the engine
-	struct SConfig { const char *name; asDWORD flags; asUINT depth; };
+	// the VM, and the calls through the engine. The application calls the functions
+	// through the context, or through the JIT compiler which enters the compiled
+	// code directly
+	struct SConfig { const char *name; asDWORD flags; asUINT depth; bool host; };
 	const SConfig configs[] =
 	{
-		{ "default",                 0,                                      256 },
-		{ "native call depth 3",     0,                                      3 },
-		{ "no direct system calls",  CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS, 256 },
-		{ "no native script calls",  CJITCompiler::JIT_NO_SCRIPT_CALLS,      256 },
+		{ "default",                 0,                                        256, false },
+		{ "native call depth 3",     0,                                        3,   false },
+		{ "no direct system calls",  CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS, 256, false },
+		{ "no native script calls",  CJITCompiler::JIT_NO_SCRIPT_CALLS,        256, false },
+		{ "host calls",              0,                                        256, true },
+		{ "host calls, native call depth 3", 0,                                3,   true },
+		{ "host calls, no direct system calls", CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS, 256, true },
 	};
 	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
 	{
@@ -1956,7 +1965,7 @@ static bool TestCppExceptions()
 		CJITCompiler jit(configs[c].flags | envFlags);
 		jit.SetNativeCallDepth(configs[c].depth);
 		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
-		std::string actual = Run(engine, &jit, fail);
+		std::string actual = Run(engine, &jit, configs[c].host, fail);
 		engine->ShutDownAndRelease();
 
 		SJITStatistics stats = jit.GetStatistics();
@@ -2214,6 +2223,399 @@ static bool TestRefCounting()
 	return fail;
 }
 
+// The calls from the application through CJITCompiler::Prepare and Execute, which
+// enter the compiled code directly. Everything that the application can observe
+// must be the same as with the methods of the context
+namespace HostCalls
+{
+	// Calls the methods of the JIT compiler, or of the context without a compiler.
+	// When mixed, every third call is made through the context
+	struct SApi
+	{
+		CJITCompiler *jit;
+		bool mix;
+		int calls;
+		bool UseJit() { calls++; return jit && !(mix && calls % 3 == 0); }
+		int Prepare(asIScriptContext *ctx, asIScriptFunction *func) { return UseJit() ? jit->Prepare(ctx, func) : ctx->Prepare(func); }
+		int Execute(asIScriptContext *ctx) { return UseJit() ? jit->Execute(ctx) : ctx->Execute(); }
+	};
+	static SApi g_api;
+	static std::stringstream g_trace;
+	static int g_lines = 0;
+
+	static void OnException(asIScriptContext *ctx, void *)
+	{
+		g_trace << "[" << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" <<
+		           ctx->GetExceptionLineNumber() << " depth " << ctx->GetCallstackSize() << "] ";
+	}
+
+	static void CountLines(asIScriptContext *, void *) { g_lines++; }
+	static void Suspend()     { asGetActiveContext()->Suspend(); }
+	static void Abort()       { asGetActiveContext()->Abort(); }
+	static void Fail()        { asGetActiveContext()->SetException("failed"); }
+	static void StartLines()  { asGetActiveContext()->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL); }
+	static int  Triple(int a) { return a * 3; }
+
+	// Calls the script function twice in a nested state of the active context, and
+	// returns the sum of the results
+	static int Nested(const std::string &decl, int arg)
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		asIScriptFunction *func = ctx->GetEngine()->GetModule("test")->GetFunctionByDecl(decl.c_str());
+		if( ctx->PushState() < 0 )
+			return -1000;
+		int sum = 0;
+		for( int n = 0; n < 2; n++ )
+		{
+			int r = g_api.Prepare(ctx, func);
+			if( r >= 0 )
+			{
+				ctx->SetArgDWord(0, arg);
+				r = g_api.Execute(ctx);
+			}
+			if( r == asEXECUTION_FINISHED )
+				sum += int(ctx->GetReturnDWord());
+			g_trace << "(" << decl << " " << arg << ": " << r << ") ";
+		}
+		ctx->PopState();
+		return sum;
+	}
+
+	// The objects of G are known to the garbage collector but have no cycles. The
+	// collector breaks the cycles in the order of the addresses, which would change
+	// how many objects each step destroys between the runs
+	static const char *script =
+		"interface I { int get(int); }                                                     \n"
+		"int dtors = 0;                                                                    \n"
+		"int counter = 0;                                                                  \n"
+		"class A : I {                                                                     \n"
+		"  int v;                                                                          \n"
+		"  A(int a) { v = a; }                                                             \n"
+		"  ~A() { dtors += v; }                                                            \n"
+		"  int get(int a) { return v + a; }                                                \n"
+		"  int virt(int a) { return v * a; }                                               \n"
+		"  string str(int a) { return 'A' + (v + a); }                                     \n"
+		"}                                                                                 \n"
+		"class B : A { B(int a) { super(a + 10); } int virt(int a) { return v * a + 1; } } \n"
+		"class G { G@ next; int v; G(int a) { v = a; } ~G() { dtors += v; } }             \n"
+		"A@ objA = A(3);                                                                   \n"
+		"A@ objB = B(4);                                                                   \n"
+		"A@ objNull;                                                                       \n"
+		"import int unbound(int) from 'other';                                             \n"
+		"int add(int a, int b) { return a + b; }                                           \n"
+		"double half(double d) { return d / 2; }                                           \n"
+		"int64 wide(int64 a) { return a << 33; }                                           \n"
+		"string greet(const string &in s, int n) { string r = s; for( int i = 0; i < n; i++ ) r += '!'; return r; } \n"
+		"int &counterRef(int a) { counter += a; return counter; }                          \n"
+		"A@ make(int a) { if( a % 2 == 0 ) return A(a); return B(a); }                     \n"
+		"int div(int a, int b) { return a / b; }                                           \n"
+		"int safeDiv(int a, int b) { int r = 0; try { r = a / b; } catch { r = -1; } return r; } \n"
+		"int deep(int n) { if( n == 0 ) return triple(1); return 1 + deep(n - 1); }        \n"
+		"int objects(int n) { A a(n); A@ b = make(n + 1); return a.get(1) + b.virt(2); }   \n"
+		"int garbage(int n) { int r = 0; for( int i = 0; i < n; i++ ) { G g(i); r += g.v; } return r; } \n"
+		"int suspends(int n) { int r = 0; for( int i = 0; i < n; i++ ) { suspend(); r += i; } return r; } \n"
+		"int aborts(int n) { A a(n); abort(); return n; }                                  \n"
+		"int fails(int n) { A a(n); fail(); return n; }                                    \n"
+		"int lines(int n) {                                                                \n"
+		"  int r = n;                                                                      \n"
+		"  startLines();                                                                   \n"
+		"  r += 1;                                                                         \n"
+		"  r *= 2;                                                                         \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int callUnbound(int a) { return unbound(a); }                                     \n"
+		"int recurse(int n) { if( n <= 0 ) return 1; return 1 + nested('int recurse(int)', n - 1); } \n"
+		"int thrower(int n) { A a(n); int z = 0; return n / z; }                           \n"
+		"int outer(int n) { A a(n); return nested('int thrower(int)', n) + nested('int add(int, int)', n) + a.v; } \n";
+
+	// What is done with the function. The methods are called on the object in the
+	// global variable, and so are the delegates created for them
+	enum EStep { CALL, METHOD, DELEGATE, PREPARE_TWICE, UNPREPARE, EXECUTE_AGAIN };
+	struct SStep { EStep step; const char *type; const char *decl; const char *obj; int a, b; };
+	static const SStep steps[] =
+	{
+		{ CALL,          0,        "int add(int, int)",                   0,         1,   2 },
+		{ CALL,          0,        "int add(int, int)",                   0,         3,   4 },
+		{ CALL,          0,        "double half(double)",                 0,         5,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         6,   7 },
+		{ CALL,          0,        "int64 wide(int64)",                   0,         8,   0 },
+		{ CALL,          0,        "string greet(const string &in, int)", 0,         0,   2 },
+		{ CALL,          0,        "string greet(const string &in, int)", 0,         0,   3 },
+		{ CALL,          0,        "int &counterRef(int)",                0,         6,   0 },
+		{ CALL,          0,        "int &counterRef(int)",                0,         1,   0 },
+		{ CALL,          0,        "A@ make(int)",                        0,         7,   0 },
+		{ CALL,          0,        "A@ make(int)",                        0,         8,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         9,   9 },
+		{ CALL,          0,        "int div(int, int)",                   0,         7,   0 },
+		{ CALL,          0,        "int div(int, int)",                   0,         7,   2 },
+		{ CALL,          0,        "int safeDiv(int, int)",               0,         7,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         1,   1 },
+		{ CALL,          0,        "int deep(int)",                       0,       500,   0 },
+		{ CALL,          0,        "int objects(int)",                    0,         5,   0 },
+		{ CALL,          0,        "int garbage(int)",                    0,        20,   0 },
+		{ CALL,          0,        "int garbage(int)",                    0,        20,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         2,   3 },
+		{ CALL,          0,        "int suspends(int)",                   0,         4,   0 },
+		{ CALL,          0,        "int aborts(int)",                     0,        30,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         2,   3 },
+		{ CALL,          0,        "int fails(int)",                      0,        40,   0 },
+		{ CALL,          0,        "int lines(int)",                      0,         5,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         2,   3 },
+		{ CALL,          0,        "int callUnbound(int)",                0,         1,   0 },
+		{ CALL,          0,        "int recurse(int)",                    0,         5,   0 },
+		{ CALL,          0,        "int outer(int)",                      0,         3,   0 },
+		{ CALL,          "engine", "int triple(int)",                     0,         4,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         4,   5 },
+		{ METHOD,        "A",      "int virt(int)",                       "objA",    2,   0 },
+		{ METHOD,        "A",      "int virt(int)",                       "objB",    2,   0 },
+		{ METHOD,        "A",      "int virt(int)",                       "objB",    3,   0 },
+		{ METHOD,        "I",      "int get(int)",                        "objB",    4,   0 },
+		{ METHOD,        "A",      "string str(int)",                     "objA",    5,   0 },
+		{ METHOD,        "A",      "string str(int)",                     "objB",    6,   0 },
+		{ METHOD,        "A",      "int virt(int)",                       "objNull", 1,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         5,   6 },
+		{ DELEGATE,      "A",      "int virt(int)",                       "objB",    7,   0 },
+		{ DELEGATE,      "I",      "int get(int)",                        "objA",    8,   0 },
+		{ DELEGATE,      "A",      "int virt(int)",                       "objB",    9,   0 },
+		{ CALL,          0,        "int deep(int)",                       0,        50,   0 },
+		{ PREPARE_TWICE, 0,        "int add(int, int)",                   0,         2,   2 },
+		{ UNPREPARE,     0,        "int add(int, int)",                   0,         3,   3 },
+		{ EXECUTE_AGAIN, 0,        "int add(int, int)",                   0,         4,   4 },
+		{ CALL,          0,        0,                                     0,         0,   0 },
+		{ CALL,          0,        "int add(int, int)",                   0,         5,   5 },
+	};
+
+	// Engine properties, and the options of the JIT compiler and of the calls
+	struct SConfig { const char *name; asDWORD flags; asUINT depth; asEEngineProp prop; asPWORD value; bool mix; bool other; };
+	static const SConfig configs[] =
+	{
+		{ "default",                0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, false },
+		{ "native call depth 3",    0,                                   3, asEP_INIT_STACK_SIZE,      4096, false, false },
+		{ "no native script calls", CJITCompiler::JIT_NO_SCRIPT_CALLS, 256, asEP_INIT_STACK_SIZE,      4096, false, false },
+		{ "small stack blocks",     0,                                 256, asEP_INIT_STACK_SIZE,        64, false, false },
+		{ "few nested calls",       0,                                 256, asEP_MAX_NESTED_CALLS,        3, false, false },
+		{ "no automatic GC",        0,                                 256, asEP_AUTO_GARBAGE_COLLECT,    0, false, false },
+		{ "mixed with the context", 0,                                 256, asEP_INIT_STACK_SIZE,      4096, true,  false },
+		{ "another compiler",       0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, true },
+	};
+
+	static std::string ExceptionInfo(asIScriptContext *ctx)
+	{
+		std::stringstream s;
+		const char *str = ctx->GetExceptionString();
+		asIScriptFunction *func = ctx->GetExceptionFunction();
+		s << "'" << (str ? str : "(null)") << "' in " << (func ? func->GetName() : "none") << ":" << ctx->GetExceptionLineNumber();
+		return s.str();
+	}
+
+	// Sets the arguments, and the object of the methods
+	static void SetArgs(asIScriptContext *ctx, asIScriptFunction *func, const SStep &step, asIScriptObject *obj)
+	{
+		static const std::string text = "hi";
+		if( step.step == METHOD )
+			ctx->SetObject(obj);
+		for( asUINT p = 0; p < func->GetParamCount(); p++ )
+		{
+			int typeId;
+			func->GetParam(p, &typeId);
+			int v = p == 0 ? step.a : step.b;
+			if( typeId == asTYPEID_DOUBLE )
+				ctx->SetArgDouble(p, v + 0.5);
+			else if( typeId == asTYPEID_INT64 )
+				ctx->SetArgQWord(p, asQWORD(v));
+			else if( typeId == asTYPEID_INT32 )
+				ctx->SetArgDWord(p, asDWORD(v));
+			else
+				ctx->SetArgObject(p, (void*)&text);
+		}
+	}
+
+	static std::string ReturnValue(asIScriptContext *ctx, asIScriptFunction *func)
+	{
+		std::stringstream s;
+		asDWORD flags;
+		int typeId = func->GetReturnTypeId(&flags);
+		if( flags & asTM_INOUTREF )
+			s << *(int*)ctx->GetReturnAddress();
+		else if( typeId == asTYPEID_INT32 )
+			s << int(ctx->GetReturnDWord());
+		else if( typeId == asTYPEID_INT64 )
+			s << asINT64(ctx->GetReturnQWord());
+		else if( typeId == asTYPEID_DOUBLE )
+			s << ctx->GetReturnDouble();
+		else if( typeId & asTYPEID_OBJHANDLE )
+		{
+			asIScriptObject *obj = (asIScriptObject*)ctx->GetReturnObject();
+			if( obj )
+				s << obj->GetObjectType()->GetName() << " " << *(int*)obj->GetAddressOfProperty(0);
+			else
+				s << "null";
+		}
+		else
+			s << "'" << *(std::string*)ctx->GetReturnObject() << "'";
+		return s.str();
+	}
+
+	// Executes all the steps and returns what was observed, one line per step. The
+	// calls are made through the methods of api, and the reference is compiled
+	// without the JIT instructions
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, CJITCompiler *api, const SConfig &config, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		engine->SetEngineProperty(config.prop, config.value);
+		RegisterStdString(engine);
+		int r;
+		r = engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void abort()", asFUNCTION(Abort), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void fail()", asFUNCTION(Fail), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void startLines()", asFUNCTION(StartLines), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("int triple(int)", asFUNCTION(Triple), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("int nested(const string &in, int)", asFUNCTION(Nested), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+		int *dtors = (int*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("dtors"));
+
+		g_api.jit = api;
+		g_api.mix = config.mix;
+		g_api.calls = 0;
+		std::string result;
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->SetExceptionCallback(asFUNCTION(OnException), 0, asCALL_CDECL);
+		for( asUINT n = 0; n < sizeof(steps)/sizeof(steps[0]); n++ )
+		{
+			const SStep &step = steps[n];
+			g_trace.str("");
+			g_lines = 0;
+			*dtors = 0;
+			msgs.buffer = "";
+
+			asIScriptFunction *func = 0;
+			if( step.type && std::string(step.type) == "engine" )
+				func = engine->GetGlobalFunctionByDecl(step.decl);
+			else if( step.type )
+				func = mod->GetTypeInfoByName(step.type)->GetMethodByDecl(step.decl);
+			else if( step.decl )
+				func = mod->GetFunctionByDecl(step.decl);
+			if( step.decl && func == 0 )
+			{
+				PRINTF("%s not found\n", step.decl);
+				TEST_FAILED;
+				continue;
+			}
+			asIScriptObject *obj = 0;
+			if( step.obj )
+				obj = *(asIScriptObject**)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName(step.obj));
+			if( step.step == DELEGATE )
+				func = engine->CreateDelegate(func, obj);
+
+			std::stringstream s;
+			s << (step.decl ? step.decl : "null") << (step.step == DELEGATE ? " delegate" : "") << (step.obj ? " of " : "") <<
+			     (step.obj ? step.obj : "") << " (" << step.a << ", " << step.b << "):";
+			if( step.step == UNPREPARE )
+				ctx->Unprepare();
+			r = g_api.Prepare(ctx, func);
+			if( step.step == PREPARE_TWICE )
+			{
+				s << " prepare " << r;
+				if( r >= 0 )
+					SetArgs(ctx, func, step, obj);
+				r = g_api.Prepare(ctx, func);
+			}
+			s << " prepare " << r << " " << ExceptionInfo(ctx);
+			if( r >= 0 )
+				SetArgs(ctx, func, step, obj);
+			r = g_api.Execute(ctx);
+			int suspends = 0;
+			while( r == asEXECUTION_SUSPENDED && suspends < 100 )
+			{
+				suspends++;
+				r = g_api.Execute(ctx);
+			}
+			if( step.step == EXECUTE_AGAIN )
+			{
+				s << " execute " << r;
+				r = g_api.Execute(ctx);
+			}
+			s << " execute " << r;
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << ReturnValue(ctx, func);
+			asUINT gcSize, gcDestroyed, gcDetected;
+			engine->GetGCStatistics(&gcSize, &gcDestroyed, &gcDetected);
+			s << " " << ExceptionInfo(ctx) << " suspends " << suspends << " lines " << g_lines << " dtors " << *dtors <<
+			     " gc " << gcSize << "/" << gcDestroyed << "/" << gcDetected << " " << g_trace.str() << msgs.buffer << "\n";
+			result += s.str();
+
+			ctx->ClearLineCallback();
+			if( step.step == DELEGATE )
+				func->Release();
+		}
+		ctx->Release();
+		return result;
+	}
+}
+
+static bool TestHostCalls()
+{
+	using namespace HostCalls;
+	bool fail = false;
+
+	// Suspending must work for the results to be the same as the VM's
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		const SConfig &config = configs[c];
+		asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string expected = Run(engine, 0, 0, config, fail);
+		engine->ShutDownAndRelease();
+		bool nestedFailed = expected.find("Too many nested calls") != std::string::npos;
+		if( (c == 0 && (expected.find("int recurse(int) (5, 0): prepare 0 '' in none:-1 execute 0 returned 63") == std::string::npos || nestedFailed)) ||
+		    (config.prop == asEP_MAX_NESTED_CALLS && !nestedFailed) )
+		{
+			PRINTF("%s:\n%s", config.name, expected.c_str());
+			TEST_FAILED;
+		}
+
+		// The JIT compilers must outlive the engine
+		CJITCompiler jit(config.flags | envFlags), other(envFlags);
+		jit.SetNativeCallDepth(config.depth);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, config.other ? &other : &jit, config, fail);
+		engine->ShutDownAndRelease();
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("%s: %u functions compiled, %u failed\n", config.name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("%s:\n  VM:  %s\n  JIT: %s\n", config.name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -2278,6 +2680,7 @@ bool Test()
 	fail = TestInlining() || fail;
 	fail = TestCppExceptions() || fail;
 	fail = TestRefCounting() || fail;
+	fail = TestHostCalls() || fail;
 
 	return fail;
 }
