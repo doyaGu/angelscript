@@ -66,6 +66,10 @@ public:
   // Faster versions of the methods of the context for calling script functions
   int Prepare(asIScriptContext *ctx, asIScriptFunction *func);
   int Execute(asIScriptContext *ctx);
+
+  // Memory functions for the engine that are faster for the small objects of the scripts
+  static void *AllocMemory(size_t size);
+  static void  FreeMemory(void *mem);
 };
 \endcode
 
@@ -129,6 +133,27 @@ ctx->SetArgDWord(0, 42);
 if( jit->Execute(ctx) == asEXECUTION_FINISHED )
   result = ctx->GetReturnDWord();
 \endcode
+
+The engine allocates the script objects, the arrays, and much of its other memory
+in small blocks that are freed again soon after. \ref CJITCompiler::AllocMemory
+and \ref CJITCompiler::FreeMemory are memory functions for the engine that keep the
+freed blocks of up to 1 KB for reuse, which makes the scripts that create many
+objects about a third faster with the JIT compiler, and 10 to 20% faster with the
+interpreter. Each thread keeps the blocks it frees in lists of its own, so that
+most allocations take no lock. The memory of the blocks is never returned to the
+system. The functions must be set before the first engine is created, and must
+not be changed while memory allocated with them is still in use. They can be used
+without attaching the JIT compiler to the engine too.
+
+\code
+asSetGlobalMemoryFunctions(CJITCompiler::AllocMemory, CJITCompiler::FreeMemory);
+\endcode
+
+The strings of the \ref doc_addon_std_string "string add-on" are allocated by
+std::string, which takes the memory from operator new instead. Applications that
+execute the scripts in a single thread only can also compile the library with
+AS_NO_THREADS, which makes the reference counts of the objects plain integers
+instead of atomic ones, and takes the locks out of the memory functions.
 
 Note that the JIT functions are compiled when the module is built, so the build
 takes a little longer. For scripts that are compiled often but run rarely a
