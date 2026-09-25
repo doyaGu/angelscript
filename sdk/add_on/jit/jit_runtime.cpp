@@ -10,6 +10,7 @@
 #include "as_callfunc.h"
 #include "as_memory.h"
 #include "as_texts.h"
+#include "as_thread.h"
 
 #include <math.h>
 #include <string.h>
@@ -728,6 +729,278 @@ int JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept
 	}
 
 	return 0;
+}
+
+//------------------------------------------------------------------------
+// Calls from the application
+
+int JIT_Prepare(asIScriptContext *context, asIScriptFunction *function)
+{
+	asCContext *ctx = static_cast<asCContext*>(context);
+	asCScriptFunction *func = static_cast<asCScriptFunction*>(function);
+	asCScriptEngine *engine = ctx->m_engine;
+	asSVMRegisters *regs = &ctx->m_regs;
+
+	// This follows asCContext::Prepare for a context that has finished executing,
+	// which only has to reset what the execution changed. The context prepares
+	// the others, and reports the errors
+	if( func == 0 || ctx->m_status != asEXECUTION_FINISHED || func->engine != engine || !engine->isPrepared )
+		return ctx->Prepare(func);
+
+	// Only a value returned on the stack or in the object register needs to be released
+	if( ctx->m_returnValueSize || regs->objectRegister )
+		ctx->CleanReturnObject();
+
+	// Release the object of the previous method, if it is a script object
+	asCScriptFunction *prev = ctx->m_initialFunction;
+	if( prev->objectType && (prev->objectType->flags & asOBJ_SCRIPT_OBJECT) )
+	{
+		asCScriptObject *obj = *(asCScriptObject**)regs->stackFramePointer;
+		if( obj )
+			obj->Release();
+		*(asPWORD*)regs->stackFramePointer = 0;
+	}
+
+	regs->stackPointer = ctx->m_originalStackPointer;
+	ctx->m_stackIndex  = ctx->m_originalStackIndex;
+
+	if( prev != func )
+	{
+		prev->Release();
+		ctx->m_initialFunction = func;
+		func->AddRef();
+
+		// Reserve space for the arguments and return value
+		ctx->m_argumentsSize = func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0);
+		if( func->DoesReturnOnStack() )
+		{
+			ctx->m_returnValueSize = func->returnType.GetSizeInMemoryDWords();
+			ctx->m_argumentsSize += AS_PTR_SIZE;
+		}
+		else
+			ctx->m_returnValueSize = 0;
+
+		// asCContext::ReserveStackSpace is only called if the current stack block may be too small
+		asUINT stackSize = ctx->m_argumentsSize + ctx->m_returnValueSize;
+		if( func->scriptData )
+			stackSize += func->scriptData->stackNeeded;
+#ifndef WIP_16BYTE_ALIGN
+		if( ctx->m_stackBlocks.GetLength() == 0 || regs->stackPointer - (stackSize + RESERVE_STACK) < ctx->m_stackBlocks[ctx->m_stackIndex] )
+#endif
+			if( !ctx->ReserveStackSpace(stackSize) )
+				return asOUT_OF_MEMORY;
+
+		if( ctx->m_callStack.GetCapacity() < engine->ep.initCallStackSize )
+			ctx->m_callStack.AllocateNoConstruct(engine->ep.initCallStackSize * CALLSTACK_FRAME_SIZE, true);
+	}
+	ctx->m_currentFunction = func;
+
+	// Like asCContext::ClearException, but the string is only assigned if it has to be
+	if( ctx->m_exceptionString.GetLength() )
+		ctx->m_exceptionString = "";
+	ctx->m_exceptionFunction   = 0;
+	ctx->m_exceptionLine       = -1;
+	ctx->m_exceptionColumn     = -1;
+	ctx->m_exceptionSectionIdx = 0;
+
+	// The suspend and abort flags have been reset at the end of the execution
+	ctx->m_status = asEXECUTION_PREPARED;
+	regs->programPointer = 0;
+
+	regs->stackFramePointer    = regs->stackPointer - ctx->m_argumentsSize - ctx->m_returnValueSize;
+	ctx->m_originalStackPointer = regs->stackPointer;
+	ctx->m_originalStackIndex   = ctx->m_stackIndex;
+	regs->stackPointer         = regs->stackFramePointer;
+	if( ctx->m_argumentsSize )
+		memset(regs->stackPointer, 0, 4 * ctx->m_argumentsSize);
+
+	if( ctx->m_returnValueSize )
+	{
+		// The address of the location where the return value should be put
+		asDWORD *ptr = regs->stackFramePointer;
+		if( func->objectType )
+			ptr += AS_PTR_SIZE;
+		*(void**)ptr = (void*)(regs->stackFramePointer + ctx->m_argumentsSize);
+	}
+
+	return asSUCCESS;
+}
+
+// Finds the implementation of a virtual or interface method for the object, like the
+// VM. Returns null if there is no object or it doesn't implement the method, which
+// the context raises the exception for
+static asCScriptFunction *FindMethod(asCScriptFunction *func, asCScriptObject *obj)
+{
+	if( obj == 0 )
+		return 0;
+
+	asCObjectType *objType = obj->objType;
+	asCScriptFunction *real = 0;
+	if( func->funcType == asFUNC_VIRTUAL )
+	{
+		if( asUINT(func->vfTableIdx) < objType->virtualFunctionTable.GetLength() )
+			real = objType->virtualFunctionTable[func->vfTableIdx];
+	}
+	else
+	{
+		for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
+			if( objType->interfaces[n] == func->objectType )
+			{
+				real = objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
+				break;
+			}
+	}
+	return real && real->signatureId == func->signatureId ? real : 0;
+}
+
+// Enters the compiled code of the function like the native callers do, but without
+// a call state for the caller. The function then finishes the execution when it
+// returns, like when it's entered by the VM, and so it does with the call state of
+// a nested call on top
+static void EnterFromApplication(asSVMRegisters *regs, asCContext *ctx, JITFunction func, asUINT callLimit)
+{
+#ifdef AS_NO_EXCEPTIONS
+	UNUSED_VAR(ctx);
+	func(regs, 0, callLimit, regs->stackPointer);
+#else
+	try
+	{
+		func(regs, 0, callLimit, regs->stackPointer);
+	}
+	catch(...)
+	{
+		if( !CatchDirectCallException(regs, ctx) )
+			throw;
+	}
+#endif
+}
+
+// Gives the number of objects known to the garbage collector like
+// asCGarbageCollector::GetStatistics, without calling it
+struct SGCObjectCount : asCGarbageCollector
+{
+	static asUINT Get(const asCGarbageCollector &gc)
+	{
+		return asUINT((gc.*&SGCObjectCount::gcNewObjects).GetLength() + (gc.*&SGCObjectCount::gcOldObjects).GetLength());
+	}
+};
+
+int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compiler, asUINT maxNativeCallDepth)
+{
+	asCContext *ctx = static_cast<asCContext*>(context);
+	asCScriptEngine *engine = ctx->m_engine;
+	asSVMRegisters *regs = &ctx->m_regs;
+
+	// This follows asCContext::Execute for the script functions compiled by the
+	// compiler, when no line callback is set. The context executes the others, and
+	// raises the exceptions before the function is entered
+	if( ctx->m_status != asEXECUTION_PREPARED || regs->programPointer != 0 || ctx->m_lineCallback || engine->jitCompiler != compiler )
+		return ctx->Execute();
+
+	// Find the function to enter like asCContext::SetProgramPointer
+	asCScriptFunction *func = ctx->m_currentFunction;
+	asCScriptObject *obj;
+	bool isDelegate = func->funcType == asFUNC_DELEGATE;
+	if( isDelegate )
+	{
+		obj  = static_cast<asCScriptObject*>(func->objForDelegate);
+		func = func->funcForDelegate;
+	}
+	else
+		obj = *(asCScriptObject**)regs->stackFramePointer;
+	if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
+		func = FindMethod(func, obj);
+	if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData->jitFunction == 0 )
+		return ctx->Execute();
+
+	// Too many nested calls could fill up the thread call stack
+	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
+	if( tld == 0 || tld->activeContexts.GetLength() >= engine->ep.maxNestedCalls )
+		return ctx->Execute();
+
+	ctx->m_status = asEXECUTION_ACTIVE;
+	asCArray<asIScriptContext*> &activeContexts = tld->activeContexts;
+	if( activeContexts.length < activeContexts.GetCapacity() )
+		activeContexts.array[activeContexts.length++] = ctx;
+	else
+		activeContexts.PushLast(ctx);
+
+	asUINT gcPreObjects = 0;
+	if( engine->ep.autoGarbageCollect )
+		gcPreObjects = SGCObjectCount::Get(engine->gc);
+
+	if( isDelegate )
+	{
+		// Push the object pointer onto the stack
+		regs->stackPointer      -= AS_PTR_SIZE;
+		regs->stackFramePointer -= AS_PTR_SIZE;
+		*(asPWORD*)regs->stackPointer = asPWORD(obj);
+	}
+	ctx->m_currentFunction = func;
+	regs->programPointer   = func->scriptData->byteCode.AddressOf();
+
+	// The native calls may push call states up to the same limit as when the VM enters
+	// the function, see JITFunction
+	asQWORD words = asQWORD(maxNativeCallDepth) * CALLSTACK_FRAME_SIZE;
+	asUINT callLimit = ctx->m_callStack.GetLength() + asUINT(words < 0x40000000 ? words : 0x40000000);
+	if( callLimit > ctx->m_callStack.GetCapacity() )
+		callLimit = ctx->m_callStack.GetCapacity();
+	EnterFromApplication(regs, ctx, reinterpret_cast<JITFunction>(func->scriptData->jitFunction), callLimit);
+
+	// The VM continues where the native code has left it
+	for(;;)
+	{
+		// If an exception was raised that will be caught, then unwind the stack
+		// and move the program pointer to the catch block before proceeding
+		if( ctx->m_status == asEXECUTION_EXCEPTION && ctx->m_exceptionWillBeCaught )
+			ctx->CleanStack(true);
+		if( ctx->m_status != asEXECUTION_ACTIVE )
+			break;
+		ctx->ExecuteNext();
+	}
+
+	// A line callback may have been set during the execution
+	if( ctx->m_lineCallback )
+	{
+		ctx->CallLineCallback();
+		regs->doProcessSuspend = true;
+	}
+	else
+		regs->doProcessSuspend = false;
+
+	ctx->m_doSuspend = false;
+
+	if( engine->ep.autoGarbageCollect )
+	{
+		asUINT gcPosObjects = SGCObjectCount::Get(engine->gc);
+		if( gcPosObjects > gcPreObjects )
+			engine->GarbageCollect(asGC_ONE_STEP | asGC_DESTROY_GARBAGE | asGC_DETECT_GARBAGE, gcPosObjects - gcPreObjects);
+		else if( gcPosObjects > 0 )
+			engine->GarbageCollect(asGC_ONE_STEP | asGC_DESTROY_GARBAGE | asGC_DETECT_GARBAGE, 1);
+	}
+
+	activeContexts.PopLast();
+
+	if( ctx->m_status == asEXECUTION_FINISHED )
+	{
+		regs->objectType = ctx->m_initialFunction->returnType.GetTypeInfo();
+		return asEXECUTION_FINISHED;
+	}
+
+	if( ctx->m_doAbort )
+	{
+		ctx->m_doAbort = false;
+		ctx->m_status = asEXECUTION_ABORTED;
+		return asEXECUTION_ABORTED;
+	}
+
+	if( ctx->m_status == asEXECUTION_SUSPENDED )
+		return asEXECUTION_SUSPENDED;
+
+	if( ctx->m_status == asEXECUTION_EXCEPTION )
+		return asEXECUTION_EXCEPTION;
+
+	return asERROR;
 }
 
 END_AS_NAMESPACE

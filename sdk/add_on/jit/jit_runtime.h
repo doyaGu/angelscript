@@ -192,6 +192,12 @@ double  JIT_uTOd(asUINT v) noexcept;
 // the VM must re-execute the instruction to raise an exception
 int    JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept;
 
+// CJITCompiler::Prepare and Execute, which aren't called from the generated code.
+// JIT_Execute only enters the functions compiled by the compiler, which the engine
+// must use, with maxNativeCallDepth as its maximum depth of nested native calls
+int    JIT_Prepare(asIScriptContext *ctx, asIScriptFunction *func);
+int    JIT_Execute(asIScriptContext *ctx, const asIJITCompilerAbstract *compiler, asUINT maxNativeCallDepth);
+
 END_AS_NAMESPACE
 
 #endif

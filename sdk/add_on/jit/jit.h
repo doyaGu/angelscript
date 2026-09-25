@@ -106,6 +106,16 @@ public:
 
 	SJITStatistics GetStatistics() const;
 
+	// Faster versions of asIScriptContext::Prepare and Execute, for the application
+	// to call the script functions with. They have the same effects, and can be mixed
+	// with the methods of the context, which set the arguments and get the return
+	// value as usual. Prepare only resets what the last execution changed if it has
+	// finished. Execute enters the compiled code of the function directly, instead of
+	// through the VM, if the engine uses this compiler and no line callback is set.
+	// Otherwise they call the methods of the context
+	int Prepare(asIScriptContext *ctx, asIScriptFunction *func);
+	int Execute(asIScriptContext *ctx);
+
 protected:
 	struct SImpl;
 	SImpl *m_impl;
