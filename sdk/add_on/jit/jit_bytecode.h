@@ -12,6 +12,7 @@
 BEGIN_AS_NAMESPACE
 
 class asCScriptFunction;
+class asCObjectType;
 
 // Flags for SJITInstr
 enum EJITInstrFlags
@@ -22,7 +23,7 @@ enum EJITInstrFlags
 	JIT_INSTR_BAIL        = 0x08, // the instruction must always return control to the VM
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
-	JIT_INSTR_INLINE      = 0x40  // asBC_CALL whose function is emitted in place, see GetInlinee
+	JIT_INSTR_INLINE      = 0x40  // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
 };
 
 // One decoded bytecode instruction
@@ -105,7 +106,8 @@ public:
 
 	// Performs the analysis. Must be called after Decode. The small functions called
 	// with asBC_CALL that call nothing themselves are analysed too, so that their code
-	// can be emitted in place, see FindInlinees
+	// can be emitted in place, and so are such methods called with asBC_CALLINTF if
+	// only one class can implement them, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
@@ -178,6 +180,10 @@ public:
 	// JIT_INSTR_INLINE
 	const CJITByteCode *GetInlinee(asUINT instrIdx) const;
 
+	// Returns the class that the object must be of for an inlined asBC_CALLINTF to
+	// call the inlined method, or null for asBC_CALL
+	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
+
 	// Marks instructions that must return to the VM, also in the inlined functions
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
 
@@ -223,6 +229,7 @@ protected:
 	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
 	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
+	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;
 };

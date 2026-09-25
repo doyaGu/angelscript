@@ -332,6 +332,12 @@ const CJITByteCode *CJITByteCode::GetInlinee(asUINT instrIdx) const
 	return it == m_inlinees.end() ? 0 : it->second.get();
 }
 
+asCObjectType *CJITByteCode::GetInlineObjectType(asUINT instrIdx) const
+{
+	std::map<asUINT, asCObjectType*>::const_iterator it = m_inlineObjTypes.find(instrIdx);
+	return it == m_inlineObjTypes.end() ? 0 : it->second;
+}
+
 int CJITByteCode::GetPopSize(asCScriptFunction *func)
 {
 	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
@@ -517,14 +523,61 @@ bool CJITByteCode::CanBeInlined() const
 	return true;
 }
 
+// Returns the implementation of a virtual or interface method in the only class of
+// the module of the caller that objects calling it can be of, or null if there are
+// more classes. The classes of other modules may derive from the shared classes and
+// implement the shared interfaces, so the class of the object must still be checked
+static asCScriptFunction *FindOnlyImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *&objType)
+{
+	objType = 0;
+	asCObjectType *type = method->objectType;
+	if( caller->module == 0 || type == 0 || method->vfTableIdx < 0 )
+		return 0;
+
+	asCObjectType *found = 0;
+	const asCArray<asCObjectType*> &classes = caller->module->m_classTypes;
+	for( asUINT n = 0; n < classes.GetLength(); n++ )
+	{
+		asCObjectType *cls = classes[n];
+		if( !(cls->flags & asOBJ_SCRIPT_OBJECT) || (cls->flags & asOBJ_ABSTRACT) || cls->IsInterface() )
+			continue;
+		if( method->funcType == asFUNC_INTERFACE ? !cls->Implements(type) : !cls->DerivesFrom(type) )
+			continue;
+		if( found )
+			return 0;
+		found = cls;
+	}
+	if( found == 0 )
+		return 0;
+
+	// Like asCContext::CallInterfaceMethod
+	asUINT index = asUINT(method->vfTableIdx);
+	if( method->funcType == asFUNC_INTERFACE )
+	{
+		asUINT n = 0;
+		while( n < found->interfaces.GetLength() && found->interfaces[n] != type )
+			n++;
+		if( n == found->interfaces.GetLength() )
+			return 0;
+		index += found->interfaceVFTOffsets[n];
+	}
+	if( index >= found->virtualFunctionTable.GetLength() )
+		return 0;
+	objType = found;
+	return found->virtualFunctionTable[index];
+}
+
 // Finds the calls whose function can be emitted in place, which is analysed on its
 // own then. Its frame starts at the stack pointer of the call, so the depth of the
 // stack must be known. The inlined code is limited to a multiple of the size of the
 // largest function, so that the functions calling many don't grow without bounds.
-// Recursion and functions with catch blocks are left to the calls
+// Recursion and functions with catch blocks are left to the calls. The virtual and
+// interface methods are inlined for the only class that can implement them, which
+// the object is checked for
 void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions &inlining)
 {
 	m_inlinees.clear();
+	m_inlineObjTypes.clear();
 	if( inlining.maxSize == 0 || !m_staticStack )
 		return;
 
@@ -534,18 +587,29 @@ void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, 
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
-		if( instr.op != asBC_CALL || (instr.flags & JIT_INSTR_DEAD) )
+		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF) || (instr.flags & JIT_INSTR_DEAD) )
 			continue;
 
+		asCScriptFunction *func = 0;
+		asCObjectType *objType = 0;
 		int id = asBC_INTARG(instr.bc);
-		std::map<int, std::shared_ptr<CJITByteCode> >::iterator it = analysed.find(id);
+		if( id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
+			func = engine->scriptFunctions[id];
+		if( func && instr.op == asBC_CALLINTF )
+		{
+			if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
+				func = FindOnlyImplementation(m_func, func, objType);
+			else
+				func = 0;
+		}
+		if( func == 0 )
+			continue;
+
+		std::map<int, std::shared_ptr<CJITByteCode> >::iterator it = analysed.find(func->GetId());
 		if( it == analysed.end() )
 		{
 			std::shared_ptr<CJITByteCode> callee;
-			asCScriptFunction *func = 0;
-			if( id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
-				func = engine->scriptFunctions[id];
-			if( func && func != m_func && func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
+			if( func != m_func && func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
 			    func->scriptData->tryCatchInfo.GetLength() == 0 && func->scriptData->byteCode.GetLength() <= inlining.maxSize &&
 			    (inlining.filter == 0 || inlining.filter(func, inlining.filterParam)) )
 			{
@@ -559,7 +623,7 @@ void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, 
 						callee.reset();
 				}
 			}
-			it = analysed.insert(std::make_pair(id, callee)).first;
+			it = analysed.insert(std::make_pair(func->GetId(), callee)).first;
 		}
 
 		if( it->second && it->second->GetLength() <= budget )
@@ -567,6 +631,8 @@ void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, 
 			budget -= it->second->GetLength();
 			instr.flags |= JIT_INSTR_INLINE;
 			m_inlinees[n] = it->second;
+			if( objType )
+				m_inlineObjTypes[n] = objType;
 		}
 	}
 }
@@ -575,6 +641,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 {
 	AnalyseStackDepth();
 	m_inlinees.clear();
+	m_inlineObjTypes.clear();
 	if( inlining )
 		FindInlinees(allowRegisterCache, maxCachedSlots, *inlining);
 	BuildBlocks();

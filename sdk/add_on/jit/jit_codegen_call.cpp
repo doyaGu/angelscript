@@ -219,7 +219,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // asCContext::CallScriptFunction when the call state can be pushed without growing
 // the call stack, the stack block has room for the function, and the VM has nothing
 // to do. The function is called otherwise. Where it must return to the VM, the exit
-// of its frame pushes the call state, see EmitInlineExit
+// of its frame pushes the call state, see EmitInlineExit. A method called through
+// asBC_CALLINTF is inlined for objects of one class, the others call the method
 // TODO: runtime optimize: The room on the call stack and in the stack block doesn't
 //                         change while the function runs, so they could be checked
 //                         once before the loops with inlined calls
@@ -227,11 +228,21 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
 	asCScriptFunction *func = code->GetFunction();
+	asCObjectType *objType = m_code->GetInlineObjectType(idx);
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	int base = -StackOffset(idx) / 4;
 
 	Label call = m_uc.new_label();
 	Label cont = m_uc.new_label();
+	if( objType )
+	{
+		// The call raises the exception for a null object
+		Gp type = m_uc.new_gp_ptr();
+		m_uc.load(type, Stack(0));
+		m_uc.j(call, test_z(type));
+		m_uc.load(type, mem_ptr(type, JIT_GetObjectLayout().objectType));
+		m_uc.j(call, cmp_ne(type, PtrConst(asPWORD(objType))));
+	}
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 	m_uc.j(call, test_nz(flag));
@@ -281,7 +292,10 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 
 	BaseNode *cold = BeginCold(call);
 	m_spOffset = StackOffset(idx);
-	EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
+	if( objType )
+		EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(m_code->GetInstructions()[idx].bc), 0, 0);
+	else
+		EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
 	EndCold(cold, cont);
 	m_uc.bind(cont);
 	m_spOffset = StackOffset(idx + 1);
@@ -541,6 +555,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	case asBC_CALLINTF:
 		if( m_options.noScriptCalls )
 			Bail(idx);
+		else if( instr.flags & JIT_INSTR_INLINE )
+			EmitInlineCall(idx);
 		else
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(bc), 0, 0);
 		break;
