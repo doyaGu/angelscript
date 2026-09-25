@@ -39,6 +39,8 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_bailCount  = 0;
 	m_callsInlined = 0;
 	m_inlineCalls  = false;
+	m_materialized = false;
+	m_materialDepth = 0;
 	m_inlineExtent = 0;
 	m_failed     = false;
 }
@@ -367,11 +369,11 @@ void CJITCodeGen::CreateBlockLabels()
 }
 
 // The code of an inlined function can't hand anything to the VM but through the exit
-// of its frame, see Bail, which the instructions allowed by CJITByteCode::CanBeInlined
-// don't need. If it would, the function is left to the VM
-bool CJITCodeGen::FailIfInlined()
+// of its frame, see Bail, or while its frame is materialized, see EmitMaterialize.
+// If it would otherwise, the function is left to the VM
+bool CJITCodeGen::FailIfHidden()
 {
-	if( m_frame == 0 )
+	if( m_frame == 0 || m_materialized )
 		return false;
 	assert( !"the VM can't see the frame of an inlined function" );
 	m_failed = true;
@@ -1280,7 +1282,7 @@ Mem CJITCodeGen::VRAddr()
 
 void CJITCodeGen::SetPC(asUINT pos)
 {
-	if( FailIfInlined() )
+	if( FailIfHidden() )
 		return;
 	Gp t = PtrConst(asPWORD(m_code->GetByteCode() + pos));
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
@@ -1309,10 +1311,11 @@ void CJITCodeGen::ReloadStackAfter(asUINT idx)
 	ReloadStack();
 }
 
-// Writes back the frame, see JIT_FRAME_BIT
+// Writes back the frame, see JIT_FRAME_BIT. The frames of the inlined functions
+// are written by EmitMaterialize
 void CJITCodeGen::StoreFrame()
 {
-	if( FailIfInlined() )
+	if( m_frame != 0 )
 		return;
 	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
 	m_uc.store(ContextField(JIT_GetContextLayout().currentFunction), PtrConst(asPWORD(m_code->GetFunction())));
@@ -1394,6 +1397,7 @@ void CJITCodeGen::SyncAll(asUINT idx)
 	SyncStack();
 	if( m_code->IsVRLiveBefore(idx) )
 		SyncVR();
+	EmitMaterialize();
 	SetPC(instr.pos);
 }
 
@@ -1403,6 +1407,7 @@ void CJITCodeGen::SyncForCall(asUINT idx)
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
+	EmitMaterialize();
 	SetPC(instr.pos);
 }
 
@@ -1424,13 +1429,24 @@ void CJITCodeGen::ReloadAll(asUINT idx)
 }
 
 // Temporary variables that won't be read anymore may not have been stored, but
-// loading them again doesn't matter. All are loaded when syncing every instruction
+// loading them again doesn't matter. All are loaded when syncing every instruction.
+// In an inlined function the callers are loaded too, which the VM has seen while
+// the frames were materialized, see EmitMaterialize
 void CJITCodeGen::ReloadLiveSlots(asUINT idx)
 {
 	if( m_options.syncEveryInstr )
 		ReloadCachedSlots();
 	else
 		ReloadSlots(m_code->GetReloadMask(idx));
+
+	int frame = m_frame;
+	for( int f = frame; f != 0; f = m_frames[f].caller )
+	{
+		SwitchFrame(m_frames[f].caller);
+		ReloadSlots(m_code->GetReloadMask(m_frames[f].callIdx));
+	}
+	if( frame != 0 )
+		SwitchFrame(frame);
 }
 
 //------------------------------------------------------------------------
@@ -1446,6 +1462,7 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 // the common tail of the bail sites, or by the exit of the frame of an inlined function
 void CJITCodeGen::Bail(asUINT idx)
 {
+	assert( !m_materialized );
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	if( m_code->IsVRLiveBefore(idx) )
@@ -1469,6 +1486,8 @@ void CJITCodeGen::Bail(asUINT idx)
 // Label to a cold stub that bails out at the instruction
 Label CJITCodeGen::BailLabel(asUINT idx)
 {
+	// The exits of the inlined functions push the call states themselves
+	assert( !m_materialized );
 	SBail bail;
 	bail.label = m_uc.new_label();
 	bail.idx   = idx;
@@ -1480,7 +1499,7 @@ Label CJITCodeGen::BailLabel(asUINT idx)
 // Returns to the VM after a helper has updated the VM registers
 void CJITCodeGen::Leave()
 {
-	if( FailIfInlined() )
+	if( FailIfHidden() )
 		return;
 	m_uc.j(m_leave);
 }
@@ -1488,7 +1507,7 @@ void CJITCodeGen::Leave()
 // Returns to the VM if the helper result is non-zero
 void CJITCodeGen::EmitLeaveIf(const Gp &result)
 {
-	if( FailIfInlined() )
+	if( FailIfHidden() )
 		return;
 	m_uc.j(m_leave, test_nz(result));
 }

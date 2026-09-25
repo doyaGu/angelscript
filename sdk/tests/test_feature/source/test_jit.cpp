@@ -1219,12 +1219,19 @@ namespace Inlining
 		return 0;
 	}
 
-	// Records the call stack and the variables named 'local' from the given level
+	// Records the call stack and the variables named 'local' from the given level.
+	// The nested executions have a marker without a function in the call stack
 	static void Dump(asIScriptContext *ctx, asUINT varLevel = 0)
 	{
 		for( asUINT l = 0; l < ctx->GetCallstackSize(); l++ )
 		{
-			g_trace << ctx->GetFunction(l)->GetName() << ":" << ctx->GetLineNumber(l);
+			asIScriptFunction *func = ctx->GetFunction(l);
+			if( func == 0 )
+			{
+				g_trace << "- ";
+				continue;
+			}
+			g_trace << func->GetName() << ":" << ctx->GetLineNumber(l);
 			int *local = l >= varLevel ? FindVar(ctx, l, "local") : 0;
 			if( local )
 				g_trace << "=" << *local;
@@ -1271,6 +1278,48 @@ namespace Inlining
 		if( start )
 			asGetActiveContext()->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
 		return 1;
+	}
+
+	// The registered functions called by the inlined functions, which see the frames
+	// of the inlined calls
+	static int Verify(int a)
+	{
+		if( a == -1 )
+			asGetActiveContext()->SetException("negative");
+		else if( a == -2 )
+			throw std::runtime_error("more negative");
+		return a * 3;
+	}
+
+	static int Inspect(int a)
+	{
+		Dump(asGetActiveContext());
+		return a;
+	}
+
+	static int Pause(int a)
+	{
+		if( a % 3 == 0 )
+			asGetActiveContext()->Suspend();
+		return a + 1;
+	}
+
+	// Modifies the variables of the function and its callers like a debugger, which
+	// is attached for that
+	static int Poke(int a)
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		if( a == 2 )
+		{
+			ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			for( asUINT l = 0; l < 3; l++ )
+			{
+				int *local = FindVar(ctx, l, "local");
+				if( local )
+					*local += 100 << l;
+			}
+		}
+		return a;
 	}
 
 	// The functions that are executed with a line callback avoid the statements
@@ -1428,6 +1477,98 @@ namespace Inlining
 		"  while( i < n )                                                                  \n"
 		"    r += deadAdd(i++);                                                            \n"
 		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The inlined functions call registered functions, which raise exceptions,
+		// suspend the context, and inspect or modify the variables of the callers
+		"int check(int a) { int local = a + 1; return verify(a) + local; }                 \n"
+		"int check2(int a) { int local = a * 2; return check(a - 1) + local; }             \n"
+		"int checkLoop(int n) {                                                            \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 )                                                                \n"
+		"    r += check2(n--);                                                             \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int checkCatch(int n) {                                                           \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 ) {                                                              \n"
+		"    try { r += check2(n--); } catch { r -= 1000; }                                \n"
+		"  }                                                                               \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int look(int a) { int local = a * 3; return inspect(a) + local; }                 \n"
+		"int look2(int a) { int local = a + 7; return look(a) + look(a + 1) + local; }     \n"
+		"int lookLoop(int n) {                                                             \n"
+		"  int local = n, r = 0, i = 0;                                                    \n"
+		"  while( i < n )                                                                  \n"
+		"    r += look2(i++);                                                              \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int wait(int a) { int local = a - 1; return pause(a) + local; }                   \n"
+		"int wait2(int a) { int local = a; return wait(a) * 2 + local; }                   \n"
+		"int waitLoop(int n) {                                                             \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += wait2(i++) + add(i, 1);                                                  \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int pokeIn(int a) { int local = a; return poke(a) + local; }                      \n"
+		"int pokeOut(int a) { int local = a * 2; return pokeIn(a) + local; }               \n"
+		"int pokeLoop(int n) {                                                             \n"
+		"  int local = n, r = 0, i = 0;                                                    \n"
+		"  while( i < n )                                                                  \n"
+		"    r += pokeOut(i++);                                                            \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		// The inlined functions create and release objects, whose constructors and
+		// destructors are called, and call the functions that aren't inlined
+		"int drops = 0;                                                                    \n"
+		"class Tmp { int v; Tmp(int a) { v = a; } ~Tmp() { drops += v; if( v == 3 ) inspect(v); } } \n"
+		"Tmp@ kept;                                                                        \n"
+		"int useTmp(int a) { Tmp t(a); int local = t.v * 2; return local + a; }            \n"
+		"int keepTmp(int a) { Tmp@ t = Tmp(a); @kept = t; return t.v + 1; }                \n"
+		"int tmpLoop(int n) {                                                              \n"
+		"  int local = n, r = 0, i = 0;                                                    \n"
+		"  while( i < n )                                                                  \n"
+		"    r += useTmp(i) + keepTmp(i++);                                                \n"
+		"  return r + drops + local;                                                       \n"
+		"}                                                                                 \n"
+		"class Div { int v; Div(int a) { v = 12 / a; } }                                   \n"
+		"int makeDiv(int a) { Div d(a); int local = d.v; return local + a; }               \n"
+		"int divObjLoop(int n) {                                                           \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 )                                                                \n"
+		"    r += makeDiv(n--);                                                            \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int power(int a, int b) { int local = b; return a ** b + local; }                 \n"
+		"int powLoop(int n) {                                                              \n"
+		"  int local = n, r = 0, i = 0;                                                    \n"
+		"  while( i < n )                                                                  \n"
+		"    r += power(3, i++);                                                           \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int fact(int n) { return n <= 1 ? 1 : n * fact(n - 1); }                          \n"
+		"int useFact(int a) { int local = a % 6; return fact(local) + local; }             \n"
+		"int factLoop(int n) {                                                             \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += useFact(i++);                                                            \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int viaDeep(int n) { int local = n * 2; return deepCall(n) + local; }             \n"
+		"int deepCall(int n) {                                                             \n"
+		"  int local = n;                                                                  \n"
+		"  return n == 0 ? inspect(local) : add(viaDeep(n - 1), local);                    \n"
+		"}                                                                                 \n"
+		// A debugger modifies the variables that the callers of the inlined functions
+		// don't read anymore
+		"int pokeDead(int a) { int local = poke(a); return inspect(local) + a; }           \n"
+		"int pokeMid(int a) { int local = a * 3; return pokeDead(a) + 1; }                 \n"
+		"int pokeDeadLoop(int n) {                                                         \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += pokeMid(i++);                                                            \n"
+		"  return r;                                                                       \n"
 		"}                                                                                 \n";
 
 	// Implements the interface shared with the module of the test
@@ -1475,6 +1616,22 @@ namespace Inlining
 		{ "int deadLoop(int)",     3, SUSPEND_IN_ADD },
 		{ "int deadAdd(int)",      5, POKE_IN_ADD },
 		{ "int deadLoop(int)",     3, POKE_IN_ADD },
+		{ "int checkLoop(int)",    5, PLAIN },
+		{ "int checkCatch(int)",   5, PLAIN },
+		{ "int lookLoop(int)",     5, PLAIN },
+		{ "int lookLoop(int)",     5, COUNT_LINES },
+		{ "int waitLoop(int)",    10, PLAIN },
+		{ "int waitLoop(int)",    10, SUSPEND_IN_ADD },
+		{ "int pokeLoop(int)",     5, PLAIN },
+		{ "int tmpLoop(int)",     10, PLAIN },
+		{ "int tmpLoop(int)",     10, COUNT_LINES },
+		{ "int divObjLoop(int)",   5, PLAIN },
+		{ "int powLoop(int)",     25, PLAIN },
+		{ "int factLoop(int)",    20, PLAIN },
+		{ "int deepCall(int)",   300, PLAIN },
+		{ "int deepCall(int)",    20, COUNT_LINES },
+		{ "int deepCall(int)",    20, SUSPEND_IN_ADD },
+		{ "int pokeDeadLoop(int)", 5, PLAIN },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case
@@ -1486,6 +1643,10 @@ namespace Inlining
 		engine->SetJITCompiler(jit);
 		engine->SetEngineProperty(config.prop, config.value);
 		engine->RegisterGlobalFunction("int lines(bool)", asFUNCTION(StartLines), asCALL_CDECL);
+		engine->RegisterGlobalFunction("int verify(int)", asFUNCTION(Verify), asCALL_CDECL);
+		engine->RegisterGlobalFunction("int inspect(int)", asFUNCTION(Inspect), asCALL_CDECL);
+		engine->RegisterGlobalFunction("int pause(int)", asFUNCTION(Pause), asCALL_CDECL);
+		engine->RegisterGlobalFunction("int poke(int)", asFUNCTION(Poke), asCALL_CDECL);
 
 		asIScriptModule *other = engine->GetModule("other", asGM_ALWAYS_CREATE);
 		other->AddScriptSection("other", otherScript);
@@ -1693,7 +1854,8 @@ namespace Inlining
 	// method calls the method of the base class even through the handle of the derived
 	// class, and a method called through a global variable has a reference held for the
 	// call, which the function releases. The functions calling others are inlined with
-	// those, up to 4 levels deep, and the recursive functions are called
+	// those, up to 4 levels deep, below which the functions are called, and so are the
+	// recursive calls
 	static bool TestInlinedCalls(asDWORD flags, bool inlines)
 	{
 		bool fail = false;
@@ -1714,12 +1876,12 @@ namespace Inlining
 			{ "class A { int v = 1; int f2() { return v; } int f1() { return f2() + 1; } } "
 			  "int t(A@ a) { return a.f1(); }", 3 },
 			{ "interface I { int f2(int a); } class A : I { int f2(int a) { return a; } } I@ g; "
-			  "int f1(int a) { return g.f2(a) + 1; } int t(int a) { return f1(a); }", 1 },
+			  "int f1(int a) { return g.f2(a) + 1; } int t(int a) { return f1(a); }", 3 },
 			{ "int f5(int a) { return a + 5; } int f4(int a) { return f5(a) + 4; } int f3(int a) { return f4(a) + 3; } "
-			  "int f2(int a) { return f3(a) + 2; } int f1(int a) { return f2(a) + 1; } int t(int a) { return f1(a); }", 10 },
-			{ "int f(int a) { return a <= 0 ? 0 : f(a - 1) + 1; } int t(int a) { return f(a) + f(a + 1); }", 0 },
+			  "int f2(int a) { return f3(a) + 2; } int f1(int a) { return f2(a) + 1; } int t(int a) { return f1(a); }", 14 },
+			{ "int f(int a) { return a <= 0 ? 0 : f(a - 1) + 1; } int t(int a) { return f(a) + f(a + 1); }", 2 },
 			{ "int f2(int a) { return a <= 0 ? 0 : f1(a - 1); } int f1(int a) { return f2(a) + 1; } "
-			  "int t(int a) { return f1(a); }", 0 },
+			  "int t(int a) { return f1(a); }", 4 },
 		};
 		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
 		{

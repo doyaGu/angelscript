@@ -51,6 +51,7 @@ static Mem PtrAt(const Mem &mem, int n)
 void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT idx)
 {
 	EmitLeaveIf(result);
+	EmitDematerialize();
 	ReloadStackAfter(idx);
 	EmitReloadAfterCall(idx);
 }
@@ -62,8 +63,12 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 	if( reloadVR && m_code->IsVRLiveAfter(idx) )
 		ReloadVR();
 
-	// With a debugger attached the variables may have been modified through the context
-	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code->GetReloadMask(idx)) )
+	// With a debugger attached the variables may have been modified through the
+	// context, also those of the callers of an inlined function
+	bool reload = !m_cached.empty() && (m_options.syncEveryInstr || m_code->GetReloadMask(idx));
+	for( int f = m_frame; f != 0 && !reload; f = m_frames[f].caller )
+		reload = m_frames[m_frames[f].caller].code->GetReloadMask(m_frames[f].callIdx) != 0;
+	if( reload )
 	{
 		Gp t = m_uc.new_gp32();
 		m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
@@ -124,12 +129,14 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 
 	// The native calls push the frame and the stack pointer on the call stack and
 	// pass the stack pointer, only the helper needs them in the VM registers.
-	// Arguments passed on the stack cost a store too though
+	// Arguments passed on the stack cost a store too though. The frames of the
+	// inlined calls are pushed for both
 	if( !synced )
 		StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	int spOffset = m_spOffset;
 	if( !m_spInArg )
 		SyncStack();
+	EmitMaterialize();
 
 	Gp r = m_uc.new_gp32();
 	Label slow = m_uc.new_label();
@@ -142,7 +149,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 
 		// A recursive call enters this code, which exists as it is being executed
 		Gp target;
-		if( (kind == JIT_CALL_SCRIPT || kind == JIT_CALL_CONSTRUCT) && callee != func )
+		if( (kind == JIT_CALL_SCRIPT || kind == JIT_CALL_CONSTRUCT) && callee != m_frames[0].code->GetFunction() )
 		{
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, mem_ptr(PtrConst(asPWORD(&callee->scriptData->jitFunction))));
@@ -211,6 +218,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		EndCold(cold, done);
 
 	m_uc.bind(done);
+	EmitDematerialize();
 	EmitReloadAfterCall(idx, !vrReturned);
 }
 
@@ -219,11 +227,12 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // asCContext::CallScriptFunction when the call state can be pushed without growing
 // the call stack, the stack block has room for the function, and the VM has nothing
 // to do. The function is called otherwise. Where it must return to the VM, the exit
-// of its frame pushes the call state, see EmitInlineExit. A method called through
+// of its frame pushes the call state, see EmitInlineExit, and where it calls
+// functions, its frame is materialized, see EmitMaterialize. A method called through
 // asBC_CALLINTF is inlined for objects of one class, the others call the method.
 // The calls in the inlined functions only check the class, as the outermost call
-// has checked the rest for them and the inlined code can't request a suspension.
-// The VM makes the call otherwise
+// has checked the room for them, and that the VM has nothing to do if the functions
+// called before may have given it something. The VM makes the call otherwise
 void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
@@ -231,11 +240,12 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	asCObjectType *objType = m_code->GetInlineObjectType(idx);
 	int base = -StackOffset(idx) / 4;
 	int caller = m_frame;
+	bool checkVM = caller == 0 || m_code->HasSyncPoints();
 
 	Label call;
 	if( caller == 0 )
 		call = m_uc.new_label();
-	else if( objType )
+	else if( objType || checkVM )
 		call = BailLabel(idx);
 	if( objType )
 	{
@@ -246,12 +256,15 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		m_uc.load(type, mem_ptr(type, JIT_GetObjectLayout().objectType));
 		m_uc.j(call, cmp_ne(type, PtrConst(asPWORD(objType))));
 	}
-	if( caller == 0 )
+	if( checkVM )
 	{
+		// Like the line callback on entry of script functions
 		Gp flag = m_uc.new_gp32();
 		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 		m_uc.j(call, test_nz(flag));
-
+	}
+	if( caller == 0 )
+	{
 		// The exits push a call state for each level of inlined calls
 		const SJITContextLayout &layout = JIT_GetContextLayout();
 		int extent, depth;
@@ -407,6 +420,83 @@ void CJITCodeGen::EmitInlineExit(int frame)
 	Leave();
 }
 
+// Hands the frames of the inlined calls to the VM before the inlined function
+// being emitted calls something that may see them, e.g. a registered function that
+// raises an exception or inspects the call stack, or a script function. The callers
+// are stored like for the calls, and their call states are pushed like the exits
+// do, the outermost first. The VM registers are set to the frame of the function,
+// which the program pointer and the stack pointer must be set for too. If the VM
+// takes over, it continues in the function and returns to the callers, otherwise
+// EmitDematerialize pops the call states after the call
+void CJITCodeGen::EmitMaterialize()
+{
+	if( m_frame == 0 || m_materialized )
+		return;
+	int frame = m_frame;
+	std::vector<int> inlined;
+	for( int f = frame; f != 0; f = m_frames[f].caller )
+	{
+		SwitchFrame(m_frames[f].caller);
+		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx) & ~JIT_FRAME_BIT);
+		inlined.insert(inlined.begin(), f);
+	}
+	SwitchFrame(frame);
+
+	// The capacity of the call stack has been checked for this where the outermost
+	// function was inlined
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	Gp length = m_uc.new_gp_ptr();
+	Gp array  = m_uc.new_gp_ptr();
+	Gp index  = m_uc.new_gp_ptr();
+	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	m_uc.load(array, ContextField(layout.callStackArray));
+	m_uc.load_u32(index, ContextField(layout.stackIndex));
+	Mem states = PtrElement(array, length);
+	for( asUINT n = 0; n < inlined.size(); n++ )
+	{
+		const SFrame &callee = m_frames[inlined[n]];
+		const SFrame &caller = m_frames[callee.caller];
+		const SJITInstr &instr = caller.code->GetInstructions()[callee.callIdx];
+		Mem state = PtrAt(states, int(n * layout.callStackFrameSize));
+		m_uc.store(state, FramePointer(caller.base));
+		m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(caller.code->GetFunction())));
+		m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(caller.code->GetByteCode() + instr.pos + instr.size)));
+		m_uc.store(PtrAt(state, 3), FramePointer(callee.base));
+		m_uc.store(PtrAt(state, 4), index);
+	}
+	m_uc.add(length, length, Imm(int(inlined.size() * layout.callStackFrameSize)));
+	m_uc.store_u32(ContextField(layout.callStackLength), length);
+	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), FramePointer(m_frameBase));
+	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(m_code->GetFunction())));
+	m_materialized  = true;
+	m_materialDepth = int(inlined.size());
+}
+
+// Pops the call states pushed by EmitMaterialize once the call has returned, which
+// has restored the call stack if it pushed anything. The VM registers are left with
+// the frame of the inlined function, see CJITByteCode::LeavesFrameDirty
+void CJITCodeGen::EmitDematerialize()
+{
+	if( !m_materialized )
+		return;
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	Gp length = m_uc.new_gp32();
+	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	m_uc.sub(length, length, Imm(m_materialDepth * int(layout.callStackFrameSize)));
+	m_uc.store_u32(ContextField(layout.callStackLength), length);
+	m_materialized = false;
+}
+
+// The frame pointer of the frame at the base, see SFrame
+CJITCodeGen::Gp CJITCodeGen::FramePointer(int base)
+{
+	if( base == 0 )
+		return m_fp;
+	Gp fp = m_uc.new_gp_ptr();
+	m_uc.lea(fp, mem_ptr(m_fp, -base * 4));
+	return fp;
+}
+
 // Finds the implementation of a virtual or interface method for the object on the
 // stack, like asCContext::CallInterfaceMethod. Jumps to slow if there is no object
 // or it doesn't implement the interface, for the VM to raise the exception
@@ -460,7 +550,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 // register is live, and true is returned then
 bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
-	if( FailIfInlined() )
+	if( FailIfHidden() )
 		return false;
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
@@ -471,7 +561,7 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	Gp array = m_uc.new_gp_ptr();
 	m_uc.load(array, ContextField(layout.callStackArray));
 	Mem state = PtrElement(array, length);
-	m_uc.store(state, m_fp);
+	m_uc.store(state, FramePointer(m_frameBase));
 	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code->GetFunction())));
 	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code->GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
 	Gp sp = StackPointer();
@@ -966,9 +1056,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// The function may raise a script exception, suspend the context, or
 	// inspect the variables through the debug interface, so the VM registers
-	// must be up to date. The value register isn't needed until the slow path
+	// must be up to date, and the frames of the inlined calls on the call stack.
+	// The value register isn't needed until the slow path
 	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
+	EmitMaterialize();
 	SetPC(instr.pos);
 
 	// Let the context know which function is being called, so that it may raise exceptions
@@ -1140,6 +1232,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	ReloadLiveSlots(idx);
 	EndCold(cold, cont);
 	m_uc.bind(cont);
+	EmitDematerialize();
 
 	return true;
 }
@@ -1284,6 +1377,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, var);
 			}
+			EmitDematerialize();
 			m_uc.bind(skip);
 		}
 		break;
@@ -1359,6 +1453,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				call->set_arg(2, d);
 				call->set_arg(3, s);
 			}
+			EmitDematerialize();
 		}
 		break;
 

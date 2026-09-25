@@ -236,6 +236,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			// The result was written to memory
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
+			EmitDematerialize();
 		}
 		break;
 
@@ -345,6 +346,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			call->set_ret(0, r);
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
+			EmitDematerialize();
 		}
 		else
 		{
@@ -622,6 +624,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			call->set_ret(0, r);
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
+			EmitDematerialize();
 		}
 		break;
 
@@ -653,6 +656,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			call->set_ret(0, r);
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
+			EmitDematerialize();
 		}
 		break;
 

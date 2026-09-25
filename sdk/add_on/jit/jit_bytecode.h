@@ -105,9 +105,9 @@ public:
 	int  Decode(asCScriptFunction *func);
 
 	// Performs the analysis. Must be called after Decode. The small functions called
-	// with asBC_CALL are analysed too, so that their code can be emitted in place if
-	// they call nothing but the functions emitted in theirs, and so are such methods
-	// called with asBC_CALLINTF if only one class can implement them, see FindInlinees
+	// with asBC_CALL are analysed too, so that their code can be emitted in place, and
+	// so are the methods called with asBC_CALLINTF if only one class can implement
+	// them, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
@@ -191,6 +191,11 @@ public:
 	// call the inlined method, or null for asBC_CALL
 	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
 
+	// Returns true if the function or one inlined into it calls something that may
+	// see the VM registers, or releases objects, where the frames of the calls that
+	// inline it are handed to the VM, see CJITCodeGen::EmitMaterialize
+	bool   HasSyncPoints() const { return m_hasSyncPoints; }
+
 	// Marks instructions that must return to the VM, also in the inlined functions
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
 
@@ -211,7 +216,8 @@ protected:
 	void AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots);
 	struct SInlineSearch;
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
-	bool CanBeInlined(bool inlineesFound) const;
+	bool CanBeInlined() const;
+	bool LeavesFrameDirty(asUINT instrIdx) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
 	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
@@ -242,6 +248,7 @@ protected:
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;
+	bool                    m_hasSyncPoints;
 };
 
 END_AS_NAMESPACE

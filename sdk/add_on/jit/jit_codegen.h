@@ -127,7 +127,7 @@ protected:
 	void SwitchFrame(int frame);
 	void CreateCachedSlots();
 	void CreateBlockLabels();
-	bool FailIfInlined();
+	bool FailIfHidden();
 
 	// Emits one instruction. Returns false if the instruction isn't supported
 	bool EmitInstruction(asUINT idx);
@@ -159,6 +159,9 @@ protected:
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
 	void EmitInlineCall(asUINT idx);
 	void EmitInlineExit(int frame);
+	void EmitMaterialize();
+	void EmitDematerialize();
+	Gp   FramePointer(int base);
 	void EmitInlineRoom();
 	void EmitStackBlockCheck(int extent, const Label &none);
 	void GetInlineRoom(asUINT idx, int &extent, int &depth) const;
@@ -310,6 +313,8 @@ protected:
 	asUINT m_bailCount;
 	asUINT m_callsInlined;
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
+	bool   m_materialized; // the frames of the inlined calls are on the call stack, see EmitMaterialize
+	int    m_materialDepth; // the number of call states pushed for them
 	int    m_inlineExtent; // the largest extent of the inlined calls, see GetInlineRoom
 	bool   m_failed;
 };

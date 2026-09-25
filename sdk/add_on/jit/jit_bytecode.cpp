@@ -19,6 +19,7 @@ CJITByteCode::CJITByteCode()
 	m_tempMask   = 0;
 	m_staticStack = false;
 	m_inlinedLength = 0;
+	m_hasSyncPoints = false;
 }
 
 bool CJITByteCode::IsBranch(asEBCInstr op)
@@ -495,39 +496,14 @@ void CJITByteCode::AnalyseStackDepth()
 	m_staticStack = true;
 }
 
-// The code of an inlined function runs with the frame of the caller in the VM
-// registers, so it must not call anything that could see them but the functions
-// inlined into it, which are known once they have been found. The instructions
-// working on objects call functions on some paths too
-bool CJITByteCode::CanBeInlined(bool inlineesFound) const
+// The code of an inlined function runs in the frame of the caller, which is handed
+// to the VM together with the frame of the function where it calls anything, see
+// CJITCodeGen::EmitMaterialize. Only the deprecated asBC_STR isn't compiled at all
+bool CJITByteCode::CanBeInlined() const
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
-	{
-		if( m_instrs[n].flags & JIT_INSTR_DEAD )
-			continue;
-		switch( m_instrs[n].op )
-		{
-		case asBC_CALL:
-		case asBC_CALLINTF:
-			if( inlineesFound && !(m_instrs[n].flags & JIT_INSTR_INLINE) )
-				return false;
-			break;
-
-		case asBC_FREE:
-		case asBC_LOADOBJ:
-		case asBC_STOREOBJ:
-		case asBC_Cast:
-		case asBC_STR:
-		case asBC_AllocMem:
-		case asBC_SetListSize:
-		case asBC_SetListType:
-		case asBC_PshListElmnt:
+		if( m_instrs[n].op == asBC_STR && !(m_instrs[n].flags & JIT_INSTR_DEAD) )
 			return false;
-		default:
-			if( IsSyncPoint(m_instrs[n].op) )
-				return false;
-		}
-	}
 	return true;
 }
 
@@ -633,22 +609,23 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 			    func->scriptData->tryCatchInfo.GetLength() == 0 && func->scriptData->byteCode.GetLength() <= inlining.maxSize &&
 			    (inlining.filter == 0 || inlining.filter(func, inlining.filterParam)) )
 			{
-				// The function can only be inlined if the functions it calls are
-				// inlined into it, with a quarter of the budget of the function
-				// being compiled
+				// The functions it calls are inlined into it with a quarter of the
+				// budget of the function being compiled
 				callee = std::make_shared<CJITByteCode>();
-				if( callee->Decode(func) < 0 || !callee->CanBeInlined(false) )
+				if( callee->Decode(func) < 0 || !callee->CanBeInlined() )
 					callee.reset();
 				else
 				{
 					callee->AnalyseStackDepth();
-					search.path.push_back(func->GetId());
-					callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
-					search.path.pop_back();
-					if( !callee->HasStaticStack() || !callee->CanBeInlined(true) )
+					if( !callee->HasStaticStack() )
 						callee.reset();
 					else
+					{
+						search.path.push_back(func->GetId());
+						callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
+						search.path.pop_back();
 						callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
+					}
 				}
 			}
 			it = search.analysed.insert(std::make_pair(key, callee)).first;
@@ -689,6 +666,20 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 
 void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 {
+	// The functions inlined into this one have been analysed first. The releases of
+	// objects may execute script destructors
+	m_hasSyncPoints = false;
+	for( asUINT n = 0; n < m_instrs.size() && !m_hasSyncPoints; n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( instr.flags & JIT_INSTR_DEAD )
+			continue;
+		if( instr.flags & JIT_INSTR_INLINE )
+			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints();
+		else
+			m_hasSyncPoints = IsSyncPoint(instr.op) || instr.op == asBC_FREE;
+	}
+
 	BuildBlocks();
 	AnalyseVRLiveness();
 	AnalyseSlots(allowRegisterCache, maxCachedSlots);
@@ -725,17 +716,19 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 // The script calls that may be native calls, after which the frame hasn't been
 // restored, see JIT_NATIVE_RETURN. The function pointers are restored unless the
 // stack is static, see CJITCodeGen::EmitScriptCall. So are the constructors of
-// script classes
-static bool LeavesFrameDirty(const SJITInstr &instr, bool staticStack)
+// script classes. The inlined functions with sync points leave their own frame in
+// the VM registers, see CJITCodeGen::EmitDematerialize
+bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 {
+	const SJITInstr &instr = m_instrs[instrIdx];
+	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints() )
+		return true;
 #ifdef JIT_NATIVE_RETURN
 	asEBCInstr op = instr.op;
 	if( op == asBC_ALLOC )
 		return (reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc))->flags & asOBJ_SCRIPT_OBJECT) != 0;
-	return op == asBC_CALL || op == asBC_CALLINTF || (op == asBC_CallPtr && staticStack);
+	return op == asBC_CALL || op == asBC_CALLINTF || (op == asBC_CallPtr && m_staticStack);
 #else
-	(void)instr;
-	(void)staticStack;
 	return false;
 #endif
 }
@@ -1046,7 +1039,8 @@ void CJITByteCode::AnalyseDirtySlots()
 			cachedMask |= 1u << m_slots[n].cacheBit;
 
 	// The calls in a loop store the dirty variables on every iteration, also those
-	// that are only modified before the loop. The variables that a loop with calls
+	// that are only modified before the loop, and so do the inlined functions that
+	// call functions. The variables that a loop with calls
 	// doesn't modify are stored where it is entered instead: before the branch into
 	// it, or the compare emitted together with the branch, or after the instruction
 	// that falls into it. Loops are the ranges from the target of a backward branch
@@ -1066,9 +1060,12 @@ void CJITByteCode::AnalyseDirtySlots()
 			asUINT uses, defs;
 			GetSlotMasks(m_instrs[k], uses, defs);
 			written |= defs;
-			if( LeavesFrameDirty(m_instrs[k], m_staticStack) )
+			if( LeavesFrameDirty(k) )
 				written |= JIT_FRAME_BIT;
-			calls = calls || (IsSyncPoint(m_instrs[k].op) && !(m_instrs[k].flags & JIT_INSTR_INLINE));
+			if( m_instrs[k].flags & JIT_INSTR_INLINE )
+				calls = calls || GetInlinee(k)->HasSyncPoints();
+			else
+				calls = calls || IsSyncPoint(m_instrs[k].op);
 		}
 		asUINT keep = cachedMask & ~written;
 		if( !calls || keep == 0 )
@@ -1124,12 +1121,13 @@ void CJITByteCode::AnalyseDirtySlots()
 				m_dirty[n] = mask;
 
 				// The inlined calls only store the variables on the rare path that
-				// calls the function, which may leave the frame dirty too
+				// calls the function, and where the inlined function calls functions,
+				// which may leave the frame dirty too
 				if( IsSyncPoint(instr.op) && !(instr.flags & JIT_INSTR_INLINE) )
-					mask = LeavesFrameDirty(instr, m_staticStack) ? JIT_FRAME_BIT : 0;
+					mask = LeavesFrameDirty(n) ? JIT_FRAME_BIT : 0;
 				else
 				{
-					if( LeavesFrameDirty(instr, m_staticStack) )
+					if( LeavesFrameDirty(n) )
 						defs |= JIT_FRAME_BIT;
 					mask = (mask | defs) & (~m_tempMask | m_liveAfter[n]);
 				}
