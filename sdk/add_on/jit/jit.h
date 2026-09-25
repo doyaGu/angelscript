@@ -116,6 +116,17 @@ public:
 	int Prepare(asIScriptContext *ctx, asIScriptFunction *func);
 	int Execute(asIScriptContext *ctx);
 
+	// Memory functions for the engine that are much faster than the default ones for
+	// the many small objects of the scripts. The blocks of up to 1 KB that are freed
+	// are kept for reuse, and their memory isn't returned to the system. Each thread
+	// keeps some of the blocks that it frees. The functions must be set before the
+	// first engine is created, and not be reset while memory allocated with them is
+	// in use:
+	//
+	//   asSetGlobalMemoryFunctions(CJITCompiler::AllocMemory, CJITCompiler::FreeMemory);
+	static void *AllocMemory(size_t size);
+	static void  FreeMemory(void *mem);
+
 protected:
 	struct SImpl;
 	SImpl *m_impl;
