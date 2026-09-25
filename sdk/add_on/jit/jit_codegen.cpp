@@ -39,6 +39,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_bailCount  = 0;
 	m_callsInlined = 0;
 	m_inlineCalls  = false;
+	m_inlineExtent = 0;
 	m_failed     = false;
 }
 
@@ -61,6 +62,31 @@ bool CJITCodeGen::Generate()
 
 	m_bailCommon = m_uc.new_label();
 	m_leave = m_uc.new_label();
+
+	// The instructions in loops, which are the ones up to a backward branch from its target
+	std::vector<int> loopDepth(instrs.size() + 1);
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+		{
+			loopDepth[instrs[n].target]++;
+			loopDepth[n + 1]--;
+		}
+
+	// The room for the inlined functions is checked on entry if they are called in
+	// loops, see EmitInlineRoom
+	bool inlinedInLoop = false;
+	int inLoop = 0;
+	for( asUINT n = 0; n < instrs.size(); n++ )
+	{
+		inLoop += loopDepth[n];
+		if( !(instrs[n].flags & JIT_INSTR_INLINE) )
+			continue;
+		inlinedInLoop = inlinedInLoop || inLoop > 0;
+		if( InlineExtent(n) > m_inlineExtent )
+			m_inlineExtent = InlineExtent(n);
+	}
+	if( inlinedInLoop )
+		m_inlineRoom = m_uc.new_gp32("inlineRoom");
 
 	Label direct = m_uc.new_label();
 	m_uc.j(direct, test_z(m_arg));
@@ -96,6 +122,8 @@ bool CJITCodeGen::Generate()
 		m_uc.add(m_callLimit, m_callLimit, Imm(int(words < 0x40000000 ? words : 0x40000000)));
 		m_uc.umin(m_callLimit, m_callLimit, capacity);
 	}
+	if( m_inlineRoom.is_valid() )
+		EmitInlineRoom();
 #ifdef JIT_NATIVE_RETURN
 	{
 		// The function returns to the VM now, also if it was called natively and
@@ -128,13 +156,6 @@ bool CJITCodeGen::Generate()
 	// repeatedly, i.e. in loops. Short functions that are called often, like
 	// recursive ones, get slower otherwise. The cached variables read after the calls
 	// in loops would be saved and reloaded around each call too
-	std::vector<int> loopDepth(instrs.size() + 1);
-	for( asUINT n = 0; n < instrs.size(); n++ )
-		if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
-		{
-			loopDepth[instrs[n].target]++;
-			loopDepth[n + 1]--;
-		}
 	bool callsInLoop = false;
 	asUINT liveAcrossCalls = 0;
 	int depth = 0;

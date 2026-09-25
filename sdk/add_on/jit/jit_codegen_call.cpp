@@ -221,15 +221,11 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // to do. The function is called otherwise. Where it must return to the VM, the exit
 // of its frame pushes the call state, see EmitInlineExit. A method called through
 // asBC_CALLINTF is inlined for objects of one class, the others call the method
-// TODO: runtime optimize: The room on the call stack and in the stack block doesn't
-//                         change while the function runs, so they could be checked
-//                         once before the loops with inlined calls
 void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
 	asCScriptFunction *func = code->GetFunction();
 	asCObjectType *objType = m_code->GetInlineObjectType(idx);
-	const SJITContextLayout &layout = JIT_GetContextLayout();
 	int base = -StackOffset(idx) / 4;
 
 	Label call = m_uc.new_label();
@@ -246,18 +242,10 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 	m_uc.j(call, test_nz(flag));
-	Gp length   = m_uc.new_gp32();
-	Gp capacity = m_uc.new_gp32();
-	m_uc.load_u32(length, ContextField(layout.callStackLength));
-	m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
-	m_uc.j(call, ucmp_ge(length, capacity));
-	Gp blocks = m_uc.new_gp_ptr();
-	Gp index  = m_uc.new_gp_ptr();
-	Gp limit  = m_uc.new_gp_ptr();
-	m_uc.load(blocks, ContextField(layout.stackBlocks));
-	m_uc.load_u32(index, ContextField(layout.stackIndex));
-	m_uc.lea(limit, mem_ptr(m_fp, -int(base + func->scriptData->stackNeeded + layout.reserveStack) * 4));
-	m_uc.j(call, ucmp_lt(limit, PtrElement(blocks, index)));
+	if( m_inlineRoom.is_valid() )
+		m_uc.j(call, test_z(m_inlineRoom));
+	else
+		EmitInlineRoomCheck(InlineExtent(idx), call);
 
 	int caller = m_frame;
 	SFrame frame;
@@ -299,6 +287,46 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	EndCold(cold, cont);
 	m_uc.bind(cont);
 	m_spOffset = StackOffset(idx + 1);
+}
+
+// Notes whether the inlined functions have room. That doesn't change while the
+// function runs, as the frame and the call stack length are the same whenever it
+// runs, and the capacity of the call stack only grows, so the functions that call
+// them in loops check it on entry
+void CJITCodeGen::EmitInlineRoom()
+{
+	Label none = m_uc.new_label();
+	m_uc.mov(m_inlineRoom, Imm(0));
+	EmitInlineRoomCheck(m_inlineExtent, none);
+	m_uc.mov(m_inlineRoom, Imm(1));
+	m_uc.bind(none);
+}
+
+// Jumps to none unless the call state can be pushed without growing the call stack,
+// and the stack block has room for the variables down to the extent in dwords below
+// the frame pointer, like asCContext::CallScriptFunction
+void CJITCodeGen::EmitInlineRoomCheck(int extent, const Label &none)
+{
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	Gp length   = m_uc.new_gp32();
+	Gp capacity = m_uc.new_gp32();
+	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
+	m_uc.j(none, ucmp_ge(length, capacity));
+	Gp blocks = m_uc.new_gp_ptr();
+	Gp index  = m_uc.new_gp_ptr();
+	Gp limit  = m_uc.new_gp_ptr();
+	m_uc.load(blocks, ContextField(layout.stackBlocks));
+	m_uc.load_u32(index, ContextField(layout.stackIndex));
+	m_uc.lea(limit, mem_ptr(m_fp, -(extent + int(layout.reserveStack)) * 4));
+	m_uc.j(none, ucmp_lt(limit, PtrElement(blocks, index)));
+}
+
+// The dwords below the frame pointer that the frame of the function inlined by the
+// instruction reaches
+int CJITCodeGen::InlineExtent(asUINT idx) const
+{
+	return -StackOffset(idx) / 4 + int(m_code->GetInlinee(idx)->GetFunction()->scriptData->stackNeeded);
 }
 
 // Hands an inlined function to the VM at the program pointer in m_bailPC, with the
@@ -474,6 +502,8 @@ void CJITCodeGen::EmitDirectEntry()
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
 	m_uc.bind(ready);
+	if( m_inlineRoom.is_valid() )
+		EmitInlineRoom();
 	if( m_options.syncEveryInstr )
 	{
 		ReloadVR();
