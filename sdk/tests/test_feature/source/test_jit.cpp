@@ -15,6 +15,8 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <cstddef>
 
 namespace TestJIT
 {
@@ -2616,6 +2618,143 @@ static bool TestHostCalls()
 	return fail;
 }
 
+// The memory functions of the compiler. The whole test suite uses them with
+// AS_TEST_POOLED_MEMORY=1
+namespace MemoryFunctions
+{
+	struct SBlock
+	{
+		unsigned char *mem;
+		size_t         size;
+		unsigned       seed;
+	};
+
+	static SBlock Alloc(size_t size, unsigned seed)
+	{
+		SBlock block = { (unsigned char*)CJITCompiler::AllocMemory(size), size, seed };
+		if( block.mem )
+			for( size_t n = 0; n < size; n++ )
+				block.mem[n] = (unsigned char)(seed + n * 31);
+		return block;
+	}
+
+	// Frees the block if it is intact and aligned like malloc's memory
+	static bool Free(const SBlock &block)
+	{
+		bool ok = block.mem && (size_t)block.mem % alignof(std::max_align_t) == 0;
+		for( size_t n = 0; ok && n < block.size; n++ )
+			ok = block.mem[n] == (unsigned char)(block.seed + n * 31);
+		CJITCompiler::FreeMemory(block.mem);
+		return ok;
+	}
+
+	static std::atomic<int> g_errors(0);
+	static std::mutex       g_lock;
+	static std::vector<SBlock> g_handedOver;
+
+	// Frees a block and allocates another one after the thread has handed its
+	// blocks back, when it is destroyed after the lists of the thread
+	struct SLateFree
+	{
+		SBlock block;
+		~SLateFree()
+		{
+			if( block.mem && !Free(block) )
+				g_errors++;
+			SBlock other = Alloc(40, 7);
+			if( !Free(other) )
+				g_errors++;
+		}
+	};
+	static thread_local SLateFree t_late;
+
+	// Allocates and frees blocks of random sizes, some larger than the pooled
+	// ones, and frees blocks that the other threads have allocated
+	static void Run(unsigned seed)
+	{
+		t_late.block.mem = 0;
+		std::vector<SBlock> blocks;
+		unsigned r = seed;
+		for( int n = 0; n < 20000; n++ )
+		{
+			r = r * 1103515245 + 12345;
+			if( blocks.size() < 64 && ((r >> 16) & 3) != 0 )
+			{
+				size_t size = (r >> 8) % 1500;
+				if( (r & 0x300) == 0 )
+					size = (r >> 8) % 64;
+				blocks.push_back(Alloc(size, r));
+				continue;
+			}
+			if( blocks.empty() )
+				continue;
+			size_t i = (r >> 20) % blocks.size();
+			SBlock block = blocks[i];
+			blocks[i] = blocks.back();
+			blocks.pop_back();
+			if( (r & 0x10000) != 0 )
+			{
+				std::lock_guard<std::mutex> lock(g_lock);
+				g_handedOver.push_back(block);
+				if( g_handedOver.size() < 256 )
+					continue;
+				block = g_handedOver.front();
+				g_handedOver.erase(g_handedOver.begin());
+			}
+			if( !Free(block) )
+				g_errors++;
+		}
+		for( size_t n = 0; n < blocks.size(); n++ )
+			if( !Free(blocks[n]) )
+				g_errors++;
+		t_late.block = Alloc(100, seed);
+	}
+}
+
+static bool TestMemoryFunctions()
+{
+	using namespace MemoryFunctions;
+	bool fail = false;
+
+	// The blocks of each size don't overlap, and the freed ones are reused
+	for( int round = 0; round < 3; round++ )
+	{
+		std::vector<SBlock> blocks;
+		for( size_t size = 0; size <= 1100; size += 7 )
+			blocks.push_back(Alloc(size, unsigned(size + round)));
+		blocks.push_back(Alloc(100000, 3));
+		for( size_t n = 0; n < blocks.size(); n++ )
+			if( !Free(blocks[n]) )
+				TEST_FAILED;
+	}
+	CJITCompiler::FreeMemory(0);
+
+	// More blocks of one size than a thread keeps
+	std::vector<SBlock> blocks;
+	for( unsigned n = 0; n < 5000; n++ )
+		blocks.push_back(Alloc(24, n));
+	for( size_t n = 0; n < blocks.size(); n++ )
+		if( !Free(blocks[n]) )
+			TEST_FAILED;
+
+	std::vector<std::thread> threads;
+	for( unsigned n = 0; n < 4; n++ )
+		threads.push_back(std::thread(Run, n * 7919 + 1));
+	for( size_t n = 0; n < threads.size(); n++ )
+		threads[n].join();
+	for( size_t n = 0; n < g_handedOver.size(); n++ )
+		if( !Free(g_handedOver[n]) )
+			g_errors++;
+	g_handedOver.clear();
+	if( g_errors != 0 )
+	{
+		PRINTF("%d blocks of the memory functions were corrupted\n", int(g_errors));
+		TEST_FAILED;
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -2681,6 +2820,7 @@ bool Test()
 	fail = TestCppExceptions() || fail;
 	fail = TestRefCounting() || fail;
 	fail = TestHostCalls() || fail;
+	fail = TestMemoryFunctions() || fail;
 
 	return fail;
 }

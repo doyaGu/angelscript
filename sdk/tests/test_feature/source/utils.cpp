@@ -94,6 +94,10 @@ static map<loc, counters> locCount;
 static map<void*, loc> memAllocedFrom;
 #endif
 
+// The memory functions that the memory manager takes the memory from
+static void *(*g_alloc)(size_t) = malloc;
+static void  (*g_free)(void *)  = free;
+
 void *MyAllocWithStats(size_t size, const char *file, int line)
 {
 	// Avoid compiler warning when variables aren't used
@@ -101,7 +105,7 @@ void *MyAllocWithStats(size_t size, const char *file, int line)
 	UNUSED_VAR(file);
 
 	// Allocate the memory
-	void *ptr = malloc(size);
+	void *ptr = g_alloc(size);
 #if !defined(__psp2__) && !defined(__CELLOS_LV2__)
 	// Count number of allocations made
 	numAllocs++;
@@ -202,13 +206,27 @@ void MyFreeWithStats(void *address)
 #endif
 #endif
 	// Free the actual memory
-	free(address);
+	g_free(address);
 }
+
+#ifdef AS_TEST_JIT
+#include "../../../add_on/jit/jit.h"
+#endif
 
 void InstallMemoryManager()
 {
 #ifdef TRACK_LOCATIONS
 	assert( strstr(asGetLibraryOptions(), " AS_DEBUG ") );
+#endif
+
+#ifdef AS_TEST_JIT
+	// AS_TEST_POOLED_MEMORY=1 makes the memory manager take the memory from the
+	// memory functions of the JIT compiler, to test them with the engine
+	if( getenv("AS_TEST_POOLED_MEMORY") )
+	{
+		g_alloc = CJITCompiler::AllocMemory;
+		g_free  = CJITCompiler::FreeMemory;
+	}
 #endif
 
 	asSetGlobalMemoryFunctions((asALLOCFUNC_t)MyAllocWithStats, MyFreeWithStats);
