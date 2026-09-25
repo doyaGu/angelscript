@@ -20,8 +20,11 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_uc(uc), m_code(&code), m_options(options)
 {
 	SFrame frame;
-	frame.code = &code;
-	frame.base = 0;
+	frame.code     = &code;
+	frame.base     = 0;
+	frame.caller   = -1;
+	frame.callIdx  = 0;
+	frame.exitUsed = false;
 	m_frames.push_back(frame);
 	m_frame      = 0;
 	m_frameBase  = 0;
@@ -34,6 +37,8 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_vrAddrValid = false;
 	m_instrCount = 0;
 	m_bailCount  = 0;
+	m_callsInlined = 0;
+	m_inlineCalls  = false;
 	m_failed     = false;
 }
 
@@ -48,11 +53,7 @@ bool CJITCodeGen::Generate()
 	EmitPrologue();
 
 	// Labels for the basic blocks and entry points
-	m_labels.resize(instrs.size());
-	for( asUINT n = 0; n < instrs.size(); n++ )
-		if( instrs[n].flags & JIT_INSTR_BLOCK_START )
-			m_labels[n] = m_uc.new_label();
-
+	CreateBlockLabels();
 	m_entryLabels.resize(entries.size());
 	for( asUINT n = 0; n < entries.size(); n++ )
 		if( EntryNeedsStub(n) )
@@ -269,8 +270,11 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
 				SyncAllSlots(instrs[idx + consumed].pos);
 
-			// Suspend requests and returns to the VM only call functions on rare paths
-			if( instr.op != asBC_SUSPEND && instr.op != asBC_RET )
+			// Suspend requests and returns to the VM only call functions on rare paths,
+			// and so do the inlined calls unless the inlined function calls functions
+			if( instr.flags & JIT_INSTR_INLINE )
+				calls[idx] = m_inlineCalls;
+			else if( instr.op != asBC_SUSPEND && instr.op != asBC_RET )
 				for( BaseNode *node = start->next(); node && !calls[idx]; node = node->next() )
 					calls[idx] = node->is_invoke();
 		}
@@ -296,6 +300,59 @@ void CJITCodeGen::SwitchFrame(int frame)
 	m_code = to.code;
 	m_frameBase = to.base;
 	m_frame = frame;
+}
+
+// Registers for the cached variables of the frame being emitted. They are loaded by
+// the entry paths
+void CJITCodeGen::CreateCachedSlots()
+{
+	const std::vector<SJITSlot> &slots = m_code->GetSlots();
+	for( asUINT n = 0; n < slots.size(); n++ )
+	{
+		if( slots[n].cacheKind == JIT_SLOT_NONE )
+			continue;
+
+		char name[32];
+		if( m_frame == 0 )
+			snprintf(name, sizeof(name), "var%d", slots[n].offset);
+		else
+			snprintf(name, sizeof(name), "f%d_var%d", m_frame, slots[n].offset);
+
+		SCachedSlot cached;
+		cached.offset = slots[n].offset;
+		cached.kind   = slots[n].cacheKind;
+		switch( cached.kind )
+		{
+		case JIT_SLOT_I32: cached.gp  = m_uc.new_gp32(name); break;
+		case JIT_SLOT_I64: cached.gp  = m_uc.new_gp64(name); break;
+		case JIT_SLOT_F32: cached.vec = m_uc.new_vec128_f32x1(name); break;
+		case JIT_SLOT_F64: cached.vec = m_uc.new_vec128_f64x1(name); break;
+		}
+		m_cachedIndex[cached.offset] = asUINT(m_cached.size());
+		m_cached.push_back(cached);
+	}
+}
+
+// Labels for the basic blocks of the frame being emitted
+void CJITCodeGen::CreateBlockLabels()
+{
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+	m_labels.resize(instrs.size());
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].flags & JIT_INSTR_BLOCK_START )
+			m_labels[n] = m_uc.new_label();
+}
+
+// The code of an inlined function can't hand anything to the VM but through the exit
+// of its frame, see Bail, which the instructions allowed by CJITByteCode::CanBeInlined
+// don't need. If it would, the function is left to the VM
+bool CJITCodeGen::FailIfInlined()
+{
+	if( m_frame == 0 )
+		return false;
+	assert( !"the VM can't see the frame of an inlined function" );
+	m_failed = true;
+	return true;
 }
 
 // The registers pointer, the frame and stack pointers, and the call limit are used all
@@ -696,29 +753,7 @@ void CJITCodeGen::EmitPrologue()
 
 	m_bailPC = m_uc.new_gp_ptr("bailPC");
 
-	// Registers for the cached variables. They are loaded by the entry stubs
-	const std::vector<SJITSlot> &slots = m_code->GetSlots();
-	for( asUINT n = 0; n < slots.size(); n++ )
-	{
-		if( slots[n].cacheKind == JIT_SLOT_NONE )
-			continue;
-
-		char name[32];
-		snprintf(name, sizeof(name), "var%d", slots[n].offset);
-
-		SCachedSlot cached;
-		cached.offset = slots[n].offset;
-		cached.kind   = slots[n].cacheKind;
-		switch( cached.kind )
-		{
-		case JIT_SLOT_I32: cached.gp  = m_uc.new_gp32(name); break;
-		case JIT_SLOT_I64: cached.gp  = m_uc.new_gp64(name); break;
-		case JIT_SLOT_F32: cached.vec = m_uc.new_vec128_f32x1(name); break;
-		case JIT_SLOT_F64: cached.vec = m_uc.new_vec128_f64x1(name); break;
-		}
-		m_cachedIndex[cached.offset] = asUINT(m_cached.size());
-		m_cached.push_back(cached);
-	}
+	CreateCachedSlots();
 }
 
 // Whether entering at the entry point needs to load anything, otherwise the
@@ -797,6 +832,15 @@ void CJITCodeGen::EmitBailStubs()
 		SwitchFrame(m_bails[n].frame);
 		m_uc.bind(m_bails[n].label);
 		Bail(m_bails[n].idx);
+	}
+
+	// The exits of the inlined functions are emitted in the frames of their callers
+	for( asUINT n = 1; n < m_frames.size(); n++ )
+	{
+		if( !m_frames[n].exitUsed )
+			continue;
+		SwitchFrame(m_frames[n].caller);
+		EmitInlineExit(int(n));
 	}
 	SwitchFrame(0);
 
@@ -1217,6 +1261,8 @@ Mem CJITCodeGen::VRAddr()
 
 void CJITCodeGen::SetPC(asUINT pos)
 {
+	if( FailIfInlined() )
+		return;
 	Gp t = PtrConst(asPWORD(m_code->GetByteCode() + pos));
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
 }
@@ -1247,6 +1293,8 @@ void CJITCodeGen::ReloadStackAfter(asUINT idx)
 // Writes back the frame, see JIT_FRAME_BIT
 void CJITCodeGen::StoreFrame()
 {
+	if( FailIfInlined() )
+		return;
 	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
 	m_uc.store(ContextField(JIT_GetContextLayout().currentFunction), PtrConst(asPWORD(m_code->GetFunction())));
 }
@@ -1376,7 +1424,7 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 }
 
 // Returns to the VM which will re-execute the instruction. The frame is stored by
-// the common tail of the bail sites
+// the common tail of the bail sites, or by the exit of the frame of an inlined function
 void CJITCodeGen::Bail(asUINT idx)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
@@ -1390,7 +1438,13 @@ void CJITCodeGen::Bail(asUINT idx)
 		SyncStack();
 	}
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
-	m_uc.j(m_bailCommon);
+	if( m_frame != 0 )
+	{
+		m_frames[m_frame].exitUsed = true;
+		m_uc.j(m_frames[m_frame].exit);
+	}
+	else
+		m_uc.j(m_bailCommon);
 }
 
 // Label to a cold stub that bails out at the instruction
@@ -1407,12 +1461,16 @@ Label CJITCodeGen::BailLabel(asUINT idx)
 // Returns to the VM after a helper has updated the VM registers
 void CJITCodeGen::Leave()
 {
+	if( FailIfInlined() )
+		return;
 	m_uc.j(m_leave);
 }
 
 // Returns to the VM if the helper result is non-zero
 void CJITCodeGen::EmitLeaveIf(const Gp &result)
 {
+	if( FailIfInlined() )
+		return;
 	m_uc.j(m_leave, test_nz(result));
 }
 
@@ -2141,6 +2199,14 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			// suspension was requested, is the helper called
 			Gp t = m_uc.new_gp32();
 			m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+
+			// The VM calls the line callback for an inlined function
+			if( m_frame != 0 )
+			{
+				m_uc.j(BailLabel(idx), test_nz(t));
+				break;
+			}
+
 			Label suspend = m_uc.new_label();
 			Label cont = m_uc.new_label();
 			m_uc.j(suspend, test_nz(t));

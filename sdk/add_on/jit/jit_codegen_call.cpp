@@ -214,6 +214,100 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	EmitReloadAfterCall(idx, !vrReturned);
 }
 
+// Emits the code of the called function in place, in a frame of its own that starts
+// at the stack pointer, see CJITByteCode::FindInlinees. It executes like after
+// asCContext::CallScriptFunction when the call state can be pushed without growing
+// the call stack, the stack block has room for the function, and the VM has nothing
+// to do. The function is called otherwise. Where it must return to the VM, the exit
+// of its frame pushes the call state, see EmitInlineExit
+void CJITCodeGen::EmitInlineCall(asUINT idx)
+{
+	const CJITByteCode *code = m_code->GetInlinee(idx);
+	asCScriptFunction *func = code->GetFunction();
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	int base = -StackOffset(idx) / 4;
+
+	Label call = m_uc.new_label();
+	Label cont = m_uc.new_label();
+	Gp flag = m_uc.new_gp32();
+	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+	m_uc.j(call, test_nz(flag));
+	Gp length   = m_uc.new_gp32();
+	Gp capacity = m_uc.new_gp32();
+	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
+	m_uc.j(call, ucmp_ge(length, capacity));
+	Gp blocks = m_uc.new_gp_ptr();
+	Gp index  = m_uc.new_gp_ptr();
+	Gp limit  = m_uc.new_gp_ptr();
+	m_uc.load(blocks, ContextField(layout.stackBlocks));
+	m_uc.load_u32(index, ContextField(layout.stackIndex));
+	m_uc.lea(limit, mem_ptr(m_fp, -int(base + func->scriptData->stackNeeded + layout.reserveStack) * 4));
+	m_uc.j(call, ucmp_lt(limit, PtrElement(blocks, index)));
+
+	int caller = m_frame;
+	SFrame frame;
+	frame.code     = code;
+	frame.base     = base;
+	frame.caller   = caller;
+	frame.callIdx  = idx;
+	frame.ret      = m_uc.new_label();
+	frame.exit     = m_uc.new_label();
+	frame.exitUsed = false;
+	m_frames.push_back(frame);
+	int inlined = int(m_frames.size()) - 1;
+	SwitchFrame(inlined);
+	CreateCachedSlots();
+	CreateBlockLabels();
+
+	// Only the object variables on the heap are cleared, like in EmitDirectEntry
+	const asCArray<asSScriptVariable*> &vars = func->scriptData->variables;
+	for( asUINT n = 0; n < vars.GetLength(); n++ )
+		if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
+			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
+	ReloadSlots(code->GetLiveInMask(0));
+
+	std::vector<bool> calls(code->GetInstructions().size());
+	EmitBody(calls);
+	m_uc.bind(m_frames[inlined].ret);
+	SwitchFrame(caller);
+	m_inlineCalls = false;
+	for( asUINT n = 0; n < calls.size(); n++ )
+		m_inlineCalls = m_inlineCalls || calls[n];
+	m_callsInlined++;
+
+	BaseNode *cold = BeginCold(call);
+	m_spOffset = StackOffset(idx);
+	EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
+	EndCold(cold, cont);
+	m_uc.bind(cont);
+	m_spOffset = StackOffset(idx + 1);
+}
+
+// Hands an inlined function to the VM at the program pointer in m_bailPC, with the
+// cached variables, the value register, and the stack pointer of the function stored
+// by Bail. The caller is stored like for the call and its call state is pushed
+void CJITCodeGen::EmitInlineExit(int frame)
+{
+	// Only functions that call nothing are inlined
+	assert( m_frame == 0 && m_frames[frame].caller == 0 );
+	const SFrame &inlined = m_frames[frame];
+	const SJITInstr &instr = m_code->GetInstructions()[inlined.callIdx];
+	m_uc.bind(inlined.exit);
+	StoreDirtySlots(m_code->GetDirtyMask(inlined.callIdx) & ~JIT_FRAME_BIT);
+	StoreFrame();
+	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
+
+	Gp fp = m_uc.new_gp_ptr();
+	m_uc.lea(fp, mem_ptr(m_fp, -inlined.base * 4));
+	InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*>());
+	call->set_arg(0, m_regs);
+	call->set_arg(1, Imm(int64_t(asPWORD(inlined.code->GetFunction()))));
+	call->set_arg(2, fp);
+	call->set_arg(3, Imm(int64_t(asPWORD(m_code->GetByteCode() + instr.pos + instr.size))));
+	Leave();
+}
+
 // Finds the implementation of a virtual or interface method for the object on the
 // stack, like asCContext::CallInterfaceMethod. Jumps to slow if there is no object
 // or it doesn't implement the interface, for the VM to raise the exception
@@ -267,6 +361,8 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 // register is live, and true is returned then
 bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
+	if( FailIfInlined() )
+		return false;
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	Gp length = m_uc.new_gp_ptr();
@@ -433,6 +529,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	case asBC_CALL:
 		if( m_options.noScriptCalls )
 			Bail(idx);
+		else if( instr.flags & JIT_INSTR_INLINE )
+			EmitInlineCall(idx);
 		else
 			EmitScriptCall(idx, JIT_CALL_SCRIPT, asBC_INTARG(bc), 0, 0);
 		break;
@@ -462,6 +560,18 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		break;
 
 	case asBC_RET:
+		if( m_frame != 0 )
+		{
+			// An inlined function continues in the caller, which finds the value
+			// register where the function has put it
+			const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+			bool last = true;
+			for( asUINT n = idx + 1; n < instrs.size() && last; n++ )
+				last = (instrs[n].flags & JIT_INSTR_DEAD) != 0;
+			if( !last )
+				m_uc.j(m_frames[m_frame].ret);
+		}
+		else
 		{
 			// Local variables are dead at this point so only the value register
 			// and stack pointer need to be written back

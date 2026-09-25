@@ -399,6 +399,21 @@ int JIT_Suspend(asSVMRegisters *regs) noexcept
 	return 0;
 }
 
+void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+	asDWORD *pc = regs->programPointer;
+	asDWORD *sp = regs->stackPointer;
+	regs->programPointer = callerPC;
+	regs->stackPointer   = frame;
+	ctx->PushCallState();
+
+	regs->stackFramePointer = frame;
+	ctx->m_currentFunction  = func;
+	regs->programPointer    = pc;
+	regs->stackPointer      = sp;
+}
+
 void *JIT_NewScriptObject(asCObjectType *objType) noexcept
 {
 	asDWORD *mem = (asDWORD*)objType->engine->CallAlloc(objType);

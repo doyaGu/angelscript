@@ -8,6 +8,7 @@
 BEGIN_AS_NAMESPACE
 
 class asCObjectType;
+class asCScriptFunction;
 
 // Runtime helpers called from the generated code. This is the only part of the
 // JIT that touches the internals of the script context, so the generated code
@@ -131,6 +132,13 @@ int    JIT_PrepareFrame(asSVMRegisters *regs) noexcept;
 
 // asBC_SUSPEND, when regs->doProcessSuspend is set
 int    JIT_Suspend(asSVMRegisters *regs) noexcept;
+
+// Hands a function inlined into the calling function to the VM, which continues it
+// at the program pointer with the stack pointer in the VM registers. The frame of the
+// caller must have been stored. Pushes its call state like the call would have, with
+// callerPC after the call and the frame of the function as stack pointer. The call
+// stack must have room for it without growing
+void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC) noexcept;
 
 // asBC_ALLOC for registered types
 int    JIT_Alloc(asSVMRegisters *regs, asCObjectType *objType, int funcId) noexcept;

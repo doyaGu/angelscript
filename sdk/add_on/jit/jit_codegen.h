@@ -54,6 +54,7 @@ public:
 
 	asUINT GetInstructionCount() const { return m_instrCount; }
 	asUINT GetBailCount() const        { return m_bailCount; }
+	asUINT GetInlinedCallCount() const { return m_callsInlined; }
 
 protected:
 	typedef asmjit::ujit::Gp        Gp;
@@ -83,6 +84,11 @@ protected:
 		std::vector<SCachedSlot>  cached;
 		std::map<int, asUINT>     cachedIndex;
 		std::vector<Label>        labels;
+		int                       caller;   // frame of the calling function, -1 for frame 0
+		asUINT                    callIdx;  // the call instruction in the caller
+		Label                     ret;      // where the code continues after the function has returned
+		Label                     exit;     // hands the function to the VM, see EmitInlineExit
+		bool                      exitUsed;
 	};
 
 	// A bail stub to emit after the body
@@ -119,6 +125,9 @@ protected:
 	// call functions in calls. Sets m_failed if one isn't supported
 	void EmitBody(std::vector<bool> &calls);
 	void SwitchFrame(int frame);
+	void CreateCachedSlots();
+	void CreateBlockLabels();
+	bool FailIfInlined();
 
 	// Emits one instruction. Returns false if the instruction isn't supported
 	bool EmitInstruction(asUINT idx);
@@ -148,6 +157,8 @@ protected:
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
 	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
+	void EmitInlineCall(asUINT idx);
+	void EmitInlineExit(int frame);
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
 	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
@@ -293,6 +304,8 @@ protected:
 
 	asUINT m_instrCount;
 	asUINT m_bailCount;
+	asUINT m_callsInlined;
+	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
 	bool   m_failed;
 };
 
