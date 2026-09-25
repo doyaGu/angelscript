@@ -59,11 +59,11 @@ void CJITCodeGen::EmitAfterHelperCall(const Gp &result, asUINT idx)
 // it is read later, and the variables if a debugger may have modified them
 void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 {
-	if( reloadVR && m_code.IsVRLiveAfter(idx) )
+	if( reloadVR && m_code->IsVRLiveAfter(idx) )
 		ReloadVR();
 
 	// With a debugger attached the variables may have been modified through the context
-	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code.GetLiveAfterMask(idx)) )
+	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code->GetLiveAfterMask(idx)) )
 	{
 		Gp t = m_uc.new_gp32();
 		m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
@@ -84,8 +84,8 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 // compiled or the call stack has reached the call limit
 void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	asCScriptFunction *func = m_code.GetFunction();
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	asCScriptFunction *func = m_code->GetFunction();
 	asCScriptFunction *callee = 0;
 	if( funcId >= 0 && asUINT(funcId) < func->engine->scriptFunctions.GetLength() )
 		callee = func->engine->scriptFunctions[funcId];
@@ -126,7 +126,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	// pass the stack pointer, only the helper needs them in the VM registers.
 	// Arguments passed on the stack cost a store too though
 	if( !synced )
-		StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+		StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	int spOffset = m_spOffset;
 	if( !m_spInArg )
 		SyncStack();
@@ -189,7 +189,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		SyncStack();
 	if( !synced )
 	{
-		if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
+		if( m_code->GetDirtyMask(idx) & JIT_FRAME_BIT )
 			StoreFrame();
 		SetPC(instr.pos);
 	}
@@ -267,7 +267,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 // register is live, and true is returned then
 bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	Gp length = m_uc.new_gp_ptr();
 	Gp t      = m_uc.new_gp_ptr();
@@ -277,8 +277,8 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	m_uc.load(array, ContextField(layout.callStackArray));
 	Mem state = PtrElement(array, length);
 	m_uc.store(state, m_fp);
-	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code.GetFunction())));
-	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code.GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
+	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code->GetFunction())));
+	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code->GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
 	Gp sp = StackPointer();
 	m_uc.store(PtrAt(state, 3), sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
@@ -309,7 +309,7 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	if( mark )
 	{
 		AddVRReturn(call->detail());
-		if( vrInReg && m_vr.is_valid() && m_code.IsVRLiveAfter(idx) )
+		if( vrInReg && m_vr.is_valid() && m_code->IsVRLiveAfter(idx) )
 		{
 			call->set_ret(1, m_vr);
 			return true;
@@ -327,7 +327,7 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 // written back where the VM or the engine may see it, see JIT_FRAME_BIT
 void CJITCodeGen::EmitDirectEntry()
 {
-	asCScriptFunction *func = m_code.GetFunction();
+	asCScriptFunction *func = m_code->GetFunction();
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 
 	// The frame starts at the stack pointer of the caller, and the arguments are
@@ -368,9 +368,9 @@ void CJITCodeGen::EmitDirectEntry()
 	}
 	else
 	{
-		if( m_code.GetBlocks()[m_code.GetInstructions()[0].block].vrLiveIn )
+		if( m_code->GetBlocks()[m_code->GetInstructions()[0].block].vrLiveIn )
 			ReloadVR();
-		ReloadSlots(m_code.GetLiveInMask(0));
+		ReloadSlots(m_code->GetLiveInMask(0));
 	}
 	m_uc.j(InstrLabel(0));
 
@@ -391,7 +391,7 @@ void CJITCodeGen::EmitDirectEntry()
 
 bool CJITCodeGen::EmitCall(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const asDWORD *bc = instr.bc;
 
 	switch( instr.op )
@@ -467,7 +467,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			// and stack pointer need to be written back
 			const SJITContextLayout &layout = JIT_GetContextLayout();
 			int popSize = asBC_WORDARG0(bc);
-			bool vr = m_code.RetReadsVR();
+			bool vr = m_code->RetReadsVR();
 
 			// Pop the call state like asCContext::PopCallState, unless the function
 			// was called by the application or as a nested call, which finishes the
@@ -525,7 +525,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			if( vr )
 				SyncVR();
 			m_uc.bind(finished);
-			if( m_code.GetDirtyMask(idx) & JIT_FRAME_BIT )
+			if( m_code->GetDirtyMask(idx) & JIT_FRAME_BIT )
 				StoreFrame();
 			SyncStack();
 			Gp status = m_uc.new_gp32();
@@ -563,8 +563,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 //                         measured against CallSystemFunction before adding the code.
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	asCScriptEngine *engine = m_code.GetFunction()->engine;
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	asCScriptEngine *engine = m_code->GetFunction()->engine;
 	if( funcId < 0 || asUINT(funcId) >= engine->scriptFunctions.GetLength() )
 		return false;
 
@@ -754,7 +754,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// The function may raise a script exception, suspend the context, or
 	// inspect the variables through the debug interface, so the VM registers
 	// must be up to date. The value register isn't needed until the slow path
-	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
 	SetPC(instr.pos);
 
@@ -830,7 +830,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Pop the arguments and store the return value like the VM does, except
 	// that the value register is left alone if it isn't read afterwards
 	PopStack(popSize * 4);
-	bool vrLive = m_code.IsVRLiveAfter(idx);
+	bool vrLive = m_code->IsVRLiveAfter(idx);
 	if( retOnStack )
 	{
 		switch( retKind )
@@ -937,7 +937,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 // apply, and any return value is ignored. Returns false if the engine must call it
 bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 {
-	asCScriptEngine *engine = m_code.GetFunction()->engine;
+	asCScriptEngine *engine = m_code->GetFunction()->engine;
 	if( !m_options.directSystemCalls || funcId <= 0 || asUINT(funcId) >= engine->scriptFunctions.GetLength() )
 		return false;
 
@@ -1013,7 +1013,7 @@ void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
 
 bool CJITCodeGen::EmitObjectOp(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
 

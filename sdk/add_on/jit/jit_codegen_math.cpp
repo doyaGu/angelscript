@@ -76,7 +76,7 @@ static UniCondition MakeCond(ERelation rel, bool isUnsigned, const Gp &a, const 
 
 bool CJITCodeGen::EmitIntMath(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
 	int a1 = asBC_SWORDARG1(bc);
@@ -380,7 +380,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 // exception when the instruction is re-executed after bailing out
 void CJITCodeGen::EmitDivMod(asUINT idx, bool is64, bool isSigned, bool isMod)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	int a0 = asBC_SWORDARG0(instr.bc);
 	int a1 = asBC_SWORDARG1(instr.bc);
 	int a2 = asBC_SWORDARG2(instr.bc);
@@ -442,7 +442,7 @@ void CJITCodeGen::EmitDivMod(asUINT idx, bool is64, bool isSigned, bool isMod)
 
 bool CJITCodeGen::EmitFloatMath(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
 	int a1 = asBC_SWORDARG1(bc);
@@ -829,7 +829,7 @@ void CJITCodeGen::EmitFloatTest(const Gp &dst, asEBCInstr test, const Vec &a, co
 
 bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 {
-	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
 	const SJITInstr &instr = instrs[idx];
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
@@ -993,7 +993,7 @@ bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 
 bool CJITCodeGen::EmitConversion(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
 	int a1 = asBC_SWORDARG1(bc);

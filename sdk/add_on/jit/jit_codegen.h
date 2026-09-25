@@ -72,6 +72,27 @@ protected:
 		Vec  vec;
 	};
 
+	// The code generation state of a function: the one being compiled, which is
+	// frame 0, or one inlined into it. The members for the frame being emitted,
+	// m_code, m_cached, m_cachedIndex, m_labels, and m_frameBase, are swapped in
+	// by SwitchFrame
+	struct SFrame
+	{
+		const CJITByteCode       *code;
+		int                       base;  // dwords from the frame pointer down to the frame of the function
+		std::vector<SCachedSlot>  cached;
+		std::map<int, asUINT>     cachedIndex;
+		std::vector<Label>        labels;
+	};
+
+	// A bail stub to emit after the body
+	struct SBail
+	{
+		Label  label;
+		asUINT idx;
+		int    frame;
+	};
+
 	// A registered behaviour that takes nothing but the object, e.g. AddRef or
 	// Release, called directly with its native calling convention
 	struct SDirectBehaviour
@@ -93,6 +114,11 @@ protected:
 	void SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount);
 	void CopyLiveArgs();
 	bool IsLiveThrough(const asmjit::Reg &reg) const;
+
+	// Emits the instructions of the frame in bytecode order and notes those that
+	// call functions in calls. Sets m_failed if one isn't supported
+	void EmitBody(std::vector<bool> &calls);
+	void SwitchFrame(int frame);
 
 	// Emits one instruction. Returns false if the instruction isn't supported
 	bool EmitInstruction(asUINT idx);
@@ -233,7 +259,7 @@ protected:
 	bool Is64Bit() const { return m_uc.is_64bit(); }
 
 	asmjit::ujit::UniCompiler &m_uc;
-	const CJITByteCode        &m_code;
+	const CJITByteCode        *m_code;      // of the frame being emitted
 	SJITCodeGenOptions         m_options;
 	asmjit::FuncNode          *m_func;
 
@@ -253,11 +279,14 @@ protected:
 	Mem  m_vrAddr;      // the address left to the next instruction by SetVRAddr
 	bool m_vrAddrValid;
 
+	std::vector<SFrame>        m_frames;
+	int                        m_frame;        // the frame being emitted
+	int                        m_frameBase;    // its base, see SFrame
 	std::vector<SCachedSlot>   m_cached;
 	std::map<int, asUINT>      m_cachedIndex;
 	std::vector<Label>         m_labels;       // per instruction, valid for block starts
 	std::vector<Label>         m_entryLabels;  // per entry
-	std::vector<std::pair<Label, asUINT> > m_bails;  // bail stubs to emit
+	std::vector<SBail>         m_bails;        // bail stubs to emit
 	std::vector<std::pair<asmjit::BaseNode*, asmjit::BaseNode*> > m_cold;  // first and last nodes of the cold ranges
 	Label                      m_bailCommon;
 	Label                      m_leave;        // returns 1, i.e. the VM takes over

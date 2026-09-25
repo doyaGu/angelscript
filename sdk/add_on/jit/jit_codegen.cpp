@@ -17,8 +17,14 @@ using namespace asmjit::ujit;
 static const int PTR_BYTES = AS_PTR_SIZE * 4;
 
 CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCodeGenOptions &options) :
-	m_uc(uc), m_code(code), m_options(options)
+	m_uc(uc), m_code(&code), m_options(options)
 {
+	SFrame frame;
+	frame.code = &code;
+	frame.base = 0;
+	m_frames.push_back(frame);
+	m_frame      = 0;
+	m_frameBase  = 0;
 	m_func       = 0;
 	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
@@ -36,8 +42,8 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 
 bool CJITCodeGen::Generate()
 {
-	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
-	const std::vector<asUINT> &entries = m_code.GetEntries();
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+	const std::vector<asUINT> &entries = m_code->GetEntries();
 
 	EmitPrologue();
 
@@ -46,26 +52,6 @@ bool CJITCodeGen::Generate()
 	for( asUINT n = 0; n < instrs.size(); n++ )
 		if( instrs[n].flags & JIT_INSTR_BLOCK_START )
 			m_labels[n] = m_uc.new_label();
-
-	// The heads of the innermost loops, i.e. the targets of backward branches with no
-	// other loop head up to the branch, start a cache line, so that the loops take up
-	// as few as possible
-	std::vector<bool> alignHead(instrs.size());
-	{
-		std::vector<bool> isHead(instrs.size());
-		for( asUINT n = 0; n < instrs.size(); n++ )
-			if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
-				isHead[instrs[n].target] = true;
-		std::vector<asUINT> headsBefore(instrs.size() + 1);
-		for( asUINT n = 0; n < instrs.size(); n++ )
-			headsBefore[n + 1] = headsBefore[n] + (isHead[n] ? 1 : 0);
-		for( asUINT n = 0; n < instrs.size(); n++ )
-		{
-			int t = instrs[n].target;
-			if( t >= 0 && asUINT(t) <= n && headsBefore[n + 1] == headsBefore[t + 1] )
-				alignHead[t] = true;
-		}
-	}
 
 	m_entryLabels.resize(entries.size());
 	for( asUINT n = 0; n < entries.size(); n++ )
@@ -129,8 +115,82 @@ bool CJITCodeGen::Generate()
 #endif
 	EmitEntryDispatch(0, asUINT(entries.size()) - 1);
 
-	// The body in bytecode order. Notes the instructions that call functions
+	// The body. Notes the instructions that call functions
 	std::vector<bool> calls(instrs.size());
+	EmitBody(calls);
+
+	if( m_failed )
+		return false;
+
+	// Callee-saved registers must be saved and restored on each entry, which only
+	// pays off for the registers used all through the function if calls are made
+	// repeatedly, i.e. in loops. Short functions that are called often, like
+	// recursive ones, get slower otherwise. The cached variables read after the calls
+	// in loops would be saved and reloaded around each call too
+	std::vector<int> loopDepth(instrs.size() + 1);
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+		{
+			loopDepth[instrs[n].target]++;
+			loopDepth[n + 1]--;
+		}
+	bool callsInLoop = false;
+	asUINT liveAcrossCalls = 0;
+	int depth = 0;
+	for( asUINT n = 0; n < instrs.size(); n++ )
+	{
+		depth += loopDepth[n];
+		if( depth > 0 && calls[n] )
+		{
+			callsInLoop = true;
+			liveAcrossCalls |= m_code->GetLiveAfterMask(n);
+		}
+	}
+
+	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
+	Leave();
+	EmitColdCode();
+
+	m_uc.bind(direct);
+	EmitDirectEntry();
+
+	EmitEntryStubs();
+	EmitBailStubs();
+
+	m_uc.bind(m_leave);
+	Gp one = m_uc.new_gp32();
+	m_uc.mov(one, Imm(1));
+	m_uc.ret(one);
+
+	m_uc.end_func();
+	if( callsInLoop )
+		AssignHomeRegs(liveAcrossCalls);
+	return true;
+}
+
+void CJITCodeGen::EmitBody(std::vector<bool> &calls)
+{
+	// The heads of the innermost loops, i.e. the targets of backward branches with no
+	// other loop head up to the branch, start a cache line, so that the loops take up
+	// as few as possible
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+	std::vector<bool> alignHead(instrs.size());
+	{
+		std::vector<bool> isHead(instrs.size());
+		for( asUINT n = 0; n < instrs.size(); n++ )
+			if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+				isHead[instrs[n].target] = true;
+		std::vector<asUINT> headsBefore(instrs.size() + 1);
+		for( asUINT n = 0; n < instrs.size(); n++ )
+			headsBefore[n + 1] = headsBefore[n] + (isHead[n] ? 1 : 0);
+		for( asUINT n = 0; n < instrs.size(); n++ )
+		{
+			int t = instrs[n].target;
+			if( t >= 0 && asUINT(t) <= n && headsBefore[n + 1] == headsBefore[t + 1] )
+				alignHead[t] = true;
+		}
+	}
+
 	asUINT idx = 0;
 	while( idx < instrs.size() && !m_failed )
 	{
@@ -156,7 +216,7 @@ bool CJITCodeGen::Generate()
 			m_uc.commentf("%d %s", instr.pos, asBCInfo[instr.op].name);
 #endif
 		// Variables that the loop entered next doesn't modify are stored before it
-		StoreDirtySlots(m_code.GetStoresBefore(idx));
+		StoreDirtySlots(m_code->GetStoresBefore(idx));
 
 		BaseNode *start = m_uc.cc->cursor();
 		if( instr.flags & JIT_INSTR_BAIL )
@@ -203,8 +263,8 @@ bool CJITCodeGen::Generate()
 			        m_spOffset == StackOffset(idx + consumed) );
 
 			// The stores planned for the second instruction of a group would be missed
-			assert( consumed == 1 || m_code.GetStoresBefore(idx + 1) == 0 );
-			StoreDirtySlots(m_code.GetStoresAfter(idx + consumed - 1));
+			assert( consumed == 1 || m_code->GetStoresBefore(idx + 1) == 0 );
+			StoreDirtySlots(m_code->GetStoresAfter(idx + consumed - 1));
 
 			if( m_options.syncEveryInstr && !CJITByteCode::IsTerminator(instrs[idx + consumed - 1].op) && idx + consumed < instrs.size() )
 				SyncAllSlots(instrs[idx + consumed].pos);
@@ -219,53 +279,23 @@ bool CJITCodeGen::Generate()
 		idx += consumed;
 	}
 
-	if( m_failed )
-		return false;
+}
 
-	// Callee-saved registers must be saved and restored on each entry, which only
-	// pays off for the registers used all through the function if calls are made
-	// repeatedly, i.e. in loops. Short functions that are called often, like
-	// recursive ones, get slower otherwise. The cached variables read after the calls
-	// in loops would be saved and reloaded around each call too
-	std::vector<int> loopDepth(instrs.size() + 1);
-	for( asUINT n = 0; n < instrs.size(); n++ )
-		if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
-		{
-			loopDepth[instrs[n].target]++;
-			loopDepth[n + 1]--;
-		}
-	bool callsInLoop = false;
-	asUINT liveAcrossCalls = 0;
-	int depth = 0;
-	for( asUINT n = 0; n < instrs.size(); n++ )
-	{
-		depth += loopDepth[n];
-		if( depth > 0 && calls[n] )
-		{
-			callsInLoop = true;
-			liveAcrossCalls |= m_code.GetLiveAfterMask(n);
-		}
-	}
+// Makes the frame the one being emitted
+void CJITCodeGen::SwitchFrame(int frame)
+{
+	SFrame &from = m_frames[m_frame];
+	from.cached.swap(m_cached);
+	from.cachedIndex.swap(m_cachedIndex);
+	from.labels.swap(m_labels);
 
-	// Valid bytecode always ends with a RET, but make sure nothing falls into the stubs
-	Leave();
-	EmitColdCode();
-
-	m_uc.bind(direct);
-	EmitDirectEntry();
-
-	EmitEntryStubs();
-	EmitBailStubs();
-
-	m_uc.bind(m_leave);
-	Gp one = m_uc.new_gp32();
-	m_uc.mov(one, Imm(1));
-	m_uc.ret(one);
-
-	m_uc.end_func();
-	if( callsInLoop )
-		AssignHomeRegs(liveAcrossCalls);
-	return true;
+	SFrame &to = m_frames[frame];
+	to.cached.swap(m_cached);
+	to.cachedIndex.swap(m_cachedIndex);
+	to.labels.swap(m_labels);
+	m_code = to.code;
+	m_frameBase = to.base;
+	m_frame = frame;
 }
 
 // The registers pointer, the frame and stack pointers, and the call limit are used all
@@ -297,7 +327,7 @@ void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
 void CJITCodeGen::SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount)
 {
 	const CallConv &conv = m_func->detail().call_conv();
-	const std::vector<SJITSlot> &slots = m_code.GetSlots();
+	const std::vector<SJITSlot> &slots = m_code->GetSlots();
 	asUINT gpNext = 0, vecNext = 0;
 	for( ;; )
 	{
@@ -383,7 +413,7 @@ bool CJITCodeGen::IsLiveThrough(const Reg &reg) const
 
 bool CJITCodeGen::EmitInstruction(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 
 	switch( instr.op )
 	{
@@ -637,7 +667,7 @@ void CJITCodeGen::EmitPrologue()
 	}
 
 	// The call limit is only needed for the calls of script functions
-	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
 	for( asUINT n = 0; n < instrs.size() && !m_options.noScriptCalls; n++ )
 	{
 		asEBCInstr op = instrs[n].op;
@@ -667,7 +697,7 @@ void CJITCodeGen::EmitPrologue()
 	m_bailPC = m_uc.new_gp_ptr("bailPC");
 
 	// Registers for the cached variables. They are loaded by the entry stubs
-	const std::vector<SJITSlot> &slots = m_code.GetSlots();
+	const std::vector<SJITSlot> &slots = m_code->GetSlots();
 	for( asUINT n = 0; n < slots.size(); n++ )
 	{
 		if( slots[n].cacheKind == JIT_SLOT_NONE )
@@ -697,14 +727,14 @@ bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 {
 	if( m_options.syncEveryInstr )
 		return m_vrInReg || !m_cached.empty();
-	asUINT entry = m_code.GetEntries()[n];
-	const SJITBlock &block = m_code.GetBlocks()[m_code.GetInstructions()[entry].block];
-	return (m_vrInReg && block.vrLiveIn) || m_code.GetLiveInMask(entry) != 0;
+	asUINT entry = m_code->GetEntries()[n];
+	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
+	return (m_vrInReg && block.vrLiveIn) || m_code->GetLiveInMask(entry) != 0;
 }
 
 Label CJITCodeGen::EntryTarget(asUINT n)
 {
-	return EntryNeedsStub(n) ? m_entryLabels[n] : InstrLabel(m_code.GetEntries()[n]);
+	return EntryNeedsStub(n) ? m_entryLabels[n] : InstrLabel(m_code->GetEntries()[n]);
 }
 
 // Binary search on the 1-based entry index in jitArg. The lowest entry comes
@@ -713,8 +743,8 @@ void CJITCodeGen::EmitEntryDispatch(asUINT lo, asUINT hi)
 {
 	if( lo == hi )
 	{
-		const SJITInstr &first = m_code.GetInstructions()[0];
-		if( lo != 0 || EntryNeedsStub(0) || m_code.GetEntries()[0] != 0 || (first.flags & JIT_INSTR_DEAD) )
+		const SJITInstr &first = m_code->GetInstructions()[0];
+		if( lo != 0 || EntryNeedsStub(0) || m_code->GetEntries()[0] != 0 || (first.flags & JIT_INSTR_DEAD) )
 			m_uc.j(EntryTarget(lo));
 		return;
 	}
@@ -734,9 +764,9 @@ void CJITCodeGen::EmitEntryDispatch(asUINT lo, asUINT hi)
 
 void CJITCodeGen::EmitEntryStubs()
 {
-	const std::vector<asUINT> &entries = m_code.GetEntries();
-	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
-	const std::vector<SJITBlock> &blocks = m_code.GetBlocks();
+	const std::vector<asUINT> &entries = m_code->GetEntries();
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+	const std::vector<SJITBlock> &blocks = m_code->GetBlocks();
 	for( asUINT n = 0; n < entries.size(); n++ )
 	{
 		if( !EntryNeedsStub(n) )
@@ -754,7 +784,7 @@ void CJITCodeGen::EmitEntryStubs()
 		{
 			if( block.vrLiveIn )
 				ReloadVR();
-			ReloadSlots(m_code.GetLiveInMask(entries[n]));
+			ReloadSlots(m_code->GetLiveInMask(entries[n]));
 		}
 		m_uc.j(InstrLabel(entries[n]));
 	}
@@ -764,9 +794,11 @@ void CJITCodeGen::EmitBailStubs()
 {
 	for( asUINT n = 0; n < m_bails.size(); n++ )
 	{
-		m_uc.bind(m_bails[n].first);
-		Bail(m_bails[n].second);
+		SwitchFrame(m_bails[n].frame);
+		m_uc.bind(m_bails[n].label);
+		Bail(m_bails[n].idx);
 	}
+	SwitchFrame(0);
 
 	// Common tail: the cached variables and the value register have been stored
 	// by the bail sites, so only the frame, the stack pointer, and the program
@@ -799,7 +831,7 @@ Mem CJITCodeGen::VRMem()
 
 Mem CJITCodeGen::Var(int offset, int byteDisp)
 {
-	return mem_ptr(m_fp, -offset * 4 + byteDisp);
+	return mem_ptr(m_fp, -(offset + m_frameBase) * 4 + byteDisp);
 }
 
 Mem CJITCodeGen::Stack(int dwordOffset)
@@ -811,7 +843,7 @@ Mem CJITCodeGen::Stack(int dwordOffset)
 
 int CJITCodeGen::StackOffset(asUINT idx) const
 {
-	return -int(m_code.GetFunction()->scriptData->variableSpace + m_code.GetStackDepth(idx)) * 4;
+	return -int(m_frameBase + m_code->GetFunction()->scriptData->variableSpace + m_code->GetStackDepth(idx)) * 4;
 }
 
 void CJITCodeGen::PushStack(int bytes)
@@ -1134,10 +1166,10 @@ bool CJITCodeGen::CanFoldVRAddr(asUINT idx) const
 {
 	// The next instruction must be emitted right after this one without anything
 	// in between that may give the value register to the VM
-	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
 	if( m_options.syncEveryInstr || idx + 1 >= instrs.size() ||
 		(instrs[idx + 1].flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_SKIP | JIT_INSTR_DEAD)) ||
-		m_code.IsVRLiveAfter(idx + 1) )
+		m_code->IsVRLiveAfter(idx + 1) )
 		return false;
 
 	switch( instrs[idx + 1].op )
@@ -1185,7 +1217,7 @@ Mem CJITCodeGen::VRAddr()
 
 void CJITCodeGen::SetPC(asUINT pos)
 {
-	Gp t = PtrConst(asPWORD(m_code.GetByteCode() + pos));
+	Gp t = PtrConst(asPWORD(m_code->GetByteCode() + pos));
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), t);
 }
 
@@ -1216,7 +1248,7 @@ void CJITCodeGen::ReloadStackAfter(asUINT idx)
 void CJITCodeGen::StoreFrame()
 {
 	m_uc.store(RegsField(offsetof(asSVMRegisters, stackFramePointer)), m_fp);
-	m_uc.store(ContextField(JIT_GetContextLayout().currentFunction), PtrConst(asPWORD(m_code.GetFunction())));
+	m_uc.store(ContextField(JIT_GetContextLayout().currentFunction), PtrConst(asPWORD(m_code->GetFunction())));
 }
 
 void CJITCodeGen::StoreCachedSlots()
@@ -1269,7 +1301,7 @@ void CJITCodeGen::StoreDirtySlots(asUINT mask)
 		StoreFrame();
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
-		int bit = m_code.GetCacheBit(m_cached[n].offset);
+		int bit = m_code->GetCacheBit(m_cached[n].offset);
 		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
 			StoreCachedSlot(m_cached[n].offset);
 	}
@@ -1280,7 +1312,7 @@ void CJITCodeGen::ReloadSlots(asUINT mask)
 {
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
-		int bit = m_code.GetCacheBit(m_cached[n].offset);
+		int bit = m_code->GetCacheBit(m_cached[n].offset);
 		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
 			ReloadCachedSlot(m_cached[n].offset);
 	}
@@ -1290,10 +1322,10 @@ void CJITCodeGen::ReloadSlots(asUINT mask)
 // isn't kept alive for this, e.g. across calls returning nothing
 void CJITCodeGen::SyncAll(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
-	if( m_code.IsVRLiveBefore(idx) )
+	if( m_code->IsVRLiveBefore(idx) )
 		SyncVR();
 	SetPC(instr.pos);
 }
@@ -1301,8 +1333,8 @@ void CJITCodeGen::SyncAll(asUINT idx)
 // Calls always clobber the value register, so it doesn't have to be written back
 void CJITCodeGen::SyncForCall(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	StoreDirtySlots(m_code.GetDirtyMask(idx));
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
 	SetPC(instr.pos);
 }
@@ -1319,7 +1351,7 @@ void CJITCodeGen::SyncAllSlots(asUINT pos)
 void CJITCodeGen::ReloadAll(asUINT idx)
 {
 	ReloadStack();
-	if( m_code.IsVRLiveAfter(idx) )
+	if( m_code->IsVRLiveAfter(idx) )
 		ReloadVR();
 	ReloadLiveSlots(idx);
 }
@@ -1331,7 +1363,7 @@ void CJITCodeGen::ReloadLiveSlots(asUINT idx)
 	if( m_options.syncEveryInstr )
 		ReloadCachedSlots();
 	else
-		ReloadSlots(m_code.GetLiveAfterMask(idx));
+		ReloadSlots(m_code->GetLiveAfterMask(idx));
 }
 
 //------------------------------------------------------------------------
@@ -1347,9 +1379,9 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 // the common tail of the bail sites
 void CJITCodeGen::Bail(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
-	StoreDirtySlots(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
-	if( m_code.IsVRLiveBefore(idx) )
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+	if( m_code->IsVRLiveBefore(idx) )
 		SyncVR();
 	if( m_staticStack )
 	{
@@ -1364,9 +1396,12 @@ void CJITCodeGen::Bail(asUINT idx)
 // Label to a cold stub that bails out at the instruction
 Label CJITCodeGen::BailLabel(asUINT idx)
 {
-	Label l = m_uc.new_label();
-	m_bails.push_back(std::pair<Label, asUINT>(l, idx));
-	return l;
+	SBail bail;
+	bail.label = m_uc.new_label();
+	bail.idx   = idx;
+	bail.frame = m_frame;
+	m_bails.push_back(bail);
+	return bail.label;
 }
 
 // Returns to the VM after a helper has updated the VM registers
@@ -1552,6 +1587,8 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			int w = asBC_WORDARG0(bc);
 			Gp off = m_uc.new_gp_ptr();
 			m_uc.load(off, Stack(w));
+			if( m_frameBase )
+				m_uc.add(off, off, Imm(m_frameBase));
 			m_uc.shl(off, off, Imm(2));
 			Gp v = m_uc.new_gp_ptr();
 			m_uc.sub(v, m_fp, off);
@@ -1567,6 +1604,8 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			int w = asBC_WORDARG0(bc);
 			Gp off = m_uc.new_gp_ptr();
 			m_uc.load(off, Stack(w));
+			if( m_frameBase )
+				m_uc.add(off, off, Imm(m_frameBase));
 			m_uc.shl(off, off, Imm(2));
 			Gp v = m_uc.new_gp_ptr();
 			m_uc.sub(v, m_fp, off);
@@ -1581,6 +1620,8 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			int w = asBC_WORDARG0(bc);
 			Gp off = m_uc.new_gp_ptr();
 			m_uc.load(off, Stack(w));
+			if( m_frameBase )
+				m_uc.add(off, off, Imm(m_frameBase));
 			m_uc.shl(off, off, Imm(2));
 			Gp v = m_uc.new_gp_ptr();
 			m_uc.sub(v, m_fp, off);
@@ -1635,7 +1676,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 	const asDWORD *bc = instr.bc;
 	int a0 = asBC_SWORDARG0(bc);
 	int a1 = asBC_SWORDARG1(bc);
-	int idx = m_code.FindInstruction(instr.pos);
+	asUINT idx = asUINT(&instr - &m_code->GetInstructions()[0]);
 
 	switch( instr.op )
 	{
@@ -1999,7 +2040,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 
 bool CJITCodeGen::EmitBranch(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 
 	if( instr.op == asBC_JMP )
 	{
@@ -2021,7 +2062,7 @@ bool CJITCodeGen::EmitBranch(asUINT idx)
 		//                         the jump needs a JumpAnnotation (new_jump_annotation
 		//                         and add_label) listing the case labels
 		Gp v = Load32(asBC_SWORDARG0(instr.bc));
-		const std::vector<int> &targets = m_code.GetSwitchTargets(idx);
+		const std::vector<int> &targets = m_code->GetSwitchTargets(idx);
 
 		struct SRange
 		{
@@ -2085,7 +2126,7 @@ bool CJITCodeGen::EmitBranch(asUINT idx)
 
 bool CJITCodeGen::EmitMisc(asUINT idx)
 {
-	const SJITInstr &instr = m_code.GetInstructions()[idx];
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
 
 	switch( instr.op )
 	{
