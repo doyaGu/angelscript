@@ -60,6 +60,10 @@ public:
   void    SetMaxFunctionSize(asUINT sizeInDWords);
 
   SJITStatistics GetStatistics() const;
+
+  // Faster versions of the methods of the context for calling script functions
+  int Prepare(asIScriptContext *ctx, asIScriptFunction *func);
+  int Execute(asIScriptContext *ctx);
 };
 \endcode
 
@@ -105,6 +109,24 @@ AS_NO_EXCEPTIONS, or when the \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is
 set, in which case a C++ exception thrown by a registered function that was
 called directly terminates the application.
 \ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off.
+
+The application can call the script functions through \ref CJITCompiler::Prepare
+and \ref CJITCompiler::Execute instead of the methods of the context with the same
+names. They have the same effects, but Execute enters the native code of the
+function directly instead of through the VM, and Prepare only resets what the
+previous execution has changed. This makes the calls of short script functions
+from the application about twice as fast. The arguments and the return value
+are set and read with the methods of the context as usual, and the methods of the
+compiler and of the context can be mixed. Execute leaves the execution to the
+context if the engine uses another JIT compiler, if the function isn't compiled,
+or if a line callback is set.
+
+\code
+jit->Prepare(ctx, func);
+ctx->SetArgDWord(0, 42);
+if( jit->Execute(ctx) == asEXECUTION_FINISHED )
+  result = ctx->GetReturnDWord();
+\endcode
 
 Note that the JIT functions are compiled when the module is built, so the build
 takes a little longer. For scripts that are compiled often but run rarely a
