@@ -18,6 +18,7 @@ struct SJITStatistics
 	asUINT functionsReleased;    // compiled functions released again
 	asUINT instructionsCompiled; // bytecode instructions translated to native code
 	asUINT instructionsBailed;   // bytecode instructions that always return control to the VM
+	asUINT callsInlined;         // script calls whose function was compiled in place, see SetMaxInlineSize
 	size_t codeSize;             // total size of the native code currently held
 };
 
@@ -55,7 +56,10 @@ public:
 		JIT_DIRECT_SYSTEM_CALLS = 0x20,
 
 		// Never call registered functions directly
-		JIT_NO_DIRECT_SYSTEM_CALLS = 0x40
+		JIT_NO_DIRECT_SYSTEM_CALLS = 0x40,
+
+		// Always call the script functions instead of compiling small ones in place
+		JIT_NO_INLINE = 0x80
 	};
 
 	CJITCompiler(asDWORD flags = 0);
@@ -89,6 +93,13 @@ public:
 
 	// Largest bytecode size (in dwords) that will be compiled
 	void SetMaxFunctionSize(asUINT sizeInDWords);
+
+	// Largest bytecode size (in dwords) of the script functions that are compiled
+	// in place of their calls, if they are called directly and call nothing
+	// themselves. Each function inlines at most 16 times the size. The functions
+	// are still compiled on their own for the other calls. Default is 64, 0 disables
+	// inlining like JIT_NO_INLINE
+	void SetMaxInlineSize(asUINT sizeInDWords);
 
 	SJITStatistics GetStatistics() const;
 

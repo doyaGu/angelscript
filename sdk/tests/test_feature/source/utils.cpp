@@ -548,8 +548,8 @@ void ReleaseJitCompiler()
 	if( g_jit )
 	{
 		SJITStatistics stats = g_jit->GetStatistics();
-		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails\n",
-			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed);
+		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined\n",
+			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined);
 		delete g_jit;
 		g_jit = 0;
 	}

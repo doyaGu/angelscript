@@ -61,6 +61,7 @@ struct CJITCompiler::SImpl
 	JITCompileFilterFunc_t filter;
 	void                  *filterParam;
 	asUINT                 maxFunctionSize;
+	asUINT                 maxInlineSize;
 	asUINT                 maxCachedSlots;
 	asUINT                 maxNativeCallDepth;
 	bool                   bailOps[asBC_MAXBYTECODE];
@@ -76,6 +77,7 @@ CJITCompiler::CJITCompiler(asDWORD flags)
 	m_impl->filter          = 0;
 	m_impl->filterParam     = 0;
 	m_impl->maxFunctionSize = 100000;
+	m_impl->maxInlineSize   = 64;
 	m_impl->maxCachedSlots  = 24;
 	m_impl->maxNativeCallDepth = 256;
 	memset(m_impl->bailOps, 0, sizeof(m_impl->bailOps));
@@ -137,6 +139,11 @@ void CJITCompiler::SetBailInstructions(const asEBCInstr *instructions, asUINT co
 void CJITCompiler::SetMaxFunctionSize(asUINT sizeInDWords)
 {
 	m_impl->maxFunctionSize = sizeInDWords;
+}
+
+void CJITCompiler::SetMaxInlineSize(asUINT sizeInDWords)
+{
+	m_impl->maxInlineSize = sizeInDWords;
 }
 
 SJITStatistics CJITCompiler::GetStatistics() const
@@ -212,6 +219,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		default:
 			break;
 		}
+		if( instr.flags & JIT_INSTR_INLINE )
+			fprintf(file, "   ; inlined");
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )
@@ -268,7 +277,12 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	}
 	// The dirty masks hold one bit per cached slot, and the bit of the frame
 	asUINT maxCachedSlots = m_impl->maxCachedSlots < 31 ? m_impl->maxCachedSlots : 31;
-	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots);
+	// The functions left to the compile filter are left to their calls too
+	SJITInlineOptions inlining;
+	inlining.maxSize     = (m_impl->flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : m_impl->maxInlineSize;
+	inlining.filter      = m_impl->filter;
+	inlining.filterParam = m_impl->filterParam;
+	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots, &inlining);
 	code.SetBailInstructions(m_impl->bailOps);
 
 	bool log = (m_impl->flags & JIT_LOG) && m_impl->logFile &&
@@ -352,6 +366,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 			m_impl->stats.functionsCompiled++;
 			m_impl->stats.instructionsCompiled += gen.GetInstructionCount();
 			m_impl->stats.instructionsBailed   += gen.GetBailCount();
+			m_impl->stats.callsInlined         += gen.GetInlinedCallCount();
 			m_impl->stats.codeSize             += holder.code_size();
 		}
 	}
