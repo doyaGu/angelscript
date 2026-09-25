@@ -511,6 +511,8 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 				}
 				else
 				{
+					// The bits are tested in memory, which must hold the cached value
+					StoreCachedSlot(a2);
 					Gp lo = m_uc.new_gp32();
 					Gp hi = m_uc.new_gp32();
 					m_uc.load_u32(lo, Var(a2));
@@ -563,6 +565,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			}
 			else
 			{
+				StoreCachedSlot(a2);
 				Gp lo = m_uc.new_gp32();
 				Gp hi = m_uc.new_gp32();
 				m_uc.load_u32(lo, Var(a2));

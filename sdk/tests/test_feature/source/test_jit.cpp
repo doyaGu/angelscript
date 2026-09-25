@@ -221,7 +221,10 @@ static bool TestExceptions(asIScriptEngine *engine)
 		"  int r = 0;                                                      \n"
 		"  try { r = divi(10, b) + 1; } catch { r = 77; }                  \n"
 		"  return r;                                                       \n"
-		"}                                                                 \n";
+		"}                                                                 \n"
+		// The divisor is zero in a register but not in memory
+		"double divz(double a, double b) { double d = 5; d -= b; return a / d; } \n"
+		"double modz(double a, double b) { double d = 5; d -= b; return a % d; } \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("test", script);
@@ -241,6 +244,8 @@ static bool TestExceptions(asIScriptEngine *engine)
 		{ "uint divu(uint, uint)",      10, 0, "Divide by zero", 5 },
 		{ "float divf(float, float)",   0, 0, "Divide by zero", 6 },
 		{ "double modd(double, double)", 0, 0, "Divide by zero", 7 },
+		{ "double divz(double, double)", 0x3FF0000000000000ULL, 0x4014000000000000ULL, "Divide by zero", 20 },
+		{ "double modz(double, double)", 0x3FF0000000000000ULL, 0x4014000000000000ULL, "Divide by zero", 21 },
 		{ "int nullobj(Obj@)",          0, 0, "Null pointer access", 8 },
 		{ "int powi(int, int)",         1000, 1000, "Overflow in exponent operation", 9 },
 	};
