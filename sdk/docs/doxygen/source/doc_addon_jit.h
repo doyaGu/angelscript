@@ -164,45 +164,49 @@ the functions that matter.
 
 The table shows the time in seconds for the tests in the test_performance project
 when run with the interpreter, with the JIT compiler without direct system calls
-(\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS), and with the JIT compiler with
-the default settings. Measured on an Intel Core i9-14900K with the 64bit release
-build from Visual Studio 2022. The tests Call and Call2 measure calls from the
-application into the script engine, where the JIT compiler only adds the cost of
-entering the native code. Calls between script functions, including virtual and
-interface methods, are made natively, which is what speeds up Fib, Intf, and Mthd.
+(\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS), with the JIT compiler with the
+default settings, and with the JIT compiler and the pooled memory functions.
+Measured on an Intel Core i9-14900K with the 64bit release build from Visual
+Studio 2022. With the JIT compiler the tests Call and Call2 call the script
+functions through \ref CJITCompiler::Prepare and \ref CJITCompiler::Execute. Calls
+between script functions are made natively, which is what speeds up Fib, and the
+methods that Intf and Mthd call are compiled in place. RetObj.1, RetObj.2, and
+Array.1 spend much of their time allocating the objects they create, which the
+pooled memory functions speed up.
 
 <pre>
-Test           VM       No direct  JIT
-Basic          0.240    0.106      0.047
-Basic2         0.092    0.005      0.005
-Call           0.275    0.297      0.298
-Call2          0.352    0.385      0.380
-Fib            0.349    0.127      0.121
-Int            0.050    0.023      0.010
-Intf           0.122    0.042      0.041
-Mthd           0.118    0.037      0.037
-String         0.232    0.215      0.140
-String2        0.154    0.123      0.079
-StringPooled   0.158    0.133      0.061
-ThisProp       0.220    0.024      0.024
-Vector3        0.089    0.075      0.015
-Assign.1       0.113    0.008      0.008
-Assign.2       0.245    0.017      0.017
-Assign.3       0.165    0.014      0.013
-Assign.4       0.203    0.018      0.018
-Assign.5       0.204    0.018      0.018
-Array.1        0.305    0.199      0.155
-Array.2        0.145    0.095      0.047
-GlobalVar      0.087    0.045      0.025
-ClassProp      0.139    0.054      0.033
-RetObj.1       0.315    0.253      0.251
-RetObj.2       0.194    0.158      0.158
-RetObj.3       0.075    0.036      0.036
+Test           VM       No direct  JIT      JIT+pool
+Basic          0.252    0.085      0.027    0.027
+Basic2         0.092    0.005      0.005    0.005
+Call           0.278    0.120      0.123    0.115
+Call2          0.368    0.194      0.195    0.182
+Fib            0.370    0.087      0.085    0.084
+Int            0.055    0.021      0.006    0.006
+Intf           0.124    0.006      0.006    0.006
+Mthd           0.123    0.006      0.006    0.006
+String         0.229    0.212      0.131    0.121
+String2        0.152    0.120      0.065    0.063
+StringPooled   0.155    0.126      0.044    0.042
+ThisProp       0.214    0.017      0.017    0.017
+Vector3        0.089    0.075      0.013    0.013
+Assign.1       0.114    0.008      0.008    0.008
+Assign.2       0.241    0.008      0.008    0.008
+Assign.3       0.170    0.011      0.010    0.011
+Assign.4       0.207    0.016      0.016    0.015
+Assign.5       0.208    0.016      0.016    0.015
+Array.1        0.310    0.182      0.148    0.095
+Array.2        0.148    0.070      0.032    0.031
+GlobalVar      0.089    0.034      0.016    0.015
+ClassProp      0.140    0.039      0.018    0.018
+RetObj.1       0.328    0.222      0.230    0.135
+RetObj.2       0.204    0.142      0.144    0.094
+RetObj.3       0.078    0.032      0.032    0.029
 </pre>
 
-The 32bit x86 build gains about as much, except that Call and Call2 are 11 to 14%
-slower than with the interpreter. 64bit integer operations are done by helper
-functions on 32bit hosts.
+The 32bit x86 build gains as much or more, as the interpreter is slower there.
+RetObj.1 for example takes 0.704 seconds with the interpreter, and 0.160 seconds
+with the JIT compiler and the pooled memory functions. 64bit integer operations
+are done by helper functions on 32bit hosts.
 
 \section doc_addon_jit_limits Known limitations
 
