@@ -787,7 +787,7 @@ bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 		return m_vrInReg || !m_cached.empty();
 	asUINT entry = m_code->GetEntries()[n];
 	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
-	return (m_vrInReg && block.vrLiveIn) || m_code->GetLiveInMask(entry) != 0;
+	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0;
 }
 
 Label CJITCodeGen::EntryTarget(asUINT n)
@@ -831,7 +831,7 @@ void CJITCodeGen::EmitEntryStubs()
 			continue;
 		m_uc.bind(m_entryLabels[n]);
 
-		// Only what may be read before being written needs to be loaded
+		// Only what may be read before being written or stored needs to be loaded
 		const SJITBlock &block = blocks[instrs[entries[n]].block];
 		if( m_options.syncEveryInstr )
 		{
@@ -842,7 +842,7 @@ void CJITCodeGen::EmitEntryStubs()
 		{
 			if( block.vrLiveIn )
 				ReloadVR();
-			ReloadSlots(m_code->GetLiveInMask(entries[n]));
+			ReloadSlots(m_code->GetEntryMask(entries[n]));
 		}
 		m_uc.j(InstrLabel(entries[n]));
 	}
@@ -1430,7 +1430,7 @@ void CJITCodeGen::ReloadLiveSlots(asUINT idx)
 	if( m_options.syncEveryInstr )
 		ReloadCachedSlots();
 	else
-		ReloadSlots(m_code->GetLiveAfterMask(idx));
+		ReloadSlots(m_code->GetReloadMask(idx));
 }
 
 //------------------------------------------------------------------------

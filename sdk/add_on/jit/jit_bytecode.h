@@ -146,6 +146,13 @@ public:
 	// being written after the instruction
 	asUINT GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
 
+	// Returns the mask of the register cached variables to load where the VM enters
+	// at the instruction, or after the instruction if the VM may have modified the
+	// variables, e.g. through a debugger. Those that may be stored later are loaded
+	// too, see the implementation
+	asUINT GetEntryMask(asUINT instrIdx) const;
+	asUINT GetReloadMask(asUINT instrIdx) const;
+
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
 	static bool ReturnsInVR(asCScriptFunction *func);

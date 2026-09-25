@@ -740,6 +740,26 @@ static bool LeavesFrameDirty(const SJITInstr &instr, bool staticStack)
 #endif
 }
 
+// The variables that won't be read anymore may still be stored, if they aren't
+// temporary variables, see AnalyseDirtySlots. Where the VM has entered their
+// register hasn't been loaded, and where the VM may have modified them it holds the
+// old value, so they are loaded like the live ones. The VM has them in memory there
+asUINT CJITByteCode::GetEntryMask(asUINT instrIdx) const
+{
+	return m_liveIn[m_instrs[instrIdx].block] | (m_dirty[instrIdx] & ~JIT_FRAME_BIT);
+}
+
+// The sync points store the dirty variables and leave none, but the inlined calls,
+// whose rare path stores them, and SUSPEND leave them dirty
+asUINT CJITByteCode::GetReloadMask(asUINT instrIdx) const
+{
+	const SJITInstr &instr = m_instrs[instrIdx];
+	asUINT mask = m_liveAfter[instrIdx];
+	if( !IsSyncPoint(instr.op) || (instr.flags & JIT_INSTR_INLINE) )
+		mask |= m_dirty[instrIdx] & ~JIT_FRAME_BIT;
+	return mask;
+}
+
 // Only the instructions that can have register cached variables as operands
 // matter here, i.e. those working on primitives. Pointers and objects are never
 // cached, so their instructions don't have to be described

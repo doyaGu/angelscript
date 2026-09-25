@@ -63,7 +63,7 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 		ReloadVR();
 
 	// With a debugger attached the variables may have been modified through the context
-	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code->GetLiveAfterMask(idx)) )
+	if( !m_cached.empty() && (m_options.syncEveryInstr || m_code->GetReloadMask(idx)) )
 	{
 		Gp t = m_uc.new_gp32();
 		m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));

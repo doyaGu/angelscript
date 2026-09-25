@@ -1253,6 +1253,18 @@ namespace Inlining
 			ctx->Suspend();
 	}
 
+	// Modifies the variable of the caller of add like a debugger
+	static void PokeInAdd(asIScriptContext *ctx, void *)
+	{
+		g_lines++;
+		if( std::string(ctx->GetFunction()->GetName()) != "add" )
+			return;
+		int *local = FindVar(ctx, 1, "local");
+		if( local )
+			*local += 100;
+		Dump(ctx);
+	}
+
 	// Starts counting the lines in the middle of the execution
 	static int StartLines(bool start)
 	{
@@ -1403,6 +1415,19 @@ namespace Inlining
 		"  while( n >= -2 )                                                                \n"
 		"    local += acc.ratio2(n--);                                                     \n"
 		"  return local;                                                                   \n"
+		"}                                                                                 \n"
+		// The variables that aren't read anymore are still seen by the VM after it has
+		// entered the function behind an inlined call, or a debugger has modified them
+		"int deadAdd(int n) {                                                              \n"
+		"  int local = n * 7;                                                              \n"
+		"  int r = add(n, 1);                                                              \n"
+		"  return add(r, 2);                                                               \n"
+		"}                                                                                 \n"
+		"int deadLoop(int n) {                                                             \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += deadAdd(i++);                                                            \n"
+		"  return r;                                                                       \n"
 		"}                                                                                 \n";
 
 	// Implements the interface shared with the module of the test
@@ -1411,7 +1436,7 @@ namespace Inlining
 		"class Other : IVal { int get(int a) { return a * 100; } }                         \n"
 		"IVal@ makeOther() { return Other(); }                                             \n";
 
-	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_ADD };
+	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_ADD, POKE_IN_ADD };
 	struct SCase { const char *decl; int arg; EMode mode; };
 	static const SCase cases[] =
 	{
@@ -1446,6 +1471,10 @@ namespace Inlining
 		{ "int methods2(int)",    50, PLAIN },
 		{ "int methods2(int)",    10, COUNT_LINES },
 		{ "int ratioNest(int)",    5, PLAIN },
+		{ "int deadAdd(int)",      5, SUSPEND_IN_ADD },
+		{ "int deadLoop(int)",     3, SUSPEND_IN_ADD },
+		{ "int deadAdd(int)",      5, POKE_IN_ADD },
+		{ "int deadLoop(int)",     3, POKE_IN_ADD },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case
@@ -1481,6 +1510,8 @@ namespace Inlining
 				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
 			else if( cases[n].mode == SUSPEND_IN_ADD )
 				ctx->SetLineCallback(asFUNCTION(SuspendInAdd), 0, asCALL_CDECL);
+			else if( cases[n].mode == POKE_IN_ADD )
+				ctx->SetLineCallback(asFUNCTION(PokeInAdd), 0, asCALL_CDECL);
 			else
 				ctx->ClearLineCallback();
 			ctx->Prepare(func);
