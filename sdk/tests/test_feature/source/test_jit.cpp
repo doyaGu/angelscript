@@ -1320,6 +1320,8 @@ namespace Inlining
 		"  int get(int a) { return v + a; }                                                \n"
 		"  int add(int a) { v += a; return v; }                                            \n"
 		"  int ratio(int a) { int local = v; return local / a; }                           \n"
+		"  int get2(int a) { return get(a) + get(a + 1); }                                 \n"
+		"  int ratio2(int a) { int local = a * 2; return ratio(a) + local; }               \n"
 		"}                                                                                 \n"
 		"class Base { int k = 1; int f(int a) { return a + k; } }                          \n"
 		"class Derived : Base { int f(int a) override { return a * 2 + k; } }              \n"
@@ -1357,6 +1359,48 @@ namespace Inlining
 		"  int local = n;                                                                  \n"
 		"  local += acc.add(n);                                                            \n"
 		"  return n == 0 ? acc.get(local) : deepMethod(n - 1) + local;                     \n"
+		"}                                                                                 \n"
+		// The inlined functions have the functions that they call inlined too
+		"int addSq(int a) { return add(a, sq(a)); }                                        \n"
+		"int inc(int a) { return a + 1; }                                                  \n"
+		"int inc2(int a) { return inc(inc(a)); }                                           \n"
+		"int inc4(int a) { int local = a; local = inc2(a); return inc2(local) + add(local, 1); }\n"
+		"int divIn(int a, int b) { int local = a - b; return div(a, b) + local; }          \n"
+		"int nested(int n) {                                                               \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += inc4(i) + addSq(i) + divIn(i * 7, i++ + 1);                              \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int divNest(int n) {                                                              \n"
+		"  int local = n * 5, r = 0;                                                       \n"
+		"  while( n >= -2 )                                                                \n"
+		"    r += divIn(100, n--);                                                         \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int deepNest(int n) {                                                             \n"
+		"  int local = n;                                                                  \n"
+		"  local += addSq(n);                                                              \n"
+		"  return n == 0 ? inc4(local) : deepNest(n - 1) + divIn(local, n);                \n"
+		"}                                                                                 \n"
+		"int deepDiv(int n) {                                                              \n"
+		"  int local = n;                                                                  \n"
+		"  local += inc2(n);                                                               \n"
+		"  return n == 0 ? divIn(1, n) : deepDiv(n - 1) + local;                           \n"
+		"}                                                                                 \n"
+		"int methods2(int n) {                                                             \n"
+		"  Acc@ acc = Acc();                                                               \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += acc.get2(i) + acc.ratio2(i++ + 1) + acc.add(1);                          \n"
+		"  return r + acc.v;                                                               \n"
+		"}                                                                                 \n"
+		"int ratioNest(int n) {                                                            \n"
+		"  Acc@ acc = Acc();                                                               \n"
+		"  int local = 0;                                                                  \n"
+		"  while( n >= -2 )                                                                \n"
+		"    local += acc.ratio2(n--);                                                     \n"
+		"  return local;                                                                   \n"
 		"}                                                                                 \n";
 
 	// Implements the interface shared with the module of the test
@@ -1389,6 +1433,17 @@ namespace Inlining
 		{ "int deepMethod(int)", 300, PLAIN },
 		{ "int deepMethod(int)",  50, COUNT_LINES },
 		{ "int deepMethod(int)",  20, SUSPEND_IN_ADD },
+		{ "int nested(int)",      50, PLAIN },
+		{ "int nested(int)",      10, COUNT_LINES },
+		{ "int nested(int)",      10, SUSPEND_IN_ADD },
+		{ "int divNest(int)",      5, PLAIN },
+		{ "int deepNest(int)",   300, PLAIN },
+		{ "int deepNest(int)",    20, SUSPEND_IN_ADD },
+		{ "int deepDiv(int)",     10, PLAIN },
+		{ "int deepDiv(int)",    300, PLAIN },
+		{ "int methods2(int)",    50, PLAIN },
+		{ "int methods2(int)",    10, COUNT_LINES },
+		{ "int ratioNest(int)",    5, PLAIN },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case
@@ -1452,7 +1507,8 @@ namespace Inlining
 		return result;
 	}
 
-	// The inlined function runs a loop that another thread suspends
+	// The inlined function runs a loop that another thread suspends. It is called
+	// directly or through another inlined function
 	static const char *spinScript =
 		"bool stop = false;                                                                \n"
 		"int iters = 0;                                                                    \n"
@@ -1469,6 +1525,15 @@ namespace Inlining
 		"    iters++;                                                                      \n"
 		"  }                                                                               \n"
 		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int step(int a) { return work(a) & 0xFFFFFF; }                                    \n"
+		"int spinStep() {                                                                  \n"
+		"  int r = 0;                                                                      \n"
+		"  while( !stop ) {                                                                \n"
+		"    r = (r * 31 + step(iters)) & 0xFFFFFF;                                        \n"
+		"    iters++;                                                                      \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
 		"}                                                                                 \n";
 
 	static int Work(int a, int count)
@@ -1479,7 +1544,7 @@ namespace Inlining
 		return s;
 	}
 
-	static bool TestSuspendFromThread(asDWORD flags, bool inlines)
+	static bool TestSuspendFromThread(asDWORD flags, bool inlines, bool throughStep)
 	{
 		bool fail = false;
 
@@ -1499,7 +1564,7 @@ namespace Inlining
 		int *iters = (int*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("iters"));
 
 		asIScriptContext *ctx = engine->CreateContext();
-		ctx->Prepare(mod->GetFunctionByDecl("int spin()"));
+		ctx->Prepare(mod->GetFunctionByDecl(throughStep ? "int spinStep()" : "int spin()"));
 		int r = asEXECUTION_SUSPENDED;
 		int inWork = 0;
 		for( int round = 0; round < 10 && r == asEXECUTION_SUSPENDED; round++ )
@@ -1525,21 +1590,31 @@ namespace Inlining
 			}
 
 			// Suspended in the inlined function, which has the argument and the
-			// variables that the loop has computed so far
-			if( std::string(ctx->GetFunction(0)->GetName()) == "work" )
+			// variables that the loop has computed so far, and its caller has the
+			// argument too
+			std::string top = ctx->GetFunction(0)->GetName();
+			asUINT depth = ctx->GetCallstackSize();
+			if( top == "work" )
 			{
 				inWork++;
 				int *a = FindVar(ctx, 0, "a"), *s = FindVar(ctx, 0, "s"), *k = FindVar(ctx, 0, "k");
-				if( ctx->GetCallstackSize() != 2 || std::string(ctx->GetFunction(1)->GetName()) != "spin" ||
-				    a == 0 || *a != *iters ||
+				int *stepA = throughStep ? FindVar(ctx, 1, "a") : a;
+				if( depth != (throughStep ? 3u : 2u) || std::string(ctx->GetFunction(1)->GetName()) != (throughStep ? "step" : "spin") ||
+				    a == 0 || *a != *iters || stepA == 0 || *stepA != *iters ||
 				    (s && k && (*k < 0 || *k > 64 || (*s != Work(*a, *k) && *s != Work(*a, *k + 1)))) )
 				{
-					PRINTF("suspend from thread: wrong state in work, a %d, iters %d, s %d, k %d\n",
-					       a ? *a : -1, *iters, s ? *s : -1, k ? *k : -1);
+					PRINTF("suspend from thread: wrong state in work, depth %u, a %d, iters %d, s %d, k %d\n",
+					       depth, a ? *a : -1, *iters, s ? *s : -1, k ? *k : -1);
 					TEST_FAILED;
 				}
 			}
-			else if( ctx->GetCallstackSize() != 1 )
+			else if( top == "step" )
+			{
+				int *a = FindVar(ctx, 0, "a");
+				if( !throughStep || depth != 2 || a == 0 || *a != *iters )
+					TEST_FAILED;
+			}
+			else if( depth != 1 )
 				TEST_FAILED;
 		}
 
@@ -1563,21 +1638,30 @@ namespace Inlining
 		ctx->Release();
 		engine->ShutDownAndRelease();
 
-		if( (jit.GetStatistics().callsInlined != 0) != inlines )
+		// The function work is inlined into spin and step, and step with it into spinStep
+		if( jit.GetStatistics().callsInlined != (inlines ? 4u : 0u) )
+		{
+			PRINTF("suspend from thread: %u calls inlined\n", jit.GetStatistics().callsInlined);
 			TEST_FAILED;
+		}
 		return fail;
 	}
 
-	// Compiles only the function t and the methods f that it calls
+	// Compiles only the function t and the functions and methods f, f1, f2, ... that
+	// it calls
 	static bool CompileTAndF(asIScriptFunction *func, void *)
 	{
-		return std::string(func->GetName()) == "t" || std::string(func->GetName()) == "f";
+		std::string name = func->GetName();
+		return name == "t" || name[0] == 'f';
 	}
 
-	// The calls of the methods in t that are inlined, which are those that only one
-	// class of the module can implement. The call of an overridden method calls the
-	// method of the base class even through the handle of the derived class
-	static bool TestInlinedMethods(asDWORD flags, bool inlines)
+	// The calls that are inlined in all the compiled functions. The methods are those
+	// that only one class of the module can implement. The call of an overridden
+	// method calls the method of the base class even through the handle of the derived
+	// class, and a method called through a global variable has a reference held for the
+	// call, which the function releases. The functions calling others are inlined with
+	// those, up to 4 levels deep, and the recursive functions are called
+	static bool TestInlinedCalls(asDWORD flags, bool inlines)
 	{
 		bool fail = false;
 		struct SMethods { const char *script; asUINT inlined; };
@@ -1592,6 +1676,17 @@ namespace Inlining
 			{ "abstract class B { int f() { return 1; } } class D : B {} int t(B@ b) { return b.f(); }", 1 },
 			{ "interface I { int f(); } abstract class B : I { int f() { return 1; } } class D : B {} "
 			  "int t(I@ i, B@ b) { return i.f() + b.f(); }", 2 },
+			{ "int f2(int a) { return a + 1; } int f1(int a) { return f2(a) * 2; } "
+			  "int t(int a) { return f1(a) + f1(a + 1); }", 5 },
+			{ "class A { int v = 1; int f2() { return v; } int f1() { return f2() + 1; } } "
+			  "int t(A@ a) { return a.f1(); }", 3 },
+			{ "interface I { int f2(int a); } class A : I { int f2(int a) { return a; } } I@ g; "
+			  "int f1(int a) { return g.f2(a) + 1; } int t(int a) { return f1(a); }", 1 },
+			{ "int f5(int a) { return a + 5; } int f4(int a) { return f5(a) + 4; } int f3(int a) { return f4(a) + 3; } "
+			  "int f2(int a) { return f3(a) + 2; } int f1(int a) { return f2(a) + 1; } int t(int a) { return f1(a); }", 10 },
+			{ "int f(int a) { return a <= 0 ? 0 : f(a - 1) + 1; } int t(int a) { return f(a) + f(a + 1); }", 0 },
+			{ "int f2(int a) { return a <= 0 ? 0 : f1(a - 1); } int f1(int a) { return f2(a) + 1; } "
+			  "int t(int a) { return f1(a); }", 0 },
 		};
 		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
 		{
@@ -1694,8 +1789,9 @@ static bool TestInlining()
 		}
 	}
 
-	fail = TestSuspendFromThread(flags, inlines) || fail;
-	fail = TestInlinedMethods(flags, inlines) || fail;
+	fail = TestSuspendFromThread(flags, inlines, false) || fail;
+	fail = TestSuspendFromThread(flags, inlines, true) || fail;
+	fail = TestInlinedCalls(flags, inlines) || fail;
 	return fail;
 }
 
