@@ -7,6 +7,7 @@
 
 #include <vector>
 #include <map>
+#include <memory>
 
 BEGIN_AS_NAMESPACE
 
@@ -20,7 +21,8 @@ enum EJITInstrFlags
 	JIT_INSTR_VR_LIVE     = 0x04, // the value register may be read after this instruction before being written
 	JIT_INSTR_BAIL        = 0x08, // the instruction must always return control to the VM
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
-	JIT_INSTR_DEAD        = 0x20  // the instruction can never be reached, no code is generated for it
+	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
+	JIT_INSTR_INLINE      = 0x40  // asBC_CALL whose function is emitted in place, see GetInlinee
 };
 
 // One decoded bytecode instruction
@@ -82,6 +84,14 @@ static const asUINT JIT_FRAME_BIT = 0x80000000u;
 #define JIT_NATIVE_RETURN
 #endif
 
+// The functions that Analyse lets the code generator emit in place of their calls
+struct SJITInlineOptions
+{
+	asUINT maxSize;  // largest bytecode in dwords, 0 inlines nothing
+	bool (*filter)(asIScriptFunction *func, void *param); // must accept the function unless null
+	void  *filterParam;
+};
+
 // Decodes the bytecode of a script function and gathers the information
 // needed by the code generator: instructions, basic blocks, branch targets,
 // switch tables, JIT entry points, variable usage, and value register liveness
@@ -93,8 +103,10 @@ public:
 	// Decodes the bytecode. Returns a negative value if the bytecode is malformed
 	int  Decode(asCScriptFunction *func);
 
-	// Performs the analysis. Must be called after Decode
-	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots);
+	// Performs the analysis. Must be called after Decode. The small functions called
+	// with asBC_CALL that call nothing themselves are analysed too, so that their code
+	// can be emitted in place, see FindInlinees
+	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
 	const asDWORD                 *GetByteCode() const     { return m_byteCode; }
@@ -162,7 +174,11 @@ public:
 	// Returns the instruction indices targeted by a JMPP instruction, in case order
 	const std::vector<int> &GetSwitchTargets(asUINT instrIdx) const;
 
-	// Marks instructions that must return to the VM
+	// Returns the analysis of the function called by an instruction marked with
+	// JIT_INSTR_INLINE
+	const CJITByteCode *GetInlinee(asUINT instrIdx) const;
+
+	// Marks instructions that must return to the VM, also in the inlined functions
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
 
 	// Classification of the instructions
@@ -179,6 +195,8 @@ protected:
 	void AnalyseDirtySlots();
 	void AnalyseSlotLiveness();
 	void AnalyseStackDepth();
+	void FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions &inlining);
+	bool CanBeInlined() const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
 	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
@@ -204,6 +222,7 @@ protected:
 	std::vector<asUINT>     m_liveAfter;   // per instruction mask of cached slots live after it
 	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
 	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
+	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;
 };
