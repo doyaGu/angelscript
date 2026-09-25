@@ -95,10 +95,12 @@ public:
 	void SetMaxFunctionSize(asUINT sizeInDWords);
 
 	// Largest bytecode size (in dwords) of the script functions that are compiled
-	// in place of their calls, if they are called directly and call nothing
-	// themselves. Each function inlines at most 16 times the size. The functions
-	// are still compiled on their own for the other calls. Default is 64, 0 disables
-	// inlining like JIT_NO_INLINE
+	// in place of their calls, if they call nothing themselves. The methods called
+	// through interfaces and virtual calls are compiled in place for the only class
+	// of the module that implements them, and the objects of other classes call
+	// them. Each function inlines at most 16 times the size. The functions are still
+	// compiled on their own for the other calls. Default is 64, 0 disables inlining
+	// like JIT_NO_INLINE
 	void SetMaxInlineSize(asUINT sizeInDWords);
 
 	SJITStatistics GetStatistics() const;
