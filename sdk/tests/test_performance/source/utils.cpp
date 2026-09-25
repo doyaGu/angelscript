@@ -140,6 +140,11 @@ int ExecuteForTest(asIScriptContext *ctx)
 	return g_jit ? g_jit->Execute(ctx) : ctx->Execute();
 }
 
+void UsePooledMemory()
+{
+	asSetGlobalMemoryFunctions(CJITCompiler::AllocMemory, CJITCompiler::FreeMemory);
+}
+
 // Must be called after all engines have been released
 void ReleaseJitCompiler()
 {

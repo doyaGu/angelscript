@@ -16,6 +16,9 @@ extern const char *g_jitLogFilter;
 // Prepare and Execute of the JIT compiler when the test is run with --jit, otherwise of the context
 int PrepareForTest(asIScriptContext *ctx, asIScriptFunction *func);
 int ExecuteForTest(asIScriptContext *ctx);
+
+// Makes the engines use the memory functions of the JIT compiler
+void UsePooledMemory();
 #else
 inline int PrepareForTest(asIScriptContext *ctx, asIScriptFunction *func) { return ctx->Prepare(func); }
 inline int ExecuteForTest(asIScriptContext *ctx) { return ctx->Execute(); }

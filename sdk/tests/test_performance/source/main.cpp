@@ -110,8 +110,9 @@ int main(int argc, char **argv)
 	// --direct makes it call registered functions directly even on platforms where
 	// C++ exceptions can't pass through the generated code, and --no-direct never does.
 	// --log <name> writes the code generated for the functions whose name contains
-	// <name> to stderr
-	bool useJit = false, directCalls = false, noDirectCalls = false;
+	// <name> to stderr. --pool makes the engines use the memory functions of the
+	// JIT compiler, with or without --jit
+	bool useJit = false, directCalls = false, noDirectCalls = false, usePool = false;
 	const char *logFilter = 0;
 	for( int a = 1; a < argc; a++ )
 	{
@@ -123,14 +124,18 @@ int main(int argc, char **argv)
 			directCalls = true;
 		if( strcmp(argv[a], "--no-direct") == 0 )
 			noDirectCalls = true;
+		if( strcmp(argv[a], "--pool") == 0 )
+			usePool = true;
 	}
 #ifdef AS_TEST_JIT
 	g_useJit = useJit;
 	g_jitDirectCalls = directCalls;
 	g_jitNoDirectCalls = noDirectCalls;
 	g_jitLogFilter = logFilter;
+	if( usePool )
+		UsePooledMemory();
 #else
-	if( useJit )
+	if( useJit || usePool )
 		printf("The test wasn't built with the JIT compiler\n");
 #endif
 
@@ -140,6 +145,8 @@ int main(int argc, char **argv)
 #endif
 	if( useJit )
 		printf(noDirectCalls ? " (JIT, no direct calls)" : directCalls ? " (JIT, direct calls)" : " (JIT)");
+	if( usePool )
+		printf(" (pooled memory)");
 	printf("\n");
 	printf("AngelScript %s\n", asGetLibraryVersion()); 
 
