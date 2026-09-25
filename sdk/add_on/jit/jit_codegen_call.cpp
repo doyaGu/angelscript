@@ -220,6 +220,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // the call stack, the stack block has room for the function, and the VM has nothing
 // to do. The function is called otherwise. Where it must return to the VM, the exit
 // of its frame pushes the call state, see EmitInlineExit
+// TODO: runtime optimize: The room on the call stack and in the stack block doesn't
+//                         change while the function runs, so they could be checked
+//                         once before the loops with inlined calls
 void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
