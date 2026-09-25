@@ -97,6 +97,7 @@ protected:
 		Label  label;
 		asUINT idx;
 		int    frame;
+		bool   materialized; // the frames of the inlined calls are on the call stack
 	};
 
 	// A registered behaviour that takes nothing but the object, e.g. AddRef or
@@ -307,6 +308,8 @@ protected:
 	std::vector<SBail>         m_bails;        // bail stubs to emit
 	std::vector<std::pair<asmjit::BaseNode*, asmjit::BaseNode*> > m_cold;  // first and last nodes of the cold ranges
 	Label                      m_bailCommon;
+	Label                      m_bailMaterialized; // the tail of the bail sites in materialized frames
+	bool                       m_bailMaterializedUsed;
 	Label                      m_leave;        // returns 1, i.e. the VM takes over
 
 	asUINT m_instrCount;
@@ -315,6 +318,7 @@ protected:
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
 	bool   m_materialized; // the frames of the inlined calls are on the call stack, see EmitMaterialize
 	int    m_materialDepth; // the number of call states pushed for them
+	bool   m_shareMaterial; // the next calls share the materialization, see EmitBody
 	int    m_inlineExtent; // the largest extent of the inlined calls, see GetInlineRoom
 	bool   m_failed;
 };

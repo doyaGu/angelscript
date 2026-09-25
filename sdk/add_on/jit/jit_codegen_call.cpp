@@ -427,7 +427,8 @@ void CJITCodeGen::EmitInlineExit(int frame)
 // do, the outermost first. The VM registers are set to the frame of the function,
 // which the program pointer and the stack pointer must be set for too. If the VM
 // takes over, it continues in the function and returns to the callers, otherwise
-// EmitDematerialize pops the call states after the call
+// EmitDematerialize pops the call states after the call, or after the last of the
+// calls that share the materialization, see EmitBody
 void CJITCodeGen::EmitMaterialize()
 {
 	if( m_frame == 0 || m_materialized )
@@ -477,7 +478,7 @@ void CJITCodeGen::EmitMaterialize()
 // the frame of the inlined function, see CJITByteCode::LeavesFrameDirty
 void CJITCodeGen::EmitDematerialize()
 {
-	if( !m_materialized )
+	if( !m_materialized || m_shareMaterial )
 		return;
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	Gp length = m_uc.new_gp32();

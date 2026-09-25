@@ -1569,6 +1569,17 @@ namespace Inlining
 		"  while( i < n )                                                                  \n"
 		"    r += pokeMid(i++);                                                            \n"
 		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The inlined functions call registered functions one after another, and raise
+		// exceptions or return to the VM for the line callback between the calls
+		"class Box { int v; Box(int a) { v = a; } }                                        \n"
+		"int both(Box@ b, int a) { int local = verify(a); local += b.v; return inspect(local) + a; }\n"
+		"int bothLoop(int n) {                                                             \n"
+		"  Box@ box = Box(5);                                                              \n"
+		"  int local = n, r = 0, i = 0;                                                    \n"
+		"  while( i < n )                                                                  \n"
+		"    r += both(i == 3 ? null : box, i++);                                          \n"
+		"  return r + local;                                                               \n"
 		"}                                                                                 \n";
 
 	// Implements the interface shared with the module of the test
@@ -1632,6 +1643,9 @@ namespace Inlining
 		{ "int deepCall(int)",    20, COUNT_LINES },
 		{ "int deepCall(int)",    20, SUSPEND_IN_ADD },
 		{ "int pokeDeadLoop(int)", 5, PLAIN },
+		{ "int bothLoop(int)",     3, PLAIN },
+		{ "int bothLoop(int)",     3, COUNT_LINES },
+		{ "int bothLoop(int)",     5, PLAIN },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case

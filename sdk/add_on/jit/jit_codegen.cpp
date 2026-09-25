@@ -41,6 +41,8 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_inlineCalls  = false;
 	m_materialized = false;
 	m_materialDepth = 0;
+	m_shareMaterial = false;
+	m_bailMaterializedUsed = false;
 	m_inlineExtent = 0;
 	m_failed     = false;
 }
@@ -63,6 +65,7 @@ bool CJITCodeGen::Generate()
 			m_entryLabels[n] = m_uc.new_label();
 
 	m_bailCommon = m_uc.new_label();
+	m_bailMaterialized = m_uc.new_label();
 	m_leave = m_uc.new_label();
 
 	// The instructions in loops, which are the ones up to a backward branch from its target
@@ -194,6 +197,31 @@ bool CJITCodeGen::Generate()
 	return true;
 }
 
+// The calls of registered functions and the releases of objects return with the
+// frame they are made in in the VM registers, unlike the script calls, see
+// CJITByteCode::LeavesFrameDirty
+static bool SharesMaterialization(asEBCInstr op)
+{
+	switch( op )
+	{
+	case asBC_CALLSYS:
+	case asBC_Thiscall1:
+	case asBC_REFCPY:
+	case asBC_RefCpyV:
+	case asBC_FREE:
+	case asBC_POWi:
+	case asBC_POWu:
+	case asBC_POWf:
+	case asBC_POWd:
+	case asBC_POWdi:
+	case asBC_POWi64:
+	case asBC_POWu64:
+		return true;
+	default:
+		return false;
+	}
+}
+
 void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 {
 	// The heads of the innermost loops, i.e. the targets of backward branches with no
@@ -214,6 +242,38 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			int t = instrs[n].target;
 			if( t >= 0 && asUINT(t) <= n && headsBefore[n + 1] == headsBefore[t + 1] )
 				alignHead[t] = true;
+		}
+	}
+
+	// The calls and releases that follow each other in an inlined function share one
+	// materialization of its frame, see EmitMaterialize, unless something in between
+	// branches or is branched to, or may leave another frame in the VM registers. The
+	// first of them materializes the frame, and the last one pops the call states.
+	// Nothing enters the inlined code but through the branches
+	std::vector<bool> shareNext(instrs.size());
+	if( m_frame != 0 )
+	{
+		std::vector<bool> isTarget(instrs.size());
+		for( asUINT n = 0; n < instrs.size(); n++ )
+			if( instrs[n].target >= 0 )
+				isTarget[instrs[n].target] = true;
+		int last = -1;
+		for( asUINT n = 0; n < instrs.size(); n++ )
+		{
+			const SJITInstr &instr = instrs[n];
+			if( instr.flags & JIT_INSTR_DEAD )
+				continue;
+			if( isTarget[n] )
+				last = -1;
+			if( SharesMaterialization(instr.op) )
+			{
+				if( last >= 0 )
+					shareNext[last] = true;
+				last = int(n);
+			}
+			else if( CJITByteCode::IsBranch(instr.op) || CJITByteCode::IsTerminator(instr.op) ||
+			         CJITByteCode::IsSyncPoint(instr.op) || (instr.flags & JIT_INSTR_INLINE) )
+				last = -1;
 		}
 	}
 
@@ -243,6 +303,12 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 #endif
 		// Variables that the loop entered next doesn't modify are stored before it
 		StoreDirtySlots(m_code->GetStoresBefore(idx));
+
+		if( shareNext[idx] && !m_shareMaterial )
+		{
+			EmitMaterialize();
+			m_shareMaterial = true;
+		}
 
 		BaseNode *start = m_uc.cc->cursor();
 		if( instr.flags & JIT_INSTR_BAIL )
@@ -302,6 +368,12 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			else if( instr.op != asBC_SUSPEND && instr.op != asBC_RET )
 				for( BaseNode *node = start->next(); node && !calls[idx]; node = node->next() )
 					calls[idx] = node->is_invoke();
+		}
+
+		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] )
+		{
+			m_shareMaterial = false;
+			EmitDematerialize();
 		}
 
 		m_instrCount += consumed;
@@ -855,9 +927,11 @@ void CJITCodeGen::EmitBailStubs()
 	for( asUINT n = 0; n < m_bails.size(); n++ )
 	{
 		SwitchFrame(m_bails[n].frame);
+		m_materialized = m_bails[n].materialized;
 		m_uc.bind(m_bails[n].label);
 		Bail(m_bails[n].idx);
 	}
+	m_materialized = false;
 
 	// The exits of the inlined functions store their callers, see EmitInlineExit
 	for( asUINT n = 1; n < m_frames.size(); n++ )
@@ -874,6 +948,17 @@ void CJITCodeGen::EmitBailStubs()
 		SyncStack();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 	Leave();
+
+	// The VM registers have the frame of the inlined function already where its frame
+	// is materialized, and the call states have been pushed
+	if( m_bailMaterializedUsed )
+	{
+		m_uc.bind(m_bailMaterialized);
+		if( !m_staticStack )
+			SyncStack();
+		m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
+		Leave();
+	}
 }
 
 //------------------------------------------------------------------------
@@ -1459,10 +1544,10 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 }
 
 // Returns to the VM which will re-execute the instruction. The frame is stored by
-// the common tail of the bail sites, or by the exit of the frame of an inlined function
+// the common tail of the bail sites, or by the exit of the frame of an inlined function.
+// A materialized frame is in the VM registers already, see EmitMaterialize
 void CJITCodeGen::Bail(asUINT idx)
 {
-	assert( !m_materialized );
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	if( m_code->IsVRLiveBefore(idx) )
@@ -1474,7 +1559,12 @@ void CJITCodeGen::Bail(asUINT idx)
 		SyncStack();
 	}
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
-	if( m_frame != 0 )
+	if( m_materialized )
+	{
+		m_bailMaterializedUsed = true;
+		m_uc.j(m_bailMaterialized);
+	}
+	else if( m_frame != 0 )
 	{
 		m_frames[m_frame].exitUsed = true;
 		m_uc.j(m_frames[m_frame].exit);
@@ -1486,12 +1576,11 @@ void CJITCodeGen::Bail(asUINT idx)
 // Label to a cold stub that bails out at the instruction
 Label CJITCodeGen::BailLabel(asUINT idx)
 {
-	// The exits of the inlined functions push the call states themselves
-	assert( !m_materialized );
 	SBail bail;
 	bail.label = m_uc.new_label();
 	bail.idx   = idx;
 	bail.frame = m_frame;
+	bail.materialized = m_materialized;
 	m_bails.push_back(bail);
 	return bail.label;
 }
