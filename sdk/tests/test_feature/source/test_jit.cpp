@@ -12,6 +12,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <new>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 namespace TestJIT
 {
@@ -1193,6 +1196,391 @@ static bool TestNativeCalls()
 	return fail;
 }
 
+// Script functions compiled in place of their calls. Everything that the application
+// can observe must be the same as with the calls made by the VM, also when the
+// inlined code returns control to the VM in the middle of the inlined function
+namespace Inlining
+{
+	static std::stringstream g_trace;
+	static int g_lines = 0;
+
+	// Returns the variable if it is in scope
+	static int *FindVar(asIScriptContext *ctx, asUINT level, const char *var)
+	{
+		for( int v = 0; v < ctx->GetVarCount(level); v++ )
+		{
+			const char *name;
+			ctx->GetVar(v, level, &name);
+			if( name && std::string(name) == var && ctx->IsVarInScope(v, level) )
+				return (int*)ctx->GetAddressOfVar(v, level);
+		}
+		return 0;
+	}
+
+	// Records the call stack and the variables named 'local' from the given level
+	static void Dump(asIScriptContext *ctx, asUINT varLevel = 0)
+	{
+		for( asUINT l = 0; l < ctx->GetCallstackSize(); l++ )
+		{
+			g_trace << ctx->GetFunction(l)->GetName() << ":" << ctx->GetLineNumber(l);
+			int *local = l >= varLevel ? FindVar(ctx, l, "local") : 0;
+			if( local )
+				g_trace << "=" << *local;
+			g_trace << " ";
+		}
+	}
+
+	static void OnException(asIScriptContext *ctx, void *)
+	{
+		g_trace << "[" << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" <<
+		           ctx->GetExceptionLineNumber() << " depth " << ctx->GetCallstackSize() << "] ";
+
+		// The function that didn't get the stack memory for its variables is on top
+		Dump(ctx, std::string(ctx->GetExceptionString()) == "Stack overflow" ? 1 : 0);
+	}
+
+	static void CountLines(asIScriptContext *, void *)
+	{
+		g_lines++;
+	}
+
+	static void SuspendInAdd(asIScriptContext *ctx, void *)
+	{
+		g_lines++;
+		if( std::string(ctx->GetFunction()->GetName()) == "add" )
+			ctx->Suspend();
+	}
+
+	// Starts counting the lines in the middle of the execution
+	static int StartLines(bool start)
+	{
+		if( start )
+			asGetActiveContext()->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+		return 1;
+	}
+
+	// The functions that are executed with a line callback avoid the statements
+	// followed by a declaration or a block, see NativeCalls
+	static const char *script =
+		"int g = 0;                                                                        \n"
+		"int add(int a, int b) { return a + b; }                                           \n"
+		"int sq(int a) { return a * a; }                                                   \n"
+		"int absInc(int a) { if( a < 0 ) return 1 - a; return a + 1; }                     \n"
+		"int sum3(int a) { int s = 0, k = 0; while( k < 3 ) s += a + k++; return s; }      \n"
+		"int bump(int a) { g += a; return g; }                                             \n"
+		"double half(double a, int b) { return a * 0.5 + b; }                              \n"
+		"int64 wide(int64 a, int b) { return (a << 3) + b; }                               \n"
+		"float scale(float a) { return a * 1.5f; }                                         \n"
+		"uint8 low(int a) { return uint8(a); }                                             \n"
+		"bool odd(int a) { return (a & 1) == 1; }                                          \n"
+		"int loop(int n) {                                                                 \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += add(i, sq(i)) + absInc(i - 5) + sum3(i) + bump(1) + int(half(i, 1)) +    \n"
+		"         int(wide(i, 2)) + int(scale(i)) + low(i * 50) + (odd(i++) ? 1 : 0);      \n"
+		"  return r + g;                                                                   \n"
+		"}                                                                                 \n"
+		"int div(int a, int b) {                                                           \n"
+		"  int local = a + b;                                                              \n"
+		"  return a / b + local;                                                           \n"
+		"}                                                                                 \n"
+		"int divLoop(int n) {                                                              \n"
+		"  int local = n * 3, r = 0;                                                       \n"
+		"  while( n >= -2 )                                                                \n"
+		"    r += div(100, n--);                                                           \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int divCatch(int n) {                                                             \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 ) {                                                              \n"
+		"    try { r += div(100, n--); } catch { r -= 1000; }                              \n"
+		"  }                                                                               \n"
+		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		"int deepLeaf(int n) {                                                             \n"
+		"  int local = add(n, 1);                                                          \n"
+		"  return n == 0 ? sq(local) : deepLeaf(n - 1) + local;                            \n"
+		"}                                                                                 \n"
+		"int deepThrow(int n) {                                                            \n"
+		"  int local = add(n, 2);                                                          \n"
+		"  return n == 0 ? div(1, n) : deepThrow(n - 1) + local;                           \n"
+		"}                                                                                 \n"
+		"int toggle(int n) {                                                               \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += add(i, lines(i++ == n / 2));                                             \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n";
+
+	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_ADD };
+	struct SCase { const char *decl; int arg; EMode mode; };
+	static const SCase cases[] =
+	{
+		{ "int loop(int)",      100, PLAIN },
+		{ "int loop(int)",       10, COUNT_LINES },
+		{ "int loop(int)",       10, SUSPEND_IN_ADD },
+		{ "int divLoop(int)",     5, PLAIN },
+		{ "int divCatch(int)",    5, PLAIN },
+		{ "int deepLeaf(int)",  300, PLAIN },
+		{ "int deepLeaf(int)",   50, COUNT_LINES },
+		{ "int deepLeaf(int)",   20, SUSPEND_IN_ADD },
+		{ "int deepThrow(int)",  10, PLAIN },
+		{ "int deepThrow(int)", 300, PLAIN },
+		{ "int toggle(int)",     20, PLAIN },
+	};
+
+	// Executes all the cases and returns what was observed, one line per case
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, const NativeCalls::SConfig &config, bool &fail)
+	{
+		COutStream out;
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		engine->SetEngineProperty(config.prop, config.value);
+		engine->RegisterGlobalFunction("int lines(bool)", asFUNCTION(StartLines), asCALL_CDECL);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+			TEST_FAILED;
+
+		std::string result;
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->SetExceptionCallback(asFUNCTION(OnException), 0, asCALL_CDECL);
+		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
+		{
+			g_trace.str("");
+			g_lines = 0;
+
+			asIScriptFunction *func = mod->GetFunctionByDecl(cases[n].decl);
+			if( func == 0 ) { TEST_FAILED; continue; }
+			if( cases[n].mode == COUNT_LINES )
+				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			else if( cases[n].mode == SUSPEND_IN_ADD )
+				ctx->SetLineCallback(asFUNCTION(SuspendInAdd), 0, asCALL_CDECL);
+			else
+				ctx->ClearLineCallback();
+			ctx->Prepare(func);
+			ctx->SetArgDWord(0, cases[n].arg);
+			int r = ctx->Execute();
+			int suspends = 0;
+			while( r == asEXECUTION_SUSPENDED && suspends < 10000 )
+			{
+				if( suspends++ < 3 )
+				{
+					g_trace << "{ ";
+					Dump(ctx);
+					g_trace << "} ";
+				}
+				r = ctx->Execute();
+			}
+
+			std::stringstream s;
+			s << cases[n].decl << "(" << cases[n].arg << "): " << r;
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			s << " lines " << g_lines << " suspends " << suspends << " " << g_trace.str() << "\n";
+			result += s.str();
+		}
+		ctx->Release();
+		return result;
+	}
+
+	// The inlined function runs a loop that another thread suspends
+	static const char *spinScript =
+		"bool stop = false;                                                                \n"
+		"int iters = 0;                                                                    \n"
+		"int work(int a) {                                                                 \n"
+		"  int s = 0;                                                                      \n"
+		"  for( int k = 0; k < 64; k++ )                                                   \n"
+		"    s += (k ^ a) & 7;                                                             \n"
+		"  return s;                                                                       \n"
+		"}                                                                                 \n"
+		"int spin() {                                                                      \n"
+		"  int r = 0;                                                                      \n"
+		"  while( !stop ) {                                                                \n"
+		"    r = (r * 31 + work(iters)) & 0xFFFFFF;                                        \n"
+		"    iters++;                                                                      \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n";
+
+	static int Work(int a, int count)
+	{
+		int s = 0;
+		for( int k = 0; k < count; k++ )
+			s += (k ^ a) & 7;
+		return s;
+	}
+
+	static bool TestSuspendFromThread(asDWORD flags, bool inlines)
+	{
+		bool fail = false;
+
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(flags);
+		asIScriptEngine *engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+		COutStream out;
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+		engine->SetJITCompiler(&jit);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", spinScript);
+		if( mod->Build() < 0 )
+			TEST_FAILED;
+		bool *stop = (bool*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("stop"));
+		int *iters = (int*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("iters"));
+
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->Prepare(mod->GetFunctionByDecl("int spin()"));
+		int r = asEXECUTION_SUSPENDED;
+		int inWork = 0;
+		for( int round = 0; round < 10 && r == asEXECUTION_SUSPENDED; round++ )
+		{
+			// A suspension right before the execution starts would be lost
+			std::atomic<bool> done(false);
+			std::thread suspender([&]()
+			{
+				while( !done )
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					ctx->Suspend();
+				}
+			});
+			r = ctx->Execute();
+			done = true;
+			suspender.join();
+			if( r != asEXECUTION_SUSPENDED )
+			{
+				PRINTF("suspend from thread: execution returned %d\n", r);
+				TEST_FAILED;
+				break;
+			}
+
+			// Suspended in the inlined function, which has the argument and the
+			// variables that the loop has computed so far
+			if( std::string(ctx->GetFunction(0)->GetName()) == "work" )
+			{
+				inWork++;
+				int *a = FindVar(ctx, 0, "a"), *s = FindVar(ctx, 0, "s"), *k = FindVar(ctx, 0, "k");
+				if( ctx->GetCallstackSize() != 2 || std::string(ctx->GetFunction(1)->GetName()) != "spin" ||
+				    a == 0 || *a != *iters ||
+				    (s && k && (*k < 0 || *k > 64 || (*s != Work(*a, *k) && *s != Work(*a, *k + 1)))) )
+				{
+					PRINTF("suspend from thread: wrong state in work, a %d, iters %d, s %d, k %d\n",
+					       a ? *a : -1, *iters, s ? *s : -1, k ? *k : -1);
+					TEST_FAILED;
+				}
+			}
+			else if( ctx->GetCallstackSize() != 1 )
+				TEST_FAILED;
+		}
+
+		// Nearly all of the time is spent in the loop of the inlined function
+		if( inWork == 0 )
+		{
+			PRINTF("suspend from thread: never suspended in the inlined function\n");
+			TEST_FAILED;
+		}
+
+		*stop = true;
+		r = ctx->Execute();
+		int expected = 0;
+		for( int n = 0; n < *iters; n++ )
+			expected = (expected * 31 + Work(n, 64)) & 0xFFFFFF;
+		if( r != asEXECUTION_FINISHED || int(ctx->GetReturnDWord()) != expected )
+		{
+			PRINTF("suspend from thread: execution returned %d, %d instead of %d\n", r, int(ctx->GetReturnDWord()), expected);
+			TEST_FAILED;
+		}
+		ctx->Release();
+		engine->ShutDownAndRelease();
+
+		if( (jit.GetStatistics().callsInlined != 0) != inlines )
+			TEST_FAILED;
+		return fail;
+	}
+}
+
+static bool TestInlining()
+{
+	using namespace Inlining;
+	using NativeCalls::configs;
+	bool fail = false;
+
+	// Suspending must work for the results to be the same as the VM's
+	asDWORD flags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		flags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+	bool inlines = (flags & (CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR)) == 0;
+
+	// The forced bails return to the VM in the middle of the inlined functions. A
+	// SUSPEND isn't forced, as the VM would call the line callback for the ones
+	// that the compiled code skips
+	static const asEBCInstr bailAdd[] = { asBC_ADDi };
+	static const asEBCInstr bailRet[] = { asBC_RET };
+	struct SVariant { const char *name; asDWORD flags; asUINT maxInlineSize; const asEBCInstr *bails; asUINT bailCount; };
+	static const SVariant variants[] =
+	{
+		{ "inlined",                  0,                           64, 0,       0 },
+		{ "not inlined",              CJITCompiler::JIT_NO_INLINE, 64, 0,       0 },
+		{ "small inlined functions",  0,                           16, 0,       0 },
+		{ "bail at ADDi",             0,                           64, bailAdd, 1 },
+		{ "bail at RET",              0,                           64, bailRet, 1 },
+	};
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		asIScriptEngine *engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+		std::string expected = Inlining::Run(engine, 0, configs[c], fail);
+		engine->ShutDownAndRelease();
+
+		for( asUINT v = 0; v < sizeof(variants)/sizeof(variants[0]); v++ )
+		{
+			// The JIT compiler must outlive the engine
+			CJITCompiler jit(flags | variants[v].flags);
+			jit.SetMaxInlineSize(variants[v].maxInlineSize);
+			if( variants[v].bailCount )
+				jit.SetBailInstructions(variants[v].bails, variants[v].bailCount);
+			engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+			std::string actual = Inlining::Run(engine, &jit, configs[c], fail);
+			engine->ShutDownAndRelease();
+
+			SJITStatistics stats = jit.GetStatistics();
+			bool inlined = inlines && (variants[v].flags & CJITCompiler::JIT_NO_INLINE) == 0;
+			if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 || (stats.callsInlined != 0) != inlined )
+			{
+				PRINTF("%s, %s: %u functions compiled, %u failed, %u calls inlined\n", configs[c].name, variants[v].name,
+				       stats.functionsCompiled, stats.functionsFailed, stats.callsInlined);
+				TEST_FAILED;
+			}
+			if( actual != expected )
+			{
+				// Show where the cases differ
+				std::stringstream e(expected), a(actual);
+				std::string el, al;
+				while( std::getline(e, el) && std::getline(a, al) )
+				{
+					if( el == al )
+						continue;
+					size_t p = 0;
+					while( p < el.size() && p < al.size() && el[p] == al[p] )
+						p++;
+					p = p > 100 ? p - 100 : 0;
+					PRINTF("%s, %s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, variants[v].name,
+					       el.substr(p, 300).c_str(), al.substr(p, 300).c_str());
+				}
+				TEST_FAILED;
+			}
+		}
+	}
+
+	fail = TestSuspendFromThread(flags, inlines) || fail;
+	return fail;
+}
+
 // C++ exceptions thrown by registered functions are turned into script exceptions.
 // When the functions are called directly the exceptions pass through the generated
 // code, and everything that the application can observe must be the same as with
@@ -1673,6 +2061,7 @@ bool Test()
 
 	fail = TestDirectCalls() || fail;
 	fail = TestNativeCalls() || fail;
+	fail = TestInlining() || fail;
 	fail = TestCppExceptions() || fail;
 	fail = TestRefCounting() || fail;
 
