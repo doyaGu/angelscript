@@ -38,7 +38,8 @@ public:
     JIT_SYNC_EVERY_INSTR  = 0x08, // update the VM registers after every instruction (debugging aid)
     JIT_LOG               = 0x10, // log the bytecode and generated code to the log file
     JIT_DIRECT_SYSTEM_CALLS    = 0x20, // call registered functions directly on all platforms (see below)
-    JIT_NO_DIRECT_SYSTEM_CALLS = 0x40  // never call registered functions directly
+    JIT_NO_DIRECT_SYSTEM_CALLS = 0x40, // never call registered functions directly
+    JIT_NO_INLINE              = 0x80  // always call the script functions instead of compiling small ones in place
   };
 
   CJITCompiler(asDWORD flags = 0);
@@ -58,6 +59,7 @@ public:
   void    SetNativeCallDepth(asUINT depth);
   void    SetBailInstructions(const asEBCInstr *instructions, asUINT count);
   void    SetMaxFunctionSize(asUINT sizeInDWords);
+  void    SetMaxInlineSize(asUINT sizeInDWords);
 
   SJITStatistics GetStatistics() const;
 
@@ -179,9 +181,11 @@ functions on 32bit hosts.
 
 \section doc_addon_jit_limits Known limitations
 
- - Script constructors, imported functions, and delegates are called through a
-   helper function that uses the call stack of the VM, so these calls are not
-   faster than with the interpreter.
+ - Imported functions and delegates are called through a helper function that
+   uses the call stack of the VM, so these calls are not faster than with the
+   interpreter.
+ - Script functions that call registered functions or release objects are not
+   compiled in place of their calls.
  - Unwind information for the generated code is only registered on 64bit Windows
    and 64bit Linux. On the other platforms besides 32bit Windows with MSVC, a C++
    exception that passes through the generated code terminates the application,
@@ -197,13 +201,15 @@ functions on 32bit hosts.
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
 
-The TODO comments in the source files describe how the first four could be addressed.
+The comment at the top of jit.cpp lists the future work, which addresses most of
+these, and the TODO comments in the source files describe the details.
 
 \section doc_addon_jit_3 Debugging aids
 
 Should a script behave differently with the JIT compiler the flags can be used to
 narrow down the problem. \ref CJITCompiler::JIT_NO_REGISTER_CACHE turns off the
-register allocation for the local variables, \ref CJITCompiler::JIT_SYNC_EVERY_INSTR
+register allocation for the local variables, \ref CJITCompiler::JIT_NO_INLINE turns
+off the inlining, \ref CJITCompiler::JIT_SYNC_EVERY_INSTR
 makes the native code update the VM registers after each instruction, and
 \ref CJITCompiler::SetBailInstructions forces the listed instructions to be
 executed by the VM. With \ref CJITCompiler::JIT_LOG the bytecode and the generated
@@ -228,6 +234,19 @@ uses. Calls to other script functions are made natively by calling the native
 code of the callee directly, falling back to the VM when the callee isn't compiled
 or when the depth of nested native calls exceeds the limit set with
 \ref CJITCompiler::SetNativeCallDepth.
+
+The calls of short script functions are compiled in place instead, and so are the
+calls that those make in turn, down to 4 levels. The virtual and interface methods
+are compiled in place for the only class of the module that implements them, which
+the object is checked for, and the objects of other classes call them as usual.
+Recursive functions, functions with catch blocks, and functions that call
+registered functions, release objects, or make other calls that can't be compiled
+in place are always called. The code compiled in place works on the stack frame
+that the function would have if it was called, so when the VM is needed there,
+for example to raise an exception, the call states of the inlined functions are
+created and the VM sees the same call stack as without the inlining.
+\ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
+compiled in place.
 
 Exceptions are never raised from the native code. When a division by zero, a null
 pointer access, or similar is detected, the native code returns to the VM at the
