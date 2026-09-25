@@ -213,8 +213,6 @@ are done by helper functions on 32bit hosts.
  - Imported functions and delegates are called through a helper function that
    uses the call stack of the VM, so these calls are not faster than with the
    interpreter.
- - Script functions that call registered functions or release objects are not
-   compiled in place of their calls.
  - Unwind information for the generated code is only registered on 64bit Windows
    and 64bit Linux. On the other platforms besides 32bit Windows with MSVC, a C++
    exception that passes through the generated code terminates the application,
@@ -268,12 +266,14 @@ The calls of short script functions are compiled in place instead, and so are th
 calls that those make in turn, down to 4 levels. The virtual and interface methods
 are compiled in place for the only class of the module that implements them, which
 the object is checked for, and the objects of other classes call them as usual.
-Recursive functions, functions with catch blocks, and functions that call
-registered functions, release objects, or make other calls that can't be compiled
-in place are always called. The code compiled in place works on the stack frame
-that the function would have if it was called, so when the VM is needed there,
-for example to raise an exception, the call states of the inlined functions are
-created and the VM sees the same call stack as without the inlining.
+Recursive functions and functions with catch blocks are always called. The code
+compiled in place works on the stack frame that the function would have if it was
+called, so when the VM is needed there, for example to raise an exception, and
+when it calls registered functions, releases objects, or calls the script
+functions that aren't compiled in place, the call states of the inlined functions
+are created and the VM and the called functions see the same call stack as
+without the inlining. The registered function calls and releases that follow each
+other share the call states.
 \ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
 compiled in place.
 

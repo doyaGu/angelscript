@@ -19,12 +19,9 @@
 //
 //  - Inline calls of imported functions and delegates. They still go through
 //    JIT_CallScript (jit_codegen_call.cpp, EmitScriptCall).
-//  - Inline the functions that make calls which can't be inlined, which would need the call
-//    states of the inlined functions for the calls, and the functions that release objects,
-//    like those calling the methods of script objects through global variables and class
-//    members. Inline the methods that several classes implement for the type of the handle,
-//    which the bytecode doesn't tell for the methods overridden by derived classes, or for
-//    the classes seen at run time (jit_bytecode.cpp, FindInlinees).
+//  - Inline the methods that several classes implement for the type of the handle, which
+//    the bytecode doesn't tell for the methods overridden by derived classes, or for the
+//    classes seen at run time (jit_bytecode.cpp, FindInlinees).
 //  - Lazy or tiered compilation through asIJITCompilerV2 (CompileFunction below). The
 //    engine currently compiles every function when the module is built. A class cannot
 //    implement both interface versions, so this would be a second compiler class.
