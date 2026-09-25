@@ -1310,7 +1310,60 @@ namespace Inlining
 		"  while( i < n )                                                                  \n"
 		"    r += add(i, lines(i++ == n / 2));                                             \n"
 		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The methods are inlined for the only class of the module that implements
+		// them, and the objects of the other module call them
+		"shared interface IVal { int get(int a); }                                         \n"
+		"import IVal@ makeOther() from \"other\";                                          \n"
+		"class Acc : IVal {                                                                \n"
+		"  int v = 1;                                                                      \n"
+		"  int get(int a) { return v + a; }                                                \n"
+		"  int add(int a) { v += a; return v; }                                            \n"
+		"  int ratio(int a) { int local = v; return local / a; }                           \n"
+		"}                                                                                 \n"
+		"class Base { int k = 1; int f(int a) { return a + k; } }                          \n"
+		"class Derived : Base { int f(int a) override { return a * 2 + k; } }              \n"
+		"abstract class Shape { int w = 3; int area(int h) { return w * h; } }             \n"
+		"class Rect : Shape {}                                                             \n"
+		"int methods(int n) {                                                              \n"
+		"  Acc@ acc = Acc();                                                               \n"
+		"  IVal@ own = acc;                                                                \n"
+		"  IVal@ other = makeOther();                                                      \n"
+		"  Base@ b = Base();                                                               \n"
+		"  Base@ bd = Derived();                                                           \n"
+		"  Derived@ d = Derived();                                                         \n"
+		"  Shape@ s = Rect();                                                              \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += acc.add(i) + own.get(i) + (i % 3 == 0 ? other : own).get(i) +            \n"
+		"         b.f(i) + bd.f(i) + d.f(i) + s.area(i++);                                 \n"
+		"  return r + acc.v;                                                               \n"
+		"}                                                                                 \n"
+		"int nullCall(int n) {                                                             \n"
+		"  IVal@ v = Acc();                                                                \n"
+		"  int local = v.get(n);                                                           \n"
+		"  if( n > 2 ) @v = null;                                                          \n"
+		"  return v.get(local);                                                            \n"
+		"}                                                                                 \n"
+		"int ratioLoop(int n) {                                                            \n"
+		"  Acc@ acc = Acc();                                                               \n"
+		"  int local = 0;                                                                  \n"
+		"  while( n >= -2 )                                                                \n"
+		"    local += acc.ratio(n--);                                                      \n"
+		"  return local;                                                                   \n"
+		"}                                                                                 \n"
+		"int deepMethod(int n) {                                                           \n"
+		"  Acc@ acc = Acc();                                                               \n"
+		"  int local = n;                                                                  \n"
+		"  local += acc.add(n);                                                            \n"
+		"  return n == 0 ? acc.get(local) : deepMethod(n - 1) + local;                     \n"
 		"}                                                                                 \n";
+
+	// Implements the interface shared with the module of the test
+	static const char *otherScript =
+		"shared interface IVal { int get(int a); }                                         \n"
+		"class Other : IVal { int get(int a) { return a * 100; } }                         \n"
+		"IVal@ makeOther() { return Other(); }                                             \n";
 
 	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_ADD };
 	struct SCase { const char *decl; int arg; EMode mode; };
@@ -1327,6 +1380,15 @@ namespace Inlining
 		{ "int deepThrow(int)",  10, PLAIN },
 		{ "int deepThrow(int)", 300, PLAIN },
 		{ "int toggle(int)",     20, PLAIN },
+		{ "int methods(int)",   100, PLAIN },
+		{ "int methods(int)",    10, COUNT_LINES },
+		{ "int methods(int)",    10, SUSPEND_IN_ADD },
+		{ "int nullCall(int)",    1, PLAIN },
+		{ "int nullCall(int)",    5, PLAIN },
+		{ "int ratioLoop(int)",   5, PLAIN },
+		{ "int deepMethod(int)", 300, PLAIN },
+		{ "int deepMethod(int)",  50, COUNT_LINES },
+		{ "int deepMethod(int)",  20, SUSPEND_IN_ADD },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case
@@ -1339,9 +1401,13 @@ namespace Inlining
 		engine->SetEngineProperty(config.prop, config.value);
 		engine->RegisterGlobalFunction("int lines(bool)", asFUNCTION(StartLines), asCALL_CDECL);
 
+		asIScriptModule *other = engine->GetModule("other", asGM_ALWAYS_CREATE);
+		other->AddScriptSection("other", otherScript);
+		if( other->Build() < 0 )
+			TEST_FAILED;
 		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 		mod->AddScriptSection("test", script);
-		if( mod->Build() < 0 )
+		if( mod->Build() < 0 || mod->BindAllImportedFunctions() < 0 )
 			TEST_FAILED;
 
 		std::string result;
@@ -1501,6 +1567,57 @@ namespace Inlining
 			TEST_FAILED;
 		return fail;
 	}
+
+	// Compiles only the function t and the methods f that it calls
+	static bool CompileTAndF(asIScriptFunction *func, void *)
+	{
+		return std::string(func->GetName()) == "t" || std::string(func->GetName()) == "f";
+	}
+
+	// The calls of the methods in t that are inlined, which are those that only one
+	// class of the module can implement. The call of an overridden method calls the
+	// method of the base class even through the handle of the derived class
+	static bool TestInlinedMethods(asDWORD flags, bool inlines)
+	{
+		bool fail = false;
+		struct SMethods { const char *script; asUINT inlined; };
+		static const SMethods cases[] =
+		{
+			{ "interface I { int f(); } class A : I { int f() { return 1; } } int t(I@ i) { return i.f(); }", 1 },
+			{ "interface I { int f(); } class A : I { int f() { return 1; } } class B : I { int f() { return 2; } } "
+			  "int t(I@ i) { return i.f(); }", 0 },
+			{ "shared interface I { int f(); } class A : I { int f() { return 1; } } int t(I@ i) { return i.f(); }", 1 },
+			{ "class B { int f() { return 1; } } class D : B { int f() override { return 2; } int f(int a) { return a; } } "
+			  "int t(B@ b, D@ d) { return b.f() + d.f() + d.f(3); }", 1 },
+			{ "abstract class B { int f() { return 1; } } class D : B {} int t(B@ b) { return b.f(); }", 1 },
+			{ "interface I { int f(); } abstract class B : I { int f() { return 1; } } class D : B {} "
+			  "int t(I@ i, B@ b) { return i.f() + b.f(); }", 2 },
+		};
+		for( asUINT n = 0; n < sizeof(cases)/sizeof(cases[0]); n++ )
+		{
+			// The JIT compiler must outlive the engine
+			CJITCompiler jit(flags);
+			jit.SetCompileFilter(CompileTAndF, 0);
+			asIScriptEngine *engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+			COutStream out;
+			engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+			engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+			engine->SetJITCompiler(&jit);
+			asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+			mod->AddScriptSection("test", cases[n].script);
+			if( mod->Build() < 0 )
+				TEST_FAILED;
+			engine->ShutDownAndRelease();
+
+			SJITStatistics stats = jit.GetStatistics();
+			if( stats.callsInlined != (inlines ? cases[n].inlined : 0) )
+			{
+				PRINTF("inlined methods: %u calls inlined in '%s'\n", stats.callsInlined, cases[n].script);
+				TEST_FAILED;
+			}
+		}
+		return fail;
+	}
 }
 
 static bool TestInlining()
@@ -1578,6 +1695,7 @@ static bool TestInlining()
 	}
 
 	fail = TestSuspendFromThread(flags, inlines) || fail;
+	fail = TestInlinedMethods(flags, inlines) || fail;
 	return fail;
 }
 
