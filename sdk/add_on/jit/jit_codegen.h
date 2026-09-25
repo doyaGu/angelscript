@@ -160,8 +160,8 @@ protected:
 	void EmitInlineCall(asUINT idx);
 	void EmitInlineExit(int frame);
 	void EmitInlineRoom();
-	void EmitInlineRoomCheck(int extent, const Label &none);
-	int  InlineExtent(asUINT idx) const;
+	void EmitStackBlockCheck(int extent, const Label &none);
+	void GetInlineRoom(asUINT idx, int &extent, int &depth) const;
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
 	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
@@ -281,7 +281,7 @@ protected:
 	Gp  m_arg;      // jitArg
 	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
-	Gp  m_inlineRoom; // nonzero if the inlined functions have room, only if some are called in loops, see EmitInlineRoom
+	Gp  m_inlineRoom; // words of room on the call stack for the inlined functions, only if some are called in loops, see EmitInlineRoom
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_sp;       // stack pointer, unless the stack is static
 	Gp  m_vr;       // value register (64bit hosts only)
@@ -310,7 +310,7 @@ protected:
 	asUINT m_bailCount;
 	asUINT m_callsInlined;
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
-	int    m_inlineExtent; // the largest InlineExtent of the inlined calls
+	int    m_inlineExtent; // the largest extent of the inlined calls, see GetInlineRoom
 	bool   m_failed;
 };
 

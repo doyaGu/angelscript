@@ -82,8 +82,10 @@ bool CJITCodeGen::Generate()
 		if( !(instrs[n].flags & JIT_INSTR_INLINE) )
 			continue;
 		inlinedInLoop = inlinedInLoop || inLoop > 0;
-		if( InlineExtent(n) > m_inlineExtent )
-			m_inlineExtent = InlineExtent(n);
+		int extent, depth;
+		GetInlineRoom(n, extent, depth);
+		if( extent > m_inlineExtent )
+			m_inlineExtent = extent;
 	}
 	if( inlinedInLoop )
 		m_inlineRoom = m_uc.new_gp32("inlineRoom");
@@ -855,14 +857,10 @@ void CJITCodeGen::EmitBailStubs()
 		Bail(m_bails[n].idx);
 	}
 
-	// The exits of the inlined functions are emitted in the frames of their callers
+	// The exits of the inlined functions store their callers, see EmitInlineExit
 	for( asUINT n = 1; n < m_frames.size(); n++ )
-	{
-		if( !m_frames[n].exitUsed )
-			continue;
-		SwitchFrame(m_frames[n].caller);
-		EmitInlineExit(int(n));
-	}
+		if( m_frames[n].exitUsed )
+			EmitInlineExit(int(n));
 	SwitchFrame(0);
 
 	// Common tail: the cached variables and the value register have been stored

@@ -220,16 +220,23 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // the call stack, the stack block has room for the function, and the VM has nothing
 // to do. The function is called otherwise. Where it must return to the VM, the exit
 // of its frame pushes the call state, see EmitInlineExit. A method called through
-// asBC_CALLINTF is inlined for objects of one class, the others call the method
+// asBC_CALLINTF is inlined for objects of one class, the others call the method.
+// The calls in the inlined functions only check the class, as the outermost call
+// has checked the rest for them and the inlined code can't request a suspension.
+// The VM makes the call otherwise
 void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
 	asCScriptFunction *func = code->GetFunction();
 	asCObjectType *objType = m_code->GetInlineObjectType(idx);
 	int base = -StackOffset(idx) / 4;
+	int caller = m_frame;
 
-	Label call = m_uc.new_label();
-	Label cont = m_uc.new_label();
+	Label call;
+	if( caller == 0 )
+		call = m_uc.new_label();
+	else if( objType )
+		call = BailLabel(idx);
 	if( objType )
 	{
 		// The call raises the exception for a null object
@@ -239,15 +246,31 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		m_uc.load(type, mem_ptr(type, JIT_GetObjectLayout().objectType));
 		m_uc.j(call, cmp_ne(type, PtrConst(asPWORD(objType))));
 	}
-	Gp flag = m_uc.new_gp32();
-	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-	m_uc.j(call, test_nz(flag));
-	if( m_inlineRoom.is_valid() )
-		m_uc.j(call, test_z(m_inlineRoom));
-	else
-		EmitInlineRoomCheck(InlineExtent(idx), call);
+	if( caller == 0 )
+	{
+		Gp flag = m_uc.new_gp32();
+		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+		m_uc.j(call, test_nz(flag));
 
-	int caller = m_frame;
+		// The exits push a call state for each level of inlined calls
+		const SJITContextLayout &layout = JIT_GetContextLayout();
+		int extent, depth;
+		GetInlineRoom(idx, extent, depth);
+		Imm words = Imm(depth * int(layout.callStackFrameSize));
+		if( m_inlineRoom.is_valid() )
+			m_uc.j(call, ucmp_lt(m_inlineRoom, words));
+		else
+		{
+			Gp length = m_uc.new_gp32();
+			Gp room   = m_uc.new_gp32();
+			m_uc.load_u32(length, ContextField(layout.callStackLength));
+			m_uc.load_u32(room, ContextField(layout.callStackCapacity));
+			m_uc.sub(room, room, length);
+			m_uc.j(call, ucmp_lt(room, words));
+			EmitStackBlockCheck(extent, call);
+		}
+	}
+
 	SFrame frame;
 	frame.code     = code;
 	frame.base     = base;
@@ -278,41 +301,44 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		m_inlineCalls = m_inlineCalls || calls[n];
 	m_callsInlined++;
 
-	BaseNode *cold = BeginCold(call);
-	m_spOffset = StackOffset(idx);
-	if( objType )
-		EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(m_code->GetInstructions()[idx].bc), 0, 0);
-	else
-		EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
-	EndCold(cold, cont);
-	m_uc.bind(cont);
+	if( caller == 0 )
+	{
+		Label cont = m_uc.new_label();
+		BaseNode *cold = BeginCold(call);
+		m_spOffset = StackOffset(idx);
+		if( objType )
+			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(m_code->GetInstructions()[idx].bc), 0, 0);
+		else
+			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
+		EndCold(cold, cont);
+		m_uc.bind(cont);
+	}
 	m_spOffset = StackOffset(idx + 1);
 }
 
-// Notes whether the inlined functions have room. That doesn't change while the
-// function runs, as the frame and the call stack length are the same whenever it
-// runs, and the capacity of the call stack only grows, so the functions that call
-// them in loops check it on entry
+// Notes the room on the call stack for the inlined functions, or none if the stack
+// block doesn't have room for them. That doesn't shrink while the function runs, as
+// the frame and the call stack length are the same whenever it runs, and the capacity
+// of the call stack only grows, so the functions that call them in loops check it on
+// entry
 void CJITCodeGen::EmitInlineRoom()
 {
+	const SJITContextLayout &layout = JIT_GetContextLayout();
 	Label none = m_uc.new_label();
+	Gp length = m_uc.new_gp32();
 	m_uc.mov(m_inlineRoom, Imm(0));
-	EmitInlineRoomCheck(m_inlineExtent, none);
-	m_uc.mov(m_inlineRoom, Imm(1));
+	EmitStackBlockCheck(m_inlineExtent, none);
+	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	m_uc.load_u32(m_inlineRoom, ContextField(layout.callStackCapacity));
+	m_uc.sub(m_inlineRoom, m_inlineRoom, length);
 	m_uc.bind(none);
 }
 
-// Jumps to none unless the call state can be pushed without growing the call stack,
-// and the stack block has room for the variables down to the extent in dwords below
-// the frame pointer, like asCContext::CallScriptFunction
-void CJITCodeGen::EmitInlineRoomCheck(int extent, const Label &none)
+// Jumps to none unless the stack block has room for the variables down to the extent
+// in dwords below the frame pointer, like asCContext::CallScriptFunction
+void CJITCodeGen::EmitStackBlockCheck(int extent, const Label &none)
 {
 	const SJITContextLayout &layout = JIT_GetContextLayout();
-	Gp length   = m_uc.new_gp32();
-	Gp capacity = m_uc.new_gp32();
-	m_uc.load_u32(length, ContextField(layout.callStackLength));
-	m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
-	m_uc.j(none, ucmp_ge(length, capacity));
 	Gp blocks = m_uc.new_gp_ptr();
 	Gp index  = m_uc.new_gp_ptr();
 	Gp limit  = m_uc.new_gp_ptr();
@@ -322,34 +348,62 @@ void CJITCodeGen::EmitInlineRoomCheck(int extent, const Label &none)
 	m_uc.j(none, ucmp_lt(limit, PtrElement(blocks, index)));
 }
 
-// The dwords below the frame pointer that the frame of the function inlined by the
-// instruction reaches
-int CJITCodeGen::InlineExtent(asUINT idx) const
+// Adds the frame of an inlined function, which starts at the base in dwords below
+// the frame pointer, and the frames of the functions inlined into it at the level
+// below, see GetInlineRoom
+static void AddInlineRoom(const CJITByteCode *code, int base, int level, int &extent, int &depth)
 {
-	return -StackOffset(idx) / 4 + int(m_code->GetInlinee(idx)->GetFunction()->scriptData->stackNeeded);
+	asCScriptFunction *func = code->GetFunction();
+	if( base + int(func->scriptData->stackNeeded) > extent )
+		extent = base + int(func->scriptData->stackNeeded);
+	if( level > depth )
+		depth = level;
+	const std::vector<SJITInstr> &instrs = code->GetInstructions();
+	for( asUINT n = 0; n < instrs.size(); n++ )
+		if( instrs[n].flags & JIT_INSTR_INLINE )
+			AddInlineRoom(code->GetInlinee(n), base + int(func->scriptData->variableSpace) + code->GetStackDepth(n), level + 1, extent, depth);
+}
+
+// The dwords below the frame pointer that the frames of the function inlined by the
+// instruction and of the functions inlined into it reach, and the most call states
+// that their exits push
+void CJITCodeGen::GetInlineRoom(asUINT idx, int &extent, int &depth) const
+{
+	extent = 0;
+	depth  = 0;
+	AddInlineRoom(m_code->GetInlinee(idx), -StackOffset(idx) / 4, 1, extent, depth);
 }
 
 // Hands an inlined function to the VM at the program pointer in m_bailPC, with the
 // cached variables, the value register, and the stack pointer of the function stored
-// by Bail. The caller is stored like for the call and its call state is pushed
+// by Bail. The callers are stored like for the calls and their call states are
+// pushed, the outermost first
 void CJITCodeGen::EmitInlineExit(int frame)
 {
-	// Only functions that call nothing are inlined
-	assert( m_frame == 0 && m_frames[frame].caller == 0 );
-	const SFrame &inlined = m_frames[frame];
-	const SJITInstr &instr = m_code->GetInstructions()[inlined.callIdx];
-	m_uc.bind(inlined.exit);
-	StoreDirtySlots(m_code->GetDirtyMask(inlined.callIdx) & ~JIT_FRAME_BIT);
+	m_uc.bind(m_frames[frame].exit);
+	std::vector<int> inlined;
+	for( int f = frame; f != 0; f = m_frames[f].caller )
+	{
+		SwitchFrame(m_frames[f].caller);
+		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx) & ~JIT_FRAME_BIT);
+		inlined.insert(inlined.begin(), f);
+	}
 	StoreFrame();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 
-	Gp fp = m_uc.new_gp_ptr();
-	m_uc.lea(fp, mem_ptr(m_fp, -inlined.base * 4));
-	InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*>());
-	call->set_arg(0, m_regs);
-	call->set_arg(1, Imm(int64_t(asPWORD(inlined.code->GetFunction()))));
-	call->set_arg(2, fp);
-	call->set_arg(3, Imm(int64_t(asPWORD(m_code->GetByteCode() + instr.pos + instr.size))));
+	for( asUINT n = 0; n < inlined.size(); n++ )
+	{
+		const SFrame &callee = m_frames[inlined[n]];
+		const CJITByteCode *code = m_frames[callee.caller].code;
+		const SJITInstr &instr = code->GetInstructions()[callee.callIdx];
+		Gp fp = m_uc.new_gp_ptr();
+		m_uc.lea(fp, mem_ptr(m_fp, -callee.base * 4));
+		InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*>());
+		call->set_arg(0, m_regs);
+		call->set_arg(1, Imm(int64_t(asPWORD(callee.code->GetFunction()))));
+		call->set_arg(2, fp);
+		call->set_arg(3, Imm(int64_t(asPWORD(code->GetByteCode() + instr.pos + instr.size))));
+	}
 	Leave();
 }
 

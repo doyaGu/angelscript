@@ -18,6 +18,7 @@ CJITByteCode::CJITByteCode()
 	m_retReadsVR = false;
 	m_tempMask   = 0;
 	m_staticStack = false;
+	m_inlinedLength = 0;
 }
 
 bool CJITByteCode::IsBranch(asEBCInstr op)
@@ -495,9 +496,10 @@ void CJITByteCode::AnalyseStackDepth()
 }
 
 // The code of an inlined function runs with the frame of the caller in the VM
-// registers, so it must not call anything that could see them. The instructions
+// registers, so it must not call anything that could see them but the functions
+// inlined into it, which are known once they have been found. The instructions
 // working on objects call functions on some paths too
-bool CJITByteCode::CanBeInlined() const
+bool CJITByteCode::CanBeInlined(bool inlineesFound) const
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
@@ -505,6 +507,12 @@ bool CJITByteCode::CanBeInlined() const
 			continue;
 		switch( m_instrs[n].op )
 		{
+		case asBC_CALL:
+		case asBC_CALLINTF:
+			if( inlineesFound && !(m_instrs[n].flags & JIT_INSTR_INLINE) )
+				return false;
+			break;
+
 		case asBC_FREE:
 		case asBC_LOADOBJ:
 		case asBC_STOREOBJ:
@@ -567,23 +575,34 @@ static asCScriptFunction *FindOnlyImplementation(asCScriptFunction *caller, asCS
 	return found->virtualFunctionTable[index];
 }
 
+// The search for the functions to inline into a function and into those
+struct CJITByteCode::SInlineSearch
+{
+	bool                     allowRegisterCache;
+	asUINT                   maxCachedSlots;
+	const SJITInlineOptions *options;
+	std::vector<int>         path; // the ids of the functions being inlined into
+	std::map<std::pair<int, asUINT>, std::shared_ptr<CJITByteCode> > analysed; // by function id and levels left to it, null if it can't be inlined
+};
+
 // Finds the calls whose function can be emitted in place, which is analysed on its
 // own then. Its frame starts at the stack pointer of the call, so the depth of the
-// stack must be known. The inlined code is limited to a multiple of the size of the
-// largest function, so that the functions calling many don't grow without bounds.
-// Recursion and functions with catch blocks are left to the calls. The virtual and
-// interface methods are inlined for the only class that can implement them, which
-// the object is checked for
-void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions &inlining)
+// stack must be known. The function can have the functions that it calls emitted in
+// its code in turn, down to the levels left. The code inlined into a function is
+// limited by the budget, so that the functions calling many don't grow without
+// bounds. Recursion and functions with catch blocks are left to the calls. The
+// virtual and interface methods are inlined for the only class that can implement
+// them, which the object is checked for
+void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
 	m_inlineObjTypes.clear();
-	if( inlining.maxSize == 0 || !m_staticStack )
+	m_inlinedLength = 0;
+	const SJITInlineOptions &inlining = *search.options;
+	if( inlining.maxSize == 0 || !m_staticStack || levels == 0 )
 		return;
 
 	asCScriptEngine *engine = m_func->engine;
-	std::map<int, std::shared_ptr<CJITByteCode> > analysed; // by function id, null if it can't be inlined
-	asUINT budget = inlining.maxSize * 16;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
@@ -602,33 +621,44 @@ void CJITByteCode::FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, 
 			else
 				func = 0;
 		}
-		if( func == 0 )
+		if( func == 0 || std::find(search.path.begin(), search.path.end(), func->GetId()) != search.path.end() )
 			continue;
 
-		std::map<int, std::shared_ptr<CJITByteCode> >::iterator it = analysed.find(func->GetId());
-		if( it == analysed.end() )
+		std::pair<int, asUINT> key(func->GetId(), levels - 1);
+		std::map<std::pair<int, asUINT>, std::shared_ptr<CJITByteCode> >::iterator it = search.analysed.find(key);
+		if( it == search.analysed.end() )
 		{
 			std::shared_ptr<CJITByteCode> callee;
-			if( func != m_func && func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
+			if( func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
 			    func->scriptData->tryCatchInfo.GetLength() == 0 && func->scriptData->byteCode.GetLength() <= inlining.maxSize &&
 			    (inlining.filter == 0 || inlining.filter(func, inlining.filterParam)) )
 			{
+				// The function can only be inlined if the functions it calls are
+				// inlined into it, with a quarter of the budget of the function
+				// being compiled
 				callee = std::make_shared<CJITByteCode>();
-				if( callee->Decode(func) < 0 || !callee->CanBeInlined() )
+				if( callee->Decode(func) < 0 || !callee->CanBeInlined(false) )
 					callee.reset();
 				else
 				{
-					callee->Analyse(allowRegisterCache, maxCachedSlots);
-					if( !callee->HasStaticStack() )
+					callee->AnalyseStackDepth();
+					search.path.push_back(func->GetId());
+					callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
+					search.path.pop_back();
+					if( !callee->HasStaticStack() || !callee->CanBeInlined(true) )
 						callee.reset();
+					else
+						callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 				}
 			}
-			it = analysed.insert(std::make_pair(func->GetId(), callee)).first;
+			it = search.analysed.insert(std::make_pair(key, callee)).first;
 		}
 
-		if( it->second && it->second->GetLength() <= budget )
+		asUINT size = it->second ? it->second->GetLength() + it->second->m_inlinedLength : 0;
+		if( it->second && size <= budget )
 		{
-			budget -= it->second->GetLength();
+			budget -= size;
+			m_inlinedLength += size;
 			instr.flags |= JIT_INSTR_INLINE;
 			m_inlinees[n] = it->second;
 			if( objType )
@@ -642,8 +672,23 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	AnalyseStackDepth();
 	m_inlinees.clear();
 	m_inlineObjTypes.clear();
+	m_inlinedLength = 0;
 	if( inlining )
-		FindInlinees(allowRegisterCache, maxCachedSlots, *inlining);
+	{
+		// Up to 4 levels of calls are inlined. The function inlines at most 16 times
+		// the size of the largest function to inline
+		SInlineSearch search;
+		search.allowRegisterCache = allowRegisterCache;
+		search.maxCachedSlots     = maxCachedSlots;
+		search.options            = inlining;
+		search.path.push_back(m_func->GetId());
+		FindInlinees(search, 4, inlining->maxSize * 16);
+	}
+	AnalyseBody(allowRegisterCache, maxCachedSlots);
+}
+
+void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
+{
 	BuildBlocks();
 	AnalyseVRLiveness();
 	AnalyseSlots(allowRegisterCache, maxCachedSlots);

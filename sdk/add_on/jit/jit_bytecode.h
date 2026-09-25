@@ -105,9 +105,9 @@ public:
 	int  Decode(asCScriptFunction *func);
 
 	// Performs the analysis. Must be called after Decode. The small functions called
-	// with asBC_CALL that call nothing themselves are analysed too, so that their code
-	// can be emitted in place, and so are such methods called with asBC_CALLINTF if
-	// only one class can implement them, see FindInlinees
+	// with asBC_CALL are analysed too, so that their code can be emitted in place if
+	// they call nothing but the functions emitted in theirs, and so are such methods
+	// called with asBC_CALLINTF if only one class can implement them, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
@@ -201,8 +201,10 @@ protected:
 	void AnalyseDirtySlots();
 	void AnalyseSlotLiveness();
 	void AnalyseStackDepth();
-	void FindInlinees(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions &inlining);
-	bool CanBeInlined() const;
+	void AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots);
+	struct SInlineSearch;
+	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
+	bool CanBeInlined(bool inlineesFound) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
 	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
@@ -230,6 +232,7 @@ protected:
 	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
+	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;
 };
