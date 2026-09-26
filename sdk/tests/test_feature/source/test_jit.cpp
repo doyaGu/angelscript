@@ -2612,6 +2612,249 @@ static bool TestRefCounting()
 	return fail;
 }
 
+// The references of the script objects are counted in place, see
+// CJITByteCode::FindInPlaceRefCounts. The flag of the GC must be cleared, the
+// objects resurrected while they are destroyed must be reported, and the counts of
+// the objects shared by several threads must be changed atomically
+namespace ScriptRefCounts
+{
+	static std::stringstream g_trace;
+	static void Mark(int v) { g_trace << v << " "; }
+
+	// The object that is being destroyed is written into the global handle without
+	// a reference, for the script to copy it
+	static void *g_raw = 0;
+	static void **g_dying = 0;
+	static void Keep(void *ref, int typeId) { g_raw = (typeId & asTYPEID_OBJHANDLE) ? *(void**)ref : ref; }
+	static void Expose()   { *g_dying = g_raw; }
+	static void Unexpose() { *g_dying = 0; }
+
+	static const char *script =
+		"class Node                                                               \n"
+		"{                                                                        \n"
+		"  int id;                                                                \n"
+		"  Node@ other;                                                           \n"
+		"  Node(int i) { id = i; }                                                \n"
+		"  ~Node() { Mark(-id); }                                                 \n"
+		"}                                                                        \n"
+		"Node@ g_ext;                                                             \n"
+		"void makeCycle()                                                         \n"
+		"{                                                                        \n"
+		"  Node@ a = Node(1);                                                     \n"
+		"  Node@ b = Node(2);                                                     \n"
+		"  @a.other = b;                                                          \n"
+		"  @b.other = a;                                                          \n"
+		"  @g_ext = a;                                                            \n"
+		"}                                                                        \n"
+		// Moves the reference from outside of the cycle to the other object, which
+		// the GC must see even if it has counted the references of the object before
+		"int flip()                                                               \n"
+		"{                                                                        \n"
+		"  @g_ext = g_ext.other;                                                  \n"
+		"  return g_ext.other.other is g_ext ? g_ext.id : -1;                     \n"
+		"}                                                                        \n"
+		"void dropCycle() { @g_ext = null; }                                      \n"
+		// The child sees the parent being destroyed and copies a handle to it,
+		// which the engine reports
+		"final class Child                                                        \n"
+		"{                                                                        \n"
+		"  ~Child()                                                               \n"
+		"  {                                                                      \n"
+		"    expose();                                                            \n"
+		"    Parent@ q = g_dying;                                                 \n"
+		"    Mark(q.id);                                                          \n"
+		"    @q = null;                                                           \n"
+		"    unexpose();                                                          \n"
+		"  }                                                                      \n"
+		"}                                                                        \n"
+		"final class Parent                                                       \n"
+		"{                                                                        \n"
+		"  int id;                                                                \n"
+		"  Child@ c = Child();                                                    \n"
+		"  Parent(int i) { id = i; }                                              \n"
+		"  ~Parent() { Mark(-id); }                                               \n"
+		"}                                                                        \n"
+		"Parent@ g_dying;                                                         \n"
+		"void resurrect()                                                         \n"
+		"{                                                                        \n"
+		"  Parent@ p = Parent(7);                                                 \n"
+		"  keep(@p);                                                              \n"
+		"  @p = null;                                                             \n"
+		"  Mark(0);                                                               \n"
+		"}                                                                        \n"
+		"Node@ g_shared = Node(5);                                                \n"
+		"int spin(int n)                                                          \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    Node@ a = g_shared;                                                  \n"
+		"    Node@ b = a;                                                         \n"
+		"    s += b.id;                                                           \n"
+		"    @a = null;                                                           \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	static const int SPIN_THREADS = 4;
+	static const int SPIN_COUNT   = 100000;
+	static std::mutex g_lock;
+
+	// The memory functions of the tests aren't thread safe, so everything that
+	// allocates is done under the lock, including the data of the thread that the
+	// first execution allocates. The copies of the handles in spin only change the
+	// reference count of the shared object
+	static void Spin(asIScriptEngine *engine, asIScriptFunction *func, std::atomic<int> *ready, int *result)
+	{
+		asIScriptContext *ctx;
+		{
+			std::lock_guard<std::mutex> lock(g_lock);
+			ctx = engine->CreateContext();
+			ctx->Prepare(func);
+			ctx->SetArgDWord(0, 1);
+			ctx->Execute();
+			ctx->Prepare(func);
+			ctx->SetArgDWord(0, SPIN_COUNT);
+		}
+		(*ready)++;
+		while( *ready < SPIN_THREADS )
+			std::this_thread::yield();
+		*result = ctx->Execute() == asEXECUTION_FINISHED ? int(ctx->GetReturnDWord()) : -1;
+
+		std::lock_guard<std::mutex> lock(g_lock);
+		ctx->Release();
+		asThreadCleanup();
+	}
+
+	// Returns what was observed
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r;
+		r = engine->RegisterGlobalFunction("void Mark(int)", asFUNCTION(Mark), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void keep(?&in)", asFUNCTION(Keep), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void expose()", asFUNCTION(Expose), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("void unexpose()", asFUNCTION(Unexpose), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+		g_dying = (void**)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("g_dying"));
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+
+		// The GC counts the references of the objects of the cycle in separate steps,
+		// and the flips in between must keep them alive. Once or twice per step, so
+		// that the steps see either object referenced from outside
+		g_trace.str("");
+		ctx->Prepare(mod->GetFunctionByDecl("void makeCycle()"));
+		ctx->Execute();
+		engine->GarbageCollect(asGC_FULL_CYCLE);
+		asIScriptFunction *flip = mod->GetFunctionByDecl("int flip()");
+		int flips = 0, wrong = 0, expect = 2;
+		unsigned rnd = 1;
+		for( int n = 0; n < 1000; n++ )
+		{
+			engine->GarbageCollect(asGC_ONE_STEP | asGC_DETECT_GARBAGE);
+			rnd = rnd * 1103515245 + 12345;
+			for( unsigned k = (rnd >> 16) & 1; k < 2; k++ )
+			{
+				ctx->Prepare(flip);
+				r = ctx->Execute();
+				if( r != asEXECUTION_FINISHED || int(ctx->GetReturnDWord()) != expect )
+					wrong++;
+				expect = 3 - expect;
+				flips++;
+			}
+		}
+		s << "flips " << flips << " wrong " << wrong << " destroyed " << g_trace.str() << "\n";
+		if( wrong != 0 || g_trace.str() != "" )
+			TEST_FAILED;
+		ctx->Prepare(mod->GetFunctionByDecl("void dropCycle()"));
+		ctx->Execute();
+		engine->GarbageCollect(asGC_FULL_CYCLE);
+		if( g_trace.str() != "-1 -2 " && g_trace.str() != "-2 -1 " )
+			TEST_FAILED;
+
+		g_trace.str("");
+		msgs.buffer = "";
+		ctx->Prepare(mod->GetFunctionByDecl("void resurrect()"));
+		r = ctx->Execute();
+		s << "resurrect " << r << " " << g_trace.str() << msgs.buffer;
+
+		asIScriptObject *shared = *(asIScriptObject**)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("g_shared"));
+		int before = shared->AddRef();
+		shared->Release();
+		std::atomic<int> ready(0);
+		int results[SPIN_THREADS];
+		std::vector<std::thread> threads;
+		for( int n = 0; n < SPIN_THREADS; n++ )
+			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+		for( int n = 0; n < SPIN_THREADS; n++ )
+			threads[n].join();
+		int after = shared->AddRef();
+		shared->Release();
+		s << "spin";
+		for( int n = 0; n < SPIN_THREADS; n++ )
+		{
+			s << " " << results[n];
+			if( results[n] != 5 * SPIN_COUNT )
+				TEST_FAILED;
+		}
+		s << " references " << after - before << "\n";
+		if( after != before )
+			TEST_FAILED;
+
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestScriptRefCounts()
+{
+	using namespace ScriptRefCounts;
+	bool fail = false;
+
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("resurrect 0 -7 7 0  (0, 0) : Error   : The script object of type 'Parent' is being resurrected illegally during destruction") == std::string::npos )
+		TEST_FAILED;
+
+	// The JIT compiler must outlive the engine
+	CJITCompiler jit(envFlags);
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("script reference counts: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("script reference counts:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+
+	return fail;
+}
+
 // The calls from the application through CJITCompiler::Prepare and Execute, which
 // enter the compiled code directly. Everything that the application can observe
 // must be the same as with the methods of the context
@@ -3206,6 +3449,7 @@ bool Test()
 	fail = TestInlining() || fail;
 	fail = TestCppExceptions() || fail;
 	fail = TestRefCounting() || fail;
+	fail = TestScriptRefCounts() || fail;
 	fail = TestHostCalls() || fail;
 	fail = TestMemoryFunctions() || fail;
 

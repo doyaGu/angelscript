@@ -279,7 +279,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 				continue;
 			if( isTarget[n] )
 				last = -1;
-			if( IsBorrowed(n) || (instr.flags & JIT_INSTR_MOVED) )
+			if( IsBorrowed(n) || (instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT)) )
 				continue;
 			if( SharesMaterialization(instr.op) )
 			{
@@ -378,15 +378,17 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 				SyncAllSlots(instrs[idx + consumed].pos);
 
 			// Suspend requests and returns to the VM only call functions on rare paths,
-			// and so do the inlined calls unless the inlined function calls functions
+			// and so do the inlined calls unless the inlined function calls functions,
+			// and the copies and releases of the script objects counted in place
 			if( instr.flags & JIT_INSTR_INLINE )
 				calls[idx] = m_inlineCalls;
-			else if( instr.op != asBC_SUSPEND && instr.op != asBC_RET )
+			else if( instr.op != asBC_SUSPEND && instr.op != asBC_RET && !(instr.flags & JIT_INSTR_REFCOUNT) )
 				for( BaseNode *node = start->next(); node && !calls[idx]; node = node->next() )
 					calls[idx] = node->is_invoke();
 		}
 
-		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] && !IsBorrowed(idx) )
+		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] && !IsBorrowed(idx) &&
+		    !(instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT)) )
 		{
 			m_shareMaterial = false;
 			EmitDematerialize();

@@ -160,6 +160,8 @@ protected:
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
 	bool IsBorrowed(asUINT idx) const;
 	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
+	void EmitScriptAddRef(asUINT idx, const Gp &obj);
+	void EmitScriptRelease(asUINT idx, const Gp &obj);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
 	void EmitInlineCall(asUINT idx);
 	void EmitInlineExit(int frame);
@@ -182,6 +184,9 @@ protected:
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void StoreImm32(const Mem &dst, int value);
+	void EmitAddRefInPlace(const Gp &obj, const Label &slow);
+	void EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
+	void EmitRefCountInc(const Gp &obj);
 
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);

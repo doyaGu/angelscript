@@ -773,7 +773,7 @@ static bool IsCountedRef(asCTypeInfo *type)
 void CJITByteCode::AnalyseBorrows()
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
-		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED);
+		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT);
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_borrowedArgs.clear();
@@ -786,6 +786,7 @@ void CJITByteCode::AnalyseBorrows()
 	}
 #endif
 	FindMovedRefs();
+	FindInPlaceRefCounts();
 }
 
 // The handles copied from variables that are released right after the copy, e.g.
@@ -826,6 +827,30 @@ void CJITByteCode::FindMovedRefs()
 		copy.flags    |= JIT_INSTR_MOVE;
 		release.flags |= JIT_INSTR_MOVED;
 	}
+}
+
+// The script objects count their references like the generated code can do in
+// place of calling asCScriptObject::AddRef and Release: the flag of the GC is
+// cleared, and the counter is incremented or decremented. AddRef is only called
+// for the objects that are being destroyed, to report the error, and Release for
+// the last reference, which destroys the object. The copies of the handles aren't
+// sync points then, as the cached variables are only stored on the rare paths
+void CJITByteCode::FindInPlaceRefCounts()
+{
+#ifdef JIT_INPLACE_REFCOUNT
+	const asSTypeBehaviour &beh = m_func->engine->scriptTypeBehaviours.beh;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		if( (instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV) ||
+		    (instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_BORROW | JIT_INSTR_MOVED)) )
+			continue;
+		asCObjectType *type = CastToObjectType(reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc)));
+		if( type && (type->flags & asOBJ_SCRIPT_OBJECT) && IsCountedRef(type) &&
+		    type->beh.addref == beh.addref && type->beh.release == beh.release )
+			instr.flags |= JIT_INSTR_REFCOUNT;
+	}
+#endif
 }
 
 // The handle parameters that the function doesn't store or hand over anywhere, but
@@ -1145,6 +1170,11 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 			// The parameters that may borrow references are left to HasSyncPoints
 			int p = FindParam(asBC_SWORDARG0(instr.bc));
 			m_hasSyncPoints = p < 0 || p >= 31 || !((m_releasedParams >> p) & 1);
+		}
+		else if( instr.flags & JIT_INSTR_REFCOUNT )
+		{
+			// The rare paths call AddRef and Release
+			m_hasSyncPoints = true;
 		}
 		else
 			m_hasSyncPoints = IsSyncPointAt(n);

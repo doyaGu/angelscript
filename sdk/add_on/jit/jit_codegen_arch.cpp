@@ -3,6 +3,7 @@
 // per supported architecture.
 
 #include "jit_codegen.h"
+#include "jit_runtime.h"
 
 BEGIN_AS_NAMESPACE
 
@@ -92,6 +93,59 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	x86::Mem m(dst);
 	m.set_size(4);
 	m_uc.cc->mov(m, Imm(value));
+}
+
+// The reference counts of the script objects, see CJITByteCode::FindInPlaceRefCounts.
+// Like asCScriptObject::AddRef the flag of the GC is cleared. The objects that are
+// being destroyed are left to AddRef, which reports the error
+void CJITCodeGen::EmitAddRefInPlace(const Gp &obj, const Label &slow)
+{
+	x86::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	x86::Mem dead = mem_ptr(obj, layout.deadFlag);
+	dead.set_size(1);
+	cc->test(dead, Imm(layout.deadFlagMask));
+	cc->jnz(slow);
+	x86::Mem gc = mem_ptr(obj, layout.gcFlag);
+	gc.set_size(1);
+	cc->and_(gc, Imm(int8_t(~layout.gcFlagMask)));
+	EmitRefCountInc(obj);
+}
+
+// Like asCScriptObject::Release the flag of the GC is cleared. The last reference
+// is left to Release, which destroys the object. With atomic reference counts
+// another thread may release a reference between the check and the decrement,
+// which jumps to race with the count at 0
+void CJITCodeGen::EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race)
+{
+	x86::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	x86::Mem gc = mem_ptr(obj, layout.gcFlag);
+	gc.set_size(1);
+	cc->and_(gc, Imm(int8_t(~layout.gcFlagMask)));
+	x86::Mem count = mem_ptr(obj, layout.refCount);
+	count.set_size(4);
+	cc->cmp(count, Imm(1));
+	cc->jbe(slow);
+	if( layout.atomicRefCount )
+	{
+		cc->lock().dec(count);
+		cc->jz(race);
+	}
+	else
+		cc->dec(count);
+}
+
+void CJITCodeGen::EmitRefCountInc(const Gp &obj)
+{
+	x86::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	x86::Mem count = mem_ptr(obj, layout.refCount);
+	count.set_size(4);
+	if( layout.atomicRefCount )
+		cc->lock().inc(count);
+	else
+		cc->inc(count);
 }
 
 // Branch on the result of a floating point compare. The VM compares as
@@ -283,6 +337,26 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	Gp t = m_uc.new_gp32();
 	m_uc.mov(t, Imm(value));
 	m_uc.store_u32(dst, t);
+}
+
+#endif
+
+#if !defined(ASMJIT_UJIT_X86)
+
+// The references are only counted in place on x86, see JIT_INPLACE_REFCOUNT
+void CJITCodeGen::EmitAddRefInPlace(const Gp &, const Label &)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitReleaseInPlace(const Gp &, const Label &, const Label &)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitRefCountInc(const Gp &)
+{
+	m_failed = true;
 }
 
 #endif

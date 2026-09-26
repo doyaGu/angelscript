@@ -76,6 +76,12 @@ struct SJITObjectLayout
 	int funcType;             // asEFuncType in asCScriptFunction
 	int scriptData;           // ScriptFunctionData* in asCScriptFunction
 	int jitFunction;          // asJITFunction in ScriptFunctionData
+	int refCount;             // asCAtomic in asCScriptObject
+	int gcFlag;               // byte of the gcFlag bit field in asCScriptObject
+	int gcFlagMask;
+	int deadFlag;             // byte of the hasRefCountReachedZero bit field in asCScriptObject
+	int deadFlagMask;
+	int atomicRefCount;       // 1 if the engine changes the reference counts with atomic operations
 };
 
 const SJITObjectLayout &JIT_GetObjectLayout() noexcept;
@@ -164,6 +170,11 @@ void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noex
 
 // asBC_REFCPY and asBC_RefCpyV
 void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *src) noexcept;
+
+// The rare paths of the reference counts of script objects changed in place. The
+// registers must have been synced, as Release may execute the destructor
+void   JIT_AddRefScriptObject(void *obj) noexcept;
+void   JIT_ReleaseScriptObject(void *obj) noexcept;
 
 // asBC_Cast. handle is the address of the handle to cast, may be null
 void   JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept;

@@ -26,7 +26,8 @@ enum EJITInstrFlags
 	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
 	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
-	JIT_INSTR_MOVED       = 0x200  // asBC_FREE of the variable whose reference has been taken over, which only clears it
+	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
+	JIT_INSTR_REFCOUNT    = 0x400  // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
 };
 
 // One decoded bytecode instruction
@@ -86,6 +87,13 @@ static const asUINT JIT_FRAME_BIT = 0x80000000u;
 // the call states that native callers push, see JITFunction
 #if AS_PTR_SIZE == 2
 #define JIT_NATIVE_RETURN
+#endif
+
+// On x86 the generated code counts the references of the script objects itself,
+// see FindInPlaceRefCounts. The atomic operations of the engine are compatible
+// with the locked instructions used there
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__X86__) || defined(__i386__)
+#define JIT_INPLACE_REFCOUNT
 #endif
 
 // The functions that Analyse lets the code generator emit in place of their calls
@@ -201,8 +209,10 @@ public:
 	bool   HasSyncPoints(asUINT borrowed = 0) const { return m_hasSyncPoints || (m_releasedParams & ~borrowed) != 0; }
 
 	// Returns true if the instruction stores the cached variables, see IsSyncPoint.
-	// The copies of the references lent to the inlined calls don't
-	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & JIT_INSTR_BORROW); }
+	// The copies of the references lent to the inlined calls don't, and neither do
+	// the copies of the script objects counted in place, which only store them on
+	// the rare paths
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT)); }
 
 	// Returns the index of the parameter in the variable, or -1
 	int    FindParam(int offset) const;
@@ -246,6 +256,7 @@ protected:
 	void FindBorrowableParams();
 	void FindBorrowedArgs();
 	void FindMovedRefs();
+	void FindInPlaceRefCounts();
 	int  FindVarConsumer(asUINT idx) const;
 	int  FindPush(asUINT idx, int top) const;
 	bool HoldsReference(int var) const;

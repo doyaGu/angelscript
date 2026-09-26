@@ -1321,7 +1321,7 @@ bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 // True if the instruction may call AddRef or Release directly, see EmitObjectOp
 bool CJITCodeGen::CallsBehaviourDirectly(const SJITInstr &instr) const
 {
-	if( instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV )
+	if( (instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV) || (instr.flags & JIT_INSTR_REFCOUNT) )
 		return false;
 	asCObjectType *objType = (asCObjectType*)asBC_PTRARG(instr.bc);
 	SDirectBehaviour beh;
@@ -1363,6 +1363,50 @@ void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
 	call->set_arg(0, obj);
 }
 
+// Adds a reference to the script object in place, see CJITByteCode::FindInPlaceRefCounts.
+// The object pointer must not be null
+void CJITCodeGen::EmitScriptAddRef(asUINT idx, const Gp &obj)
+{
+	Label slow = m_uc.new_label();
+	Label done = m_uc.new_label();
+	EmitAddRefInPlace(obj, slow);
+	BaseNode *cold = BeginCold(slow);
+	SyncForCall(idx);
+	InvokeNode *call = Invoke((const void*)JIT_AddRefScriptObject, FuncSignature::build<void, void*>());
+	call->set_arg(0, obj);
+	EmitDematerialize();
+	EndCold(cold, done);
+	m_uc.bind(done);
+}
+
+// Releases a reference of the script object in place. The last one is released by
+// Release, which may execute the destructor, see FREE. The object pointer must not
+// be null
+void CJITCodeGen::EmitScriptRelease(asUINT idx, const Gp &obj)
+{
+	Label slow = m_uc.new_label();
+	Label race = m_uc.new_label();
+	Label done = m_uc.new_label();
+	EmitReleaseInPlace(obj, slow, race);
+	BaseNode *cold;
+	if( JIT_GetObjectLayout().atomicRefCount )
+	{
+		// Another thread has released a reference between the check and the
+		// decrement, so the reference is given back for Release to destroy the object
+		cold = BeginCold(race);
+		EmitRefCountInc(obj);
+		m_uc.bind(slow);
+	}
+	else
+		cold = BeginCold(slow);
+	SyncForCall(idx);
+	InvokeNode *call = Invoke((const void*)JIT_ReleaseScriptObject, FuncSignature::build<void, void*>());
+	call->set_arg(0, obj);
+	EmitDematerialize();
+	EndCold(cold, done);
+	m_uc.bind(done);
+}
+
 bool CJITCodeGen::EmitObjectOp(asUINT idx)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
@@ -1402,6 +1446,17 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			// The caller releases the reference, or the copy before has taken it
 			// over, see CJITByteCode::FindMovedRefs
 			m_uc.store_zero_reg(Var(a0));
+			break;
+		}
+		if( instr.flags & JIT_INSTR_REFCOUNT )
+		{
+			// Like the VM the variable is cleared after the release
+			Gp obj = LoadPtr(a0);
+			Label skip = m_uc.new_label();
+			m_uc.j(skip, test_z(obj));
+			EmitScriptRelease(idx, obj);
+			m_uc.store_zero_reg(Var(a0));
+			m_uc.bind(skip);
 			break;
 		}
 		{
@@ -1472,11 +1527,40 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			StorePtr(a0, s);
 			break;
 		}
-		// TODO: runtime optimize: For script objects the reference counting could be done
-		//                         inline: clear gcFlag and increment or decrement refCount
-		//                         (with the atomic operations of the engine when built with
-		//                         threads), and only call Release when it may destroy the
-		//                         object, i.e. when refCount is 1. The same applies to FREE above.
+		if( instr.flags & JIT_INSTR_REFCOUNT )
+		{
+			// The references of the script objects are counted in place, see
+			// CJITByteCode::FindInPlaceRefCounts. Like the VM the old object is
+			// released before the new one gets its reference, which the handle may
+			// take over from the variable released next, and the destination is set last
+			Mem dst;
+			if( instr.op == asBC_REFCPY )
+			{
+				Gp d = m_uc.new_gp_ptr();
+				m_uc.load(d, Stack(0));
+				PopStack(PTR_BYTES);
+				dst = mem_ptr(d);
+			}
+			else
+				dst = Var(a0);
+			Gp s = m_uc.new_gp_ptr();
+			m_uc.load(s, Stack(0));
+			Gp old = m_uc.new_gp_ptr();
+			m_uc.load(old, dst);
+			Label noOld = m_uc.new_label();
+			m_uc.j(noOld, test_z(old));
+			EmitScriptRelease(idx, old);
+			m_uc.bind(noOld);
+			if( !(instr.flags & JIT_INSTR_MOVE) )
+			{
+				Label noNew = m_uc.new_label();
+				m_uc.j(noNew, test_z(s));
+				EmitScriptAddRef(idx, s);
+				m_uc.bind(noNew);
+			}
+			m_uc.store(dst, s);
+			break;
+		}
 		{
 			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(bc);
 			SDirectBehaviour addref, release;

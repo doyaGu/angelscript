@@ -41,6 +41,35 @@ const SJITContextLayout &JIT_GetContextLayout() noexcept
 }
 #undef JIT_CTX_OFFSET
 
+// The generated code counts the references of the script objects in place, see
+// CJITByteCode::FindInPlaceRefCounts. The flags are bit fields, which have no
+// offset, so they are looked for in the memory of an object with only one set
+struct SJITScriptObject : asCScriptObject
+{
+	static int RefCountOffset() { return int(offsetof(SJITScriptObject, refCount)); }
+	static int FlagByte(bool dead) { int mask; return FindFlag(dead, mask); }
+	static int FlagMask(bool dead) { int mask; FindFlag(dead, mask); return mask; }
+	static int FindFlag(bool dead, int &mask)
+	{
+		alignas(asCScriptObject) unsigned char bytes[sizeof(asCScriptObject)];
+		memset(bytes, 0, sizeof(bytes));
+		SJITScriptObject *obj = reinterpret_cast<SJITScriptObject*>(bytes);
+		if( dead )
+			obj->hasRefCountReachedZero = true;
+		else
+			obj->gcFlag = true;
+		for( int n = 0; n < int(sizeof(bytes)); n++ )
+			if( bytes[n] )
+			{
+				mask = bytes[n];
+				return n;
+			}
+		mask = 0;
+		return 0;
+	}
+};
+static_assert(sizeof(asCAtomic) == sizeof(asDWORD), "the reference counts are changed as 32bit integers");
+
 const SJITObjectLayout &JIT_GetObjectLayout() noexcept
 {
 	static const SJITObjectLayout layout =
@@ -52,7 +81,17 @@ const SJITObjectLayout &JIT_GetObjectLayout() noexcept
 		int(offsetof(asCObjectType, interfaceVFTOffsets) + offsetof(asCArray<asUINT>, array)),
 		int(offsetof(asCScriptFunction, funcType)),
 		int(offsetof(asCScriptFunction, scriptData)),
-		int(offsetof(asCScriptFunction::ScriptFunctionData, jitFunction))
+		int(offsetof(asCScriptFunction::ScriptFunctionData, jitFunction)),
+		SJITScriptObject::RefCountOffset(),
+		SJITScriptObject::FlagByte(false),
+		SJITScriptObject::FlagMask(false),
+		SJITScriptObject::FlagByte(true),
+		SJITScriptObject::FlagMask(true),
+#if defined(AS_NO_THREADS) || defined(AS_NO_ATOMIC)
+		0
+#else
+		1
+#endif
 	};
 	return layout;
 }
@@ -558,6 +597,16 @@ void JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *
 	}
 
 	*dst = src;
+}
+
+void JIT_AddRefScriptObject(void *obj) noexcept
+{
+	static_cast<asCScriptObject*>(obj)->AddRef();
+}
+
+void JIT_ReleaseScriptObject(void *obj) noexcept
+{
+	static_cast<asCScriptObject*>(obj)->Release();
 }
 
 void JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept

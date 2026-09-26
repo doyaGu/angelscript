@@ -27,8 +27,8 @@
 //    implement both interface versions, so this would be a second compiler class.
 //  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall), and
 //    unwind information on the platforms besides 64bit Windows and Linux (jit_unwind.h).
-//  - Inline reference counting for script objects in REFCPY/FREE, instead of calling their
-//    AddRef and Release behaviours (jit_codegen_call.cpp, EmitObjectOp).
+//  - Count the references of the script objects in place on AArch64 too, which needs the
+//    LSE atomics or loops of exclusive loads and stores (jit_codegen_arch.cpp).
 //  - Borrow the references of the handle arguments on 32bit hosts, whose call states have
 //    no room to note the borrowed parameters, and for the calls that aren't inlined, which
 //    would need entry points of the callees that don't release the parameters
@@ -245,6 +245,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			fprintf(file, "   ; borrowed");
 		if( instr.flags & (JIT_INSTR_MOVE | JIT_INSTR_MOVED) )
 			fprintf(file, "   ; moved");
+		if( instr.flags & JIT_INSTR_REFCOUNT )
+			fprintf(file, "   ; counted in place");
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )
