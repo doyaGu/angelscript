@@ -40,6 +40,8 @@ endif()
 add_library(angelscript_jit STATIC
     jit.h
     jit.cpp
+    jit_aot.h
+    jit_aot.cpp
     jit_aot_runtime.h
     jit_bytecode.h
     jit_bytecode.cpp
