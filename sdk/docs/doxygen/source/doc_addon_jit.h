@@ -62,6 +62,7 @@ public:
   void    SetBailInstructions(const asEBCInstr *instructions, asUINT count);
   void    SetMaxFunctionSize(asUINT sizeInDWords);
   void    SetMaxInlineSize(asUINT sizeInDWords);
+  int     SetCompileThresholds(asUINT calls, asUINT iterations);
 
   // Ahead of time compilation
   void SetAOTOutput(const char *directory);
@@ -172,10 +173,62 @@ execute the scripts in a single thread only can also compile the library with
 AS_NO_THREADS, which makes the reference counts of the objects plain integers
 instead of atomic ones, and takes the locks out of the memory functions.
 
-Note that the JIT functions are compiled when the module is built, so the build
-takes a little longer. For scripts that are compiled often but run rarely a
-\ref CJITCompiler::SetCompileFilter "compile filter" can be used to only compile
-the functions that matter.
+Note that the JIT functions are compiled when the module is built by default, so
+the build takes longer. For scripts that are compiled often but run rarely the
+functions can be compiled only once they are executed often enough, see
+\ref doc_addon_jit_tiered, and a \ref CJITCompiler::SetCompileFilter "compile filter"
+can leave the functions that don't matter to the VM.
+
+\section doc_addon_jit_tiered Tiered compilation
+
+Most scripts spend nearly all of their time in a small part of their functions,
+and compiling the others only makes the build slower and takes memory. With
+\ref CJITCompiler::SetCompileThresholds "SetCompileThresholds" the compiler leaves
+the functions to the VM at first, as HotSpot and LuaJIT leave them to their
+interpreters, and compiles each function when it has been called the given number
+of times, or when one of its loops has run the given number of iterations.
+
+\code
+CJITCompiler *jit = new CJITCompiler();
+jit->SetCompileThresholds(1000, 1000);
+engine->SetJITCompiler(jit);
+\endcode
+
+A function that is compiled in a loop goes on with the loop in the compiled code,
+so that a function that loops for a long time, e.g. the main function of a script,
+doesn't have to be called again to run natively. The iterations are counted for
+each loop across the calls of the function, and a threshold of 0 iterations
+doesn't count them. A threshold of 0 calls compiles all functions when the module
+is built, which is the default. The thresholds are limited to 16383, and must be
+set before any function is compiled, otherwise SetCompileThresholds fails. The
+engine must use the CJITCompiler itself, not a compiler that forwards to it, as
+the deferred functions call back into it.
+
+Until a function is compiled the VM calls into the compiler to count at the
+JitEntry instruction of its first statement and at the first one of each loop,
+and the compiled code calls the function through the VM. Once it is compiled,
+the compiled code calls it natively. The calls through \ref CJITCompiler::Execute
+count as well. The thread that reaches a threshold compiles the function and
+continues with its compiled code, while other threads that execute the function
+at the same time go on in the VM. A function that can't be compiled stays with
+the VM for good. The short functions
+are compiled in place in the compiled functions that call them whether they are
+compiled themselves or not, and the functions whose code was generated ahead of
+time use it right away. In the \ref SJITStatistics "statistics" functionsDeferred
+counts the functions whose compilation was deferred, and functionsCompiled the
+ones compiled so far, including those compiled when the module was built.
+Everything else behaves as with the functions compiled up front: the exceptions,
+line callbacks, suspension, saving the bytecode, and the rest work as with the
+interpreter.
+
+With the thresholds 2,3 the feature tests of the library compile 636 of their
+8756 functions, 11712 instead of 146343 bytecode instructions. The tests of the
+test_performance project compile 590 of their 970 functions with the thresholds
+2,3, and 330 with 1000,1000. With the thresholds 2,3 the tests take as long as
+when all functions are compiled up front, as the functions that run long enough
+to matter spend so little of their time in the VM. With 1000,1000 they take 3%
+longer by the geometric mean, as the shortest tests spend a larger part of their
+time in the VM.
 
 \section doc_addon_jit_aot Ahead of time compilation
 
@@ -321,8 +374,10 @@ are done by helper functions on 32bit hosts.
    and handle parameters, and primitive, reference, handle, and value type return
    values. Everything else, including asCALL_GENERIC, goes through the same code
    as the VM.
- - All functions are compiled when the module is built. Lazy compilation would
-   require the asIJITCompilerV2 interface, which the add-on doesn't implement.
+ - The \ref doc_addon_jit_tiered "deferred functions" are compiled by the thread
+   that executes them, which waits for the compilation, and not in the background.
+   Their compiled code doesn't use what the VM has seen while executing them, such
+   as the classes of the objects whose methods they call.
  - Only x86-64, AArch64, and 32bit x86 are supported, as those are the
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
@@ -352,6 +407,13 @@ registers while executing natively, and so are the primitive local variables tha
 are never accessed through their address. Everything is written back to the VM
 before a registered function or another script function is called, before the
 line callback is invoked, and before returning to the VM.
+
+The deferred functions of the \ref doc_addon_jit_tiered "tiered compilation" all
+share one native function, which the VM calls at the JitEntry instructions whose
+argument holds a count besides the index. It counts down, and when the count runs
+out it compiles the function and continues in the compiled code at the entry point
+with that index. The other JitEntry instructions have the argument 0 until then,
+so the VM goes on past them without leaving the interpreter loop.
 
 Compare instructions are fused with the following conditional jump or test, so a
 condition in the script becomes a single compare-and-branch. Registered functions
