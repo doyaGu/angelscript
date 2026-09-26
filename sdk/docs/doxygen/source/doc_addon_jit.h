@@ -112,8 +112,9 @@ for example the result of p.next in @p = p.next, are moved instead, so no
 reference is added and released for them. On x86 the generated code counts the
 references of the script classes itself, the same way as the engine does, and
 only calls their AddRef and Release when an object loses its last reference or
-is resurrected while it is being destroyed. A C++ exception thrown by a function called
-this way is still caught and turned into a script exception like with the VM. For
+is resurrected while it is being destroyed. The initialization lists that hold only
+primitives, enums, or value types without a destructor are freed without going
+through their elements. A C++ exception thrown by a function called this way is still caught and turned into a script exception like with the VM. For
 that the exception must be able to pass through the generated code, which needs
 unwind information for it. The add-on registers the unwind information on 64bit
 Windows and 64bit Linux, and 32bit Windows with MSVC doesn't need any. On other
@@ -202,7 +203,7 @@ Assign.2       0.241    0.008      0.008    0.008
 Assign.3       0.170    0.011      0.011    0.011
 Assign.4       0.207    0.016      0.016    0.016
 Assign.5       0.208    0.016      0.016    0.016
-Array.1        0.310    0.189      0.145    0.099
+Array.1        0.310    0.147      0.104    0.066
 Array.2        0.148    0.076      0.032    0.032
 GlobalVar      0.089    0.036      0.016    0.016
 ClassProp      0.140    0.041      0.018    0.018
