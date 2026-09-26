@@ -4,13 +4,15 @@
 #include "angelscript.h"
 
 #ifdef AS_TEST_JIT
-// When the test is run with --jit the engines are created with the JIT compiler attached
+// When the test is run with --jit or --aot the engines are created with the JIT compiler attached
 asIScriptEngine *CreateEngineForTest(asDWORD version = ANGELSCRIPT_VERSION);
 void             ReleaseJitCompiler();
 extern bool      g_useJit;
+extern bool      g_useAot;
 extern bool      g_jitDirectCalls;
 extern bool      g_jitNoDirectCalls;
 extern const char *g_jitLogFilter;
+extern const char *g_aotOutput;
 #define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
 
 // Prepare and Execute of the JIT compiler when the test is run with --jit, otherwise of the context

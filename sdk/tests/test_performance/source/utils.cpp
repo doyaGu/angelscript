@@ -104,15 +104,17 @@ double GetSystemTimer()
 #include "../../../add_on/jit/jit.h"
 
 bool g_useJit = false;
+bool g_useAot = false;
 bool g_jitDirectCalls = false;
 bool g_jitNoDirectCalls = false;
 const char *g_jitLogFilter = 0;
+const char *g_aotOutput = 0;
 static CJITCompiler *g_jit = 0;
 
 asIScriptEngine *CreateEngineForTest(asDWORD version)
 {
 	asIScriptEngine *engine = (asCreateScriptEngine)(version);
-	if( engine && g_useJit )
+	if( engine && (g_useJit || g_useAot) )
 	{
 		if( g_jit == 0 )
 		{
@@ -120,9 +122,16 @@ asIScriptEngine *CreateEngineForTest(asDWORD version)
 			if( g_jitDirectCalls )   flags |= CJITCompiler::JIT_DIRECT_SYSTEM_CALLS;
 			if( g_jitNoDirectCalls ) flags |= CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS;
 			if( g_jitLogFilter )     flags |= CJITCompiler::JIT_LOG;
+			if( !g_useJit )          flags |= CJITCompiler::JIT_AOT_ONLY;
 			g_jit = new CJITCompiler(flags);
 			if( g_jitLogFilter )
 				g_jit->SetLogFile(stderr, g_jitLogFilter);
+			if( g_aotOutput )
+				g_jit->SetAOTOutput(g_aotOutput);
+#ifdef AS_JIT_AOT_TABLE
+			if( g_useAot )
+				g_jit->AddAOTFunctions(g_jitAOTFunctions, g_jitAOTFunctionCount);
+#endif
 		}
 		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
 		engine->SetJITCompiler(g_jit);
@@ -148,6 +157,8 @@ void UsePooledMemory()
 // Must be called after all engines have been released
 void ReleaseJitCompiler()
 {
+	if( g_jit && g_aotOutput && g_jit->WriteAOTOutput() < 0 )
+		printf("Failed to write the code generated ahead of time to %s\n", g_aotOutput);
 	delete g_jit;
 	g_jit = 0;
 }

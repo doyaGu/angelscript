@@ -111,15 +111,23 @@ int main(int argc, char **argv)
 	// C++ exceptions can't pass through the generated code, and --no-direct never does.
 	// --log <name> writes the code generated for the functions whose name contains
 	// <name> to stderr. --pool makes the engines use the memory functions of the
-	// JIT compiler, with or without --jit
-	bool useJit = false, directCalls = false, noDirectCalls = false, usePool = false;
-	const char *logFilter = 0;
+	// JIT compiler, with or without --jit. --aot-output <dir> writes the C++ code
+	// for the functions compiled to <dir>, and --aot runs the tests with the code
+	// generated ahead of time that the test was built with (the CMake option
+	// AS_JIT_AOT_DIR), and leaves the other functions to the VM, or with --jit
+	// to the JIT compiler
+	bool useJit = false, directCalls = false, noDirectCalls = false, usePool = false, useAot = false;
+	const char *logFilter = 0, *aotOutput = 0;
 	for( int a = 1; a < argc; a++ )
 	{
 		if( strcmp(argv[a], "--log") == 0 && a + 1 < argc )
 			logFilter = argv[++a];
+		if( strcmp(argv[a], "--aot-output") == 0 && a + 1 < argc )
+			aotOutput = argv[++a];
 		if( strcmp(argv[a], "--jit") == 0 )
 			useJit = true;
+		if( strcmp(argv[a], "--aot") == 0 )
+			useAot = true;
 		if( strcmp(argv[a], "--direct") == 0 )
 			directCalls = true;
 		if( strcmp(argv[a], "--no-direct") == 0 )
@@ -129,13 +137,19 @@ int main(int argc, char **argv)
 	}
 #ifdef AS_TEST_JIT
 	g_useJit = useJit;
+	g_useAot = useAot;
 	g_jitDirectCalls = directCalls;
 	g_jitNoDirectCalls = noDirectCalls;
 	g_jitLogFilter = logFilter;
+	g_aotOutput = aotOutput;
 	if( usePool )
 		UsePooledMemory();
+#ifndef AS_JIT_AOT_TABLE
+	if( useAot )
+		printf("The test wasn't built with code generated ahead of time\n");
+#endif
 #else
-	if( useJit || usePool )
+	if( useJit || usePool || useAot || aotOutput )
 		printf("The test wasn't built with the JIT compiler\n");
 #endif
 
@@ -145,6 +159,8 @@ int main(int argc, char **argv)
 #endif
 	if( useJit )
 		printf(noDirectCalls ? " (JIT, no direct calls)" : directCalls ? " (JIT, direct calls)" : " (JIT)");
+	if( useAot )
+		printf(" (AOT)");
 	if( usePool )
 		printf(" (pooled memory)");
 	printf("\n");
