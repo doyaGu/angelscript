@@ -19,6 +19,8 @@ CJITByteCode::CJITByteCode()
 	m_tempMask   = 0;
 	m_staticStack = false;
 	m_inlinedLength = 0;
+	m_borrowableParams = 0;
+	m_releasedParams   = 0;
 	m_bail = 0;
 	m_hasSyncPoints = false;
 }
@@ -349,6 +351,32 @@ asCObjectType *CJITByteCode::GetInlineObjectType(asUINT instrIdx) const
 	return it == m_inlineObjTypes.end() ? 0 : it->second;
 }
 
+asUINT CJITByteCode::GetBorrowedArgs(asUINT instrIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_borrowedArgs.find(instrIdx);
+	return it == m_borrowedArgs.end() ? 0 : it->second;
+}
+
+const std::vector<int> &CJITByteCode::GetBorrowChecks(asUINT instrIdx) const
+{
+	std::map<asUINT, std::vector<int> >::const_iterator it = m_borrowChecks.find(instrIdx);
+	if( it == m_borrowChecks.end() )
+		return m_noChecks;
+	return it->second;
+}
+
+int CJITByteCode::FindParam(int offset) const
+{
+	int var = -((m_func->objectType ? AS_PTR_SIZE : 0) + (m_func->DoesReturnOnStack() ? AS_PTR_SIZE : 0));
+	for( asUINT n = 0; n < m_func->parameterTypes.GetLength(); n++ )
+	{
+		if( var == offset )
+			return int(n);
+		var -= m_func->parameterTypes[n].GetSizeOnStackDWords();
+	}
+	return -1;
+}
+
 int CJITByteCode::GetPopSize(asCScriptFunction *func)
 {
 	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
@@ -636,6 +664,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 						search.path.push_back(func->GetId());
 						callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 						search.path.pop_back();
+						callee->AnalyseBorrows();
 						callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 					}
 				}
@@ -675,7 +704,385 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		search.path.push_back(m_func->GetId());
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
+	AnalyseBorrows();
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
+}
+
+// The variables in the operands of an instruction. Returns their number
+static int GetVarOperands(const SJITInstr &instr, int vars[3])
+{
+	switch( asBCInfo[instr.op].type )
+	{
+	case asBCTYPE_wW_ARG:
+	case asBCTYPE_rW_ARG:
+	case asBCTYPE_rW_DW_ARG:
+	case asBCTYPE_wW_DW_ARG:
+	case asBCTYPE_wW_QW_ARG:
+	case asBCTYPE_rW_QW_ARG:
+	case asBCTYPE_rW_W_DW_ARG:
+	case asBCTYPE_rW_DW_DW_ARG:
+	case asBCTYPE_wW_W_ARG:
+		vars[0] = asBC_SWORDARG0(instr.bc);
+		return 1;
+	case asBCTYPE_wW_rW_ARG:
+	case asBCTYPE_wW_rW_DW_ARG:
+	case asBCTYPE_rW_rW_ARG:
+		vars[0] = asBC_SWORDARG0(instr.bc);
+		vars[1] = asBC_SWORDARG1(instr.bc);
+		return 2;
+	case asBCTYPE_wW_rW_rW_ARG:
+		vars[0] = asBC_SWORDARG0(instr.bc);
+		vars[1] = asBC_SWORDARG1(instr.bc);
+		vars[2] = asBC_SWORDARG2(instr.bc);
+		return 3;
+	case asBCTYPE_W_rW_ARG:
+		vars[0] = asBC_SWORDARG1(instr.bc);
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static bool UsesVar(const SJITInstr &instr, int var)
+{
+	int vars[3];
+	int count = GetVarOperands(instr, vars);
+	for( int n = 0; n < count; n++ )
+		if( vars[n] == var )
+			return true;
+	return false;
+}
+
+// The reference types whose references are counted with the behaviours
+static bool IsCountedRef(asCTypeInfo *type)
+{
+	asCObjectType *ot = CastToObjectType(type);
+	return ot && (ot->flags & asOBJ_REF) && !(ot->flags & asOBJ_NOCOUNT) && ot->beh.addref && ot->beh.release;
+}
+
+// The calls copy the handles that they pass, which adds a reference that the called
+// function releases when it returns. An inlined function that only reads a handle
+// parameter can borrow the reference of the variable that the caller copies it
+// from instead, if the variable holds its own reference and isn't modified until
+// the call has returned, which keeps the object alive. Neither is the reference
+// added nor released then. The frames of the inlined functions that are handed to
+// the VM get references of their own, see CJITCodeGen::EmitInlineExit and
+// JIT_OwnBorrowed, for which the call states of the materialized frames note the
+// borrowed parameters in the upper half of the stack index. Only 64bit hosts have
+// room there
+void CJITByteCode::AnalyseBorrows()
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+		m_instrs[n].flags &= ~JIT_INSTR_BORROW;
+	m_borrowableParams = 0;
+	m_releasedParams   = 0;
+	m_borrowedArgs.clear();
+	m_borrowChecks.clear();
+#ifdef JIT_NATIVE_RETURN
+	if( m_staticStack )
+	{
+		FindBorrowableParams();
+		FindBorrowedArgs();
+	}
+#endif
+}
+
+// The handle parameters that the function doesn't store or hand over anywhere, but
+// only reads, passes as references or objects, and releases. The functions that
+// release the parameters on exceptions themselves are left out
+void CJITByteCode::FindBorrowableParams()
+{
+	if( m_func->dontCleanUpOnException )
+		return;
+	int var = -((m_func->objectType ? AS_PTR_SIZE : 0) + (m_func->DoesReturnOnStack() ? AS_PTR_SIZE : 0));
+	for( asUINT p = 0; p < m_func->parameterTypes.GetLength(); var -= m_func->parameterTypes[p].GetSizeOnStackDWords(), p++ )
+	{
+		const asCDataType &type = m_func->parameterTypes[p];
+		if( p >= 31 || !type.IsObjectHandle() || type.IsReference() || !IsCountedRef(type.GetTypeInfo()) )
+			continue;
+
+		bool borrowable = true, released = false;
+		for( asUINT n = 0; n < m_instrs.size() && borrowable; n++ )
+		{
+			const SJITInstr &instr = m_instrs[n];
+			if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+				continue;
+			switch( instr.op )
+			{
+			case asBC_PshVPtr:
+			case asBC_ChkNullV:
+			case asBC_LoadRObjR:
+			case asBC_CmpPtr:
+				break;
+			case asBC_FREE:
+				released = true;
+				break;
+			case asBC_VAR:
+			{
+				int consumer = FindVarConsumer(n);
+				borrowable = consumer >= 0 && m_instrs[consumer].op == asBC_GETOBJREF;
+				break;
+			}
+			default:
+				borrowable = false;
+				break;
+			}
+		}
+		if( borrowable )
+		{
+			m_borrowableParams |= 1u << p;
+			if( released )
+				m_releasedParams |= 1u << p;
+		}
+	}
+}
+
+// The inlined calls whose handle arguments can borrow the references of the caller,
+// see AnalyseBorrows. The compiler copies each handle argument into a temporary
+// variable, which is moved into the stack slot of the argument before the call:
+//
+//   PshVPtr vX; RefCpyV vT; PopPtr; ... VAR vT; ... GETOBJ; ... CALL
+//
+// The copy lends the reference of vX if vX holds one of its own, which nothing
+// modifies up to the call, and vT isn't used but by the copy and the move. Nothing
+// in between may return to the VM, which would release vT, or enter the code, so
+// only the arguments may be pushed. The copies must not release anything, i.e. the
+// temporary variables must be null, which the first of the copies checks for all
+void CJITByteCode::FindBorrowedArgs()
+{
+	struct SCandidate
+	{
+		asUINT param;
+		int    var;    // the asBC_VAR of the temporary variable, after the copy
+		int    temp;
+		int    source;
+		bool   live;
+	};
+
+	std::vector<SCandidate> found;
+	for( std::map<asUINT, std::shared_ptr<CJITByteCode> >::iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
+	{
+		asUINT call = it->first;
+		const CJITByteCode *callee = it->second.get();
+		asCScriptFunction *func = callee->GetFunction();
+		asUINT params = callee->GetBorrowableParams();
+		found.clear();
+
+		// The argument for the parameter at k dwords above the frame of the function
+		// has its top at the depth of the stack at the call minus k
+		int k = (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+		for( asUINT p = 0; p < func->parameterTypes.GetLength(); k += func->parameterTypes[p].GetSizeOnStackDWords(), p++ )
+		{
+			if( p >= 31 || !((params >> p) & 1) )
+				continue;
+			int top = m_stackDepth[call] - k;
+			int i = int(call) - 1;
+			while( i >= 0 && m_stackDepth[i] >= top )
+				i--;
+			if( i < 3 || m_instrs[i].op != asBC_VAR || m_stackDepth[i] + AS_PTR_SIZE != top )
+				continue;
+
+			const SJITInstr &push = m_instrs[i - 3];
+			const SJITInstr &copy = m_instrs[i - 2];
+			int temp = asBC_SWORDARG0(m_instrs[i].bc);
+			if( push.op != asBC_PshVPtr || copy.op != asBC_RefCpyV || m_instrs[i - 1].op != asBC_PopPtr ||
+			    asBC_SWORDARG0(copy.bc) != temp || asBC_SWORDARG0(push.bc) == temp )
+				continue;
+			asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(copy.bc));
+			if( type != func->parameterTypes[p].GetTypeInfo() || !IsCountedRef(type) || !HoldsReference(asBC_SWORDARG0(push.bc)) )
+				continue;
+
+			bool plain = true;
+			for( asUINT n = asUINT(i - 2); n <= call && plain; n++ )
+				plain = !(m_instrs[n].flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_ENTRY | JIT_INSTR_BAIL | JIT_INSTR_DEAD));
+			if( !plain )
+				continue;
+
+			SCandidate cand;
+			cand.param  = p;
+			cand.var    = i;
+			cand.temp   = temp;
+			cand.source = asBC_SWORDARG0(push.bc);
+			cand.live   = true;
+			found.push_back(cand);
+		}
+
+		// The copies of the others may be between the copy and the call. They are
+		// checked again when one of them is dropped, down to the first of them
+		int first = int(call);
+		bool changed = !found.empty();
+		while( changed )
+		{
+			changed = false;
+			first = int(call);
+			for( asUINT c = 0; c < found.size(); c++ )
+				if( found[c].live && found[c].var - 2 < first )
+					first = found[c].var - 2;
+
+			for( asUINT c = 0; c < found.size(); c++ )
+			{
+				SCandidate &cand = found[c];
+				if( !cand.live )
+					continue;
+				int top = m_stackDepth[cand.var] + AS_PTR_SIZE;
+				int moves = 0;
+				bool ok = true;
+				for( int n = first; n < int(call) && ok; n++ )
+				{
+					const SJITInstr &instr = m_instrs[n];
+					if( n != cand.var - 2 && n != cand.var && UsesVar(instr, cand.temp) )
+						ok = false;
+					if( n <= cand.var || !ok )
+						continue;
+					if( instr.op != asBC_PshVPtr && UsesVar(instr, cand.source) )
+						ok = false;
+
+					switch( instr.op )
+					{
+					case asBC_PshVPtr:
+					case asBC_PopPtr:
+					case asBC_VAR:
+					case asBC_PshC4:
+					case asBC_PshC8:
+					case asBC_PshV4:
+					case asBC_PshV8:
+					case asBC_PshNull:
+					case asBC_PSF:
+					case asBC_PGA:
+					case asBC_PshG4:
+					case asBC_PshGPtr:
+						break;
+					case asBC_GETREF:
+					case asBC_GETOBJREF:
+						if( m_stackDepth[n] - int(asBC_WORDARG0(instr.bc)) == top )
+							ok = false;
+						break;
+					case asBC_GETOBJ:
+					{
+						// Other variables may be moved onto the stack, but not the source
+						int target = m_stackDepth[n] - int(asBC_WORDARG0(instr.bc));
+						if( target == top )
+							moves++;
+						else
+						{
+							int pusher = FindPush(asUINT(n), target);
+							ok = ok && pusher >= 0 && m_instrs[pusher].op == asBC_VAR && m_stackDepth[pusher] + AS_PTR_SIZE == target &&
+							     asBC_SWORDARG0(m_instrs[pusher].bc) != cand.source;
+						}
+						break;
+					}
+					case asBC_RefCpyV:
+					{
+						bool other = false;
+						for( asUINT o = 0; o < found.size() && !other; o++ )
+							other = found[o].live && found[o].var - 2 == n;
+						ok = ok && other;
+						break;
+					}
+					default:
+						ok = false;
+						break;
+					}
+				}
+				if( !ok || moves != 1 )
+				{
+					cand.live = false;
+					changed = true;
+				}
+			}
+		}
+
+		std::vector<int> checks;
+		for( asUINT c = 0; c < found.size(); c++ )
+		{
+			if( !found[c].live )
+				continue;
+			m_instrs[found[c].var - 2].flags |= JIT_INSTR_BORROW;
+			m_borrowedArgs[call] |= 1u << found[c].param;
+			checks.push_back(found[c].temp);
+		}
+		if( !checks.empty() )
+			m_borrowChecks[asUINT(first)] = checks;
+	}
+}
+
+// Returns the instruction that replaces the variable pushed by the asBC_VAR with
+// the object, its address, or the object reference, or -1 if it isn't in the block
+int CJITByteCode::FindVarConsumer(asUINT idx) const
+{
+	int top = m_stackDepth[idx] + AS_PTR_SIZE;
+	for( asUINT n = idx + 1; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_DEAD)) || m_stackDepth[n] < top )
+			return -1;
+		if( (instr.op == asBC_GETOBJ || instr.op == asBC_GETOBJREF || instr.op == asBC_GETREF) &&
+		    m_stackDepth[n] - int(asBC_WORDARG0(instr.bc)) == top )
+			return int(n);
+	}
+	return -1;
+}
+
+// Returns the instruction that pushed the stack slot with the top at the depth
+// where the instruction is reached, or -1 if it isn't in the block
+int CJITByteCode::FindPush(asUINT idx, int top) const
+{
+	for( int n = int(idx); n >= 0; n-- )
+	{
+		if( m_stackDepth[n] < top )
+			return n;
+		if( m_instrs[n].flags & JIT_INSTR_BLOCK_START )
+			return -1;
+	}
+	return -1;
+}
+
+// Returns true if the variable holds a reference of its own that the function
+// releases, i.e. it is a handle or an object on the heap, or a handle parameter,
+// and nothing but the instructions using it can modify it, as its address is never
+// taken
+bool CJITByteCode::HoldsReference(int var) const
+{
+	if( var > 0 )
+	{
+		const asCArray<asSScriptVariable*> &vars = m_func->scriptData->variables;
+		bool found = false;
+		for( asUINT n = 0; n < vars.GetLength(); n++ )
+		{
+			if( vars[n]->stackOffset != var )
+				continue;
+			if( !vars[n]->onHeap || vars[n]->type.IsReference() || !IsCountedRef(vars[n]->type.GetTypeInfo()) )
+				return false;
+			found = true;
+		}
+		if( !found )
+			return false;
+	}
+	else
+	{
+		int p = FindParam(var);
+		if( p < 0 || m_func->dontCleanUpOnException )
+			return false;
+		const asCDataType &type = m_func->parameterTypes[p];
+		if( type.IsReference() || !IsCountedRef(type.GetTypeInfo()) )
+			return false;
+	}
+
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+			continue;
+		if( instr.op == asBC_PSF || instr.op == asBC_LDV )
+			return false;
+		if( instr.op == asBC_VAR )
+		{
+			int consumer = FindVarConsumer(n);
+			if( consumer < 0 || m_instrs[consumer].op == asBC_GETREF )
+				return false;
+		}
+	}
+	return true;
 }
 
 void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
@@ -689,9 +1096,15 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 		if( instr.flags & JIT_INSTR_DEAD )
 			continue;
 		if( instr.flags & JIT_INSTR_INLINE )
-			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints();
+			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints(GetBorrowedArgs(n));
+		else if( instr.op == asBC_FREE )
+		{
+			// The parameters that may borrow references are left to HasSyncPoints
+			int p = FindParam(asBC_SWORDARG0(instr.bc));
+			m_hasSyncPoints = p < 0 || p >= 31 || !((m_releasedParams >> p) & 1);
+		}
 		else
-			m_hasSyncPoints = IsSyncPoint(instr.op) || instr.op == asBC_FREE;
+			m_hasSyncPoints = IsSyncPointAt(n);
 	}
 
 	BuildBlocks();
@@ -735,7 +1148,7 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 {
 	const SJITInstr &instr = m_instrs[instrIdx];
-	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints() )
+	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints(GetBorrowedArgs(instrIdx)) )
 		return true;
 #ifdef JIT_NATIVE_RETURN
 	asEBCInstr op = instr.op;
@@ -762,7 +1175,7 @@ asUINT CJITByteCode::GetReloadMask(asUINT instrIdx) const
 {
 	const SJITInstr &instr = m_instrs[instrIdx];
 	asUINT mask = m_liveAfter[instrIdx];
-	if( !IsSyncPoint(instr.op) || (instr.flags & JIT_INSTR_INLINE) )
+	if( !IsSyncPointAt(instrIdx) || (instr.flags & JIT_INSTR_INLINE) )
 		mask |= m_dirty[instrIdx] & ~JIT_FRAME_BIT;
 	return mask;
 }
@@ -1077,9 +1490,9 @@ void CJITByteCode::AnalyseDirtySlots()
 			if( LeavesFrameDirty(k) )
 				written |= JIT_FRAME_BIT;
 			if( m_instrs[k].flags & JIT_INSTR_INLINE )
-				calls = calls || GetInlinee(k)->HasSyncPoints();
+				calls = calls || GetInlinee(k)->HasSyncPoints(GetBorrowedArgs(k));
 			else
-				calls = calls || IsSyncPoint(m_instrs[k].op);
+				calls = calls || IsSyncPointAt(k);
 		}
 		asUINT keep = cachedMask & ~written;
 		if( !calls || keep == 0 )
@@ -1137,7 +1550,7 @@ void CJITByteCode::AnalyseDirtySlots()
 				// The inlined calls only store the variables on the rare path that
 				// calls the function, and where the inlined function calls functions,
 				// which may leave the frame dirty too
-				if( IsSyncPoint(instr.op) && !(instr.flags & JIT_INSTR_INLINE) )
+				if( IsSyncPointAt(n) && !(instr.flags & JIT_INSTR_INLINE) )
 					mask = LeavesFrameDirty(n) ? JIT_FRAME_BIT : 0;
 				else
 				{

@@ -137,8 +137,20 @@ int    JIT_Suspend(asSVMRegisters *regs) noexcept;
 // at the program pointer with the stack pointer in the VM registers. The frame of the
 // caller must have been stored. Pushes its call state like the call would have, with
 // callerPC after the call and the frame of the function as stack pointer. The call
-// stack must have room for it without growing
-void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC) noexcept;
+// stack must have room for it without growing. The parameters in the mask borrowed
+// the references of the caller, see JIT_OwnParams
+void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC, asUINT borrowed) noexcept;
+
+// Adds a reference to the objects of the handle parameters in the mask, in a frame
+// of the function whose parameters borrowed the references of the caller, before
+// the VM or the called function releases them, see CJITByteCode::AnalyseBorrows
+void   JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcept;
+
+// JIT_OwnParams for the frames of the inlined functions on the call stack, whose
+// call states note the borrowed parameters in the upper half of the stack index.
+// Goes from the innermost frame down to the frame of the function in rootFunc and
+// rootFrame, or to a nested call, and clears the notes
+void   JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc) noexcept;
 
 // asBC_ALLOC for registered types
 int    JIT_Alloc(asSVMRegisters *regs, asCObjectType *objType, int funcId) noexcept;

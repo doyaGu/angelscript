@@ -1580,6 +1580,106 @@ namespace Inlining
 		"  while( i < n )                                                                  \n"
 		"    r += both(i == 3 ? null : box, i++);                                          \n"
 		"  return r + local;                                                               \n"
+		"}                                                                                 \n"
+		// The inlined functions borrow the references of the handles that the callers
+		// pass, and the frames that the VM takes over get references of their own
+		"int freed = 0;                                                                    \n"
+		"class Ref { int v; Ref(int a) { v = a; } ~Ref() { freed += v; } int get(int a) { return v / a; } int plus(Ref@ o) { return v + o.v; } }\n"
+		"Ref@ gref;                                                                        \n"
+		"int readRef(Ref@ r, int a) { int local = a; local += verify(a); return r.v + local; }\n"
+		"int refLoop(int n) {                                                              \n"
+		"  Ref@ ref = Ref(7);                                                              \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 ) {                                                              \n"
+		"    try { r += readRef(ref, n--); } catch { r -= 1000; }                          \n"
+		"  }                                                                               \n"
+		"  @ref = null;                                                                    \n"
+		"  return r + freed + local;                                                       \n"
+		"}                                                                                 \n"
+		"int refThrow(int n) {                                                             \n"
+		"  Ref@ ref = Ref(11);                                                             \n"
+		"  int local = n;                                                                  \n"
+		"  return readRef(ref, n) + local;                                                 \n"
+		"}                                                                                 \n"
+		"int getFreed(int n) { return freed + n; }                                         \n"
+		"int waitRef(Ref@ r, int a) { int local = a; local += pause(a); return r.v + local; }\n"
+		"int waitRefLoop(int n) {                                                          \n"
+		"  Ref@ ref = Ref(3);                                                              \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += waitRef(ref, i++) + add(i, 1);                                           \n"
+		"  @ref = null;                                                                    \n"
+		"  return r + freed;                                                               \n"
+		"}                                                                                 \n"
+		// The borrowed references are passed on to the functions inlined into them
+		"int refV(Ref@ r) { return r.v; }                                                  \n"
+		"int refLook(Ref@ r, int a) { int local = a; local += inspect(a); return refV(r) + local; }\n"
+		"int refNest(Ref@ r, int a) { int local = a; local += refLook(r, a) + verify(a); return refV(r) * local; }\n"
+		"int refGet(Ref@ r, int a) { int local = a; return r.get(a) + local; }             \n"
+		"int refNestLoop(int n) {                                                          \n"
+		"  Ref@ ref = Ref(5);                                                              \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 ) {                                                              \n"
+		"    int k = n--;                                                                  \n"
+		"    try { r += refNest(ref, k) + refGet(ref, k); } catch { r -= 1000; }           \n"
+		"  }                                                                               \n"
+		"  @ref = null;                                                                    \n"
+		"  return r + freed + local;                                                       \n"
+		"}                                                                                 \n"
+		"int refNull(int n) {                                                              \n"
+		"  Ref@ ref, one;                                                                  \n"
+		"  if( n > 2 ) @ref = Ref(4);                                                      \n"
+		"  if( n > 3 ) @one = Ref(1);                                                      \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= 0 ) {                                                               \n"
+		"    try { r += refGet(ref, n) + readRef(ref, n) + one.plus(ref) + ref.plus(one); } catch { r -= 1000; }\n"
+		"    n--;                                                                          \n"
+		"  }                                                                               \n"
+		"  @ref = null;                                                                    \n"
+		"  @one = null;                                                                    \n"
+		"  return r + freed + local;                                                       \n"
+		"}                                                                                 \n"
+		"int refLines(int n) {                                                             \n"
+		"  Ref@ ref = Ref(6);                                                              \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += refNest(ref, i) + twice(ref, ref) + same(ref, i++).v + add(i, 1);        \n"
+		"  @ref = null;                                                                    \n"
+		"  return r + freed;                                                               \n"
+		"}                                                                                 \n"
+		// The constructors borrow the references too, and the functions that return the
+		// handles add references of their own
+		"class Pair { int s; Pair(Ref@ a, Ref@ b, int k) { s = a.v * 10 + verify(k) + b.v; } }\n"
+		"int twice(Ref@ a, Ref@ b) { return a.v * 10 + b.v; }                              \n"
+		"Ref@ same(Ref@ r, int a) { verify(a); return r; }                                 \n"
+		"int pairLoop(int n) {                                                             \n"
+		"  Ref@ x = Ref(1), y = Ref(2);                                                    \n"
+		"  int local = n, r = 0;                                                           \n"
+		"  while( n >= -2 ) {                                                              \n"
+		"    int k = n--;                                                                  \n"
+		"    try { Pair p(x, y, k); r += p.s + twice(x, x) + twice(y, x) + same(y, k).v; } catch { r -= 1000; }\n"
+		"  }                                                                               \n"
+		"  @x = null;                                                                      \n"
+		"  r += freed;                                                                     \n"
+		"  @y = null;                                                                      \n"
+		"  return r + freed + local;                                                       \n"
+		"}                                                                                 \n"
+		// The called functions replace the handles that they get, through globals or
+		// output parameters
+		"int dropRef(Ref@ r, Ref@ &out h) { @h = null; return r.v + freed; }               \n"
+		"int dropG(Ref@ r) { @gref = null; return r.v + freed; }                           \n"
+		"int viaRef(Ref@ &in h, int a) { Ref@ r = h; return readRef(r, a) + twice(h, h); } \n"
+		"int aliasLoop(int n) {                                                            \n"
+		"  Ref@ ref;                                                                       \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n ) {                                                                \n"
+		"    @ref = Ref(i + 1);                                                            \n"
+		"    r += dropRef(ref, ref);                                                       \n"
+		"    @gref = Ref(i + 2);                                                           \n"
+		"    r += dropG(gref) + viaRef(Ref(i + 3), i);                                     \n"
+		"    i++;                                                                          \n"
+		"  }                                                                               \n"
+		"  return r + freed;                                                               \n"
 		"}                                                                                 \n";
 
 	// Implements the interface shared with the module of the test
@@ -1646,6 +1746,23 @@ namespace Inlining
 		{ "int bothLoop(int)",     3, PLAIN },
 		{ "int bothLoop(int)",     3, COUNT_LINES },
 		{ "int bothLoop(int)",     5, PLAIN },
+		{ "int refLoop(int)",      5, PLAIN },
+		{ "int refThrow(int)",     4, PLAIN },
+		{ "int refThrow(int)",    -1, PLAIN },
+		{ "int getFreed(int)",     0, PLAIN },
+		{ "int refThrow(int)",    -2, PLAIN },
+		{ "int getFreed(int)",     0, PLAIN },
+		{ "int waitRefLoop(int)", 10, PLAIN },
+		{ "int waitRefLoop(int)", 10, COUNT_LINES },
+		{ "int waitRefLoop(int)", 10, SUSPEND_IN_ADD },
+		{ "int refNestLoop(int)",  5, PLAIN },
+		{ "int refLines(int)",     5, COUNT_LINES },
+		{ "int refLines(int)",     5, SUSPEND_IN_ADD },
+		{ "int refNull(int)",      5, PLAIN },
+		{ "int refNull(int)",      3, PLAIN },
+		{ "int refNull(int)",      2, PLAIN },
+		{ "int pairLoop(int)",     5, PLAIN },
+		{ "int aliasLoop(int)",    5, PLAIN },
 	};
 
 	// Executes all the cases and returns what was observed, one line per case

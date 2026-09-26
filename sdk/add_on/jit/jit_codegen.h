@@ -89,6 +89,7 @@ protected:
 		Label                     ret;      // where the code continues after the function has returned
 		Label                     exit;     // hands the function to the VM, see EmitInlineExit
 		bool                      exitUsed;
+		asUINT                    borrowed; // the parameters that borrow the references of the caller, see CJITByteCode::AnalyseBorrows
 	};
 
 	// A bail stub to emit after the body
@@ -98,6 +99,7 @@ protected:
 		asUINT idx;
 		int    frame;
 		bool   materialized; // the frames of the inlined calls are on the call stack
+		bool   borrowed;     // and some of them have borrowed parameters
 	};
 
 	// A registered behaviour that takes nothing but the object, e.g. AddRef or
@@ -156,6 +158,7 @@ protected:
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
+	bool IsBorrowed(asUINT idx) const;
 	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
 	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
 	void EmitInlineCall(asUINT idx);
@@ -259,6 +262,7 @@ protected:
 	Label BailLabel(asUINT idx);
 	void  Leave();
 	void  EmitLeaveIf(const Gp &result);
+	Label LeaveLabel();
 	Label InstrLabel(asUINT idx);
 
 	// Rare paths, e.g. the calls of the helpers that hand control to the VM, are
@@ -311,6 +315,10 @@ protected:
 	Label                      m_bailMaterialized; // the tail of the bail sites in materialized frames
 	bool                       m_bailMaterializedUsed;
 	Label                      m_leave;        // returns 1, i.e. the VM takes over
+	Label                      m_leaveBorrowed; // gives the materialized frames their references first, see LeaveLabel
+	bool                       m_leaveBorrowedUsed;
+	Label                      m_bailMaterializedBorrowed; // m_bailMaterialized for frames with borrowed parameters
+	bool                       m_bailMaterializedBorrowedUsed;
 
 	asUINT m_instrCount;
 	asUINT m_bailCount;
@@ -318,6 +326,7 @@ protected:
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
 	bool   m_materialized; // the frames of the inlined calls are on the call stack, see EmitMaterialize
 	int    m_materialDepth; // the number of call states pushed for them
+	bool   m_materialBorrowed; // some of them have borrowed parameters
 	bool   m_shareMaterial; // the next calls share the materialization, see EmitBody
 	int    m_inlineExtent; // the largest extent of the inlined calls, see GetInlineRoom
 	bool   m_failed;

@@ -23,7 +23,8 @@ enum EJITInstrFlags
 	JIT_INSTR_BAIL        = 0x08, // the instruction must always return control to the VM
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
-	JIT_INSTR_INLINE      = 0x40  // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
+	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
+	JIT_INSTR_BORROW      = 0x80  // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
 };
 
 // One decoded bytecode instruction
@@ -193,8 +194,29 @@ public:
 
 	// Returns true if the function or one inlined into it calls something that may
 	// see the VM registers, or releases objects, where the frames of the calls that
-	// inline it are handed to the VM, see CJITCodeGen::EmitMaterialize
-	bool   HasSyncPoints() const { return m_hasSyncPoints; }
+	// inline it are handed to the VM, see CJITCodeGen::EmitMaterialize. The parameters
+	// in the mask borrow the references of the caller, which aren't released
+	bool   HasSyncPoints(asUINT borrowed = 0) const { return m_hasSyncPoints || (m_releasedParams & ~borrowed) != 0; }
+
+	// Returns true if the instruction stores the cached variables, see IsSyncPoint.
+	// The copies of the references lent to the inlined calls don't
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & JIT_INSTR_BORROW); }
+
+	// Returns the index of the parameter in the variable, or -1
+	int    FindParam(int offset) const;
+
+	// Returns the mask of the handle parameters that the function only reads and
+	// releases, so that the calls inlining it can lend it their references
+	asUINT GetBorrowableParams() const { return m_borrowableParams; }
+
+	// Returns the mask of the parameters of the function inlined by the instruction
+	// that borrow the references of the caller, see AnalyseBorrows
+	asUINT GetBorrowedArgs(asUINT instrIdx) const;
+
+	// Returns the variables that must be null for the copies of the references lent
+	// to an inlined call not to release anything, which the first of the copies
+	// checks for all of them
+	const std::vector<int> &GetBorrowChecks(asUINT instrIdx) const;
 
 	// Marks instructions that must return to the VM. Must be called before Analyse,
 	// which marks them in the inlined functions too
@@ -218,6 +240,12 @@ protected:
 	struct SInlineSearch;
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
 	bool CanBeInlined() const;
+	void AnalyseBorrows();
+	void FindBorrowableParams();
+	void FindBorrowedArgs();
+	int  FindVarConsumer(asUINT idx) const;
+	int  FindPush(asUINT idx, int top) const;
+	bool HoldsReference(int var) const;
 	bool LeavesFrameDirty(asUINT instrIdx) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
@@ -247,6 +275,11 @@ protected:
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
+	asUINT                  m_borrowableParams; // see GetBorrowableParams
+	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
+	std::map<asUINT, asUINT> m_borrowedArgs;    // by instruction, for the inlined calls
+	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
+	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;

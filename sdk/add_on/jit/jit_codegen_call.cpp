@@ -240,28 +240,34 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	asCObjectType *objType = m_code->GetInlineObjectType(idx);
 	int base = -StackOffset(idx) / 4;
 	int caller = m_frame;
-	bool checkVM = caller == 0 || m_code->HasSyncPoints();
+	asUINT borrowed = m_code->GetBorrowedArgs(idx);
+	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
 
 	Label call;
 	if( caller == 0 )
 		call = m_uc.new_label();
 	else if( objType || checkVM )
 		call = BailLabel(idx);
+
+	// The function called instead gets its own references for the arguments that
+	// borrow them, see CJITByteCode::AnalyseBorrows
+	bool ownArgs = borrowed && call.is_valid();
+	Label own = ownArgs ? m_uc.new_label() : call;
 	if( objType )
 	{
 		// The call raises the exception for a null object
 		Gp type = m_uc.new_gp_ptr();
 		m_uc.load(type, Stack(0));
-		m_uc.j(call, test_z(type));
+		m_uc.j(own, test_z(type));
 		m_uc.load(type, mem_ptr(type, JIT_GetObjectLayout().objectType));
-		m_uc.j(call, cmp_ne(type, PtrConst(asPWORD(objType))));
+		m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(objType))));
 	}
 	if( checkVM )
 	{
 		// Like the line callback on entry of script functions
 		Gp flag = m_uc.new_gp32();
 		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-		m_uc.j(call, test_nz(flag));
+		m_uc.j(own, test_nz(flag));
 	}
 	if( caller == 0 )
 	{
@@ -271,7 +277,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		GetInlineRoom(idx, extent, depth);
 		Imm words = Imm(depth * int(layout.callStackFrameSize));
 		if( m_inlineRoom.is_valid() )
-			m_uc.j(call, ucmp_lt(m_inlineRoom, words));
+			m_uc.j(own, ucmp_lt(m_inlineRoom, words));
 		else
 		{
 			Gp length = m_uc.new_gp32();
@@ -279,9 +285,19 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			m_uc.load_u32(length, ContextField(layout.callStackLength));
 			m_uc.load_u32(room, ContextField(layout.callStackCapacity));
 			m_uc.sub(room, room, length);
-			m_uc.j(call, ucmp_lt(room, words));
-			EmitStackBlockCheck(extent, call);
+			m_uc.j(own, ucmp_lt(room, words));
+			EmitStackBlockCheck(extent, own);
 		}
+	}
+	if( ownArgs )
+	{
+		BaseNode *cold = BeginCold(own);
+		Gp frame = FramePointer(base);
+		InvokeNode *ownCall = Invoke((const void*)JIT_OwnParams, FuncSignature::build<void, asCScriptFunction*, asDWORD*, asUINT>());
+		ownCall->set_arg(0, Imm(int64_t(asPWORD(func))));
+		ownCall->set_arg(1, frame);
+		ownCall->set_arg(2, Imm(int(borrowed)));
+		EndCold(cold, call);
 	}
 
 	SFrame frame;
@@ -292,6 +308,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	frame.ret      = m_uc.new_label();
 	frame.exit     = m_uc.new_label();
 	frame.exitUsed = false;
+	frame.borrowed = borrowed;
 	m_frames.push_back(frame);
 	int inlined = int(m_frames.size()) - 1;
 	SwitchFrame(inlined);
@@ -411,11 +428,12 @@ void CJITCodeGen::EmitInlineExit(int frame)
 		const SJITInstr &instr = code->GetInstructions()[callee.callIdx];
 		Gp fp = m_uc.new_gp_ptr();
 		m_uc.lea(fp, mem_ptr(m_fp, -callee.base * 4));
-		InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*>());
+		InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*, asUINT>());
 		call->set_arg(0, m_regs);
 		call->set_arg(1, Imm(int64_t(asPWORD(callee.code->GetFunction()))));
 		call->set_arg(2, fp);
 		call->set_arg(3, Imm(int64_t(asPWORD(code->GetByteCode() + instr.pos + instr.size))));
+		call->set_arg(4, Imm(int(callee.borrowed)));
 	}
 	Leave();
 }
@@ -453,6 +471,7 @@ void CJITCodeGen::EmitMaterialize()
 	m_uc.load(array, ContextField(layout.callStackArray));
 	m_uc.load_u32(index, ContextField(layout.stackIndex));
 	Mem states = PtrElement(array, length);
+	bool borrowed = false;
 	for( asUINT n = 0; n < inlined.size(); n++ )
 	{
 		const SFrame &callee = m_frames[inlined[n]];
@@ -464,6 +483,15 @@ void CJITCodeGen::EmitMaterialize()
 		m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(caller.code->GetByteCode() + instr.pos + instr.size)));
 		m_uc.store(PtrAt(state, 3), FramePointer(callee.base));
 		m_uc.store(PtrAt(state, 4), index);
+		if( callee.borrowed )
+		{
+			// The upper half of the stack index notes the borrowed parameters, see
+			// JIT_OwnBorrowed
+			Mem mask = PtrAt(state, 4);
+			mask.add_offset(4);
+			StoreImm32(mask, int(callee.borrowed));
+			borrowed = true;
+		}
 	}
 	m_uc.add(length, length, Imm(int(inlined.size() * layout.callStackFrameSize)));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
@@ -471,6 +499,7 @@ void CJITCodeGen::EmitMaterialize()
 	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(m_code->GetFunction())));
 	m_materialized  = true;
 	m_materialDepth = int(inlined.size());
+	m_materialBorrowed = borrowed;
 }
 
 // Pops the call states pushed by EmitMaterialize once the call has returned, which
@@ -486,6 +515,7 @@ void CJITCodeGen::EmitDematerialize()
 	m_uc.sub(length, length, Imm(m_materialDepth * int(layout.callStackFrameSize)));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
 	m_materialized = false;
+	m_materialBorrowed = false;
 }
 
 // The frame pointer of the frame at the base, see SFrame
@@ -1298,6 +1328,21 @@ bool CJITCodeGen::CallsBehaviourDirectly(const SJITInstr &instr) const
 	return GetDirectBehaviour(objType->beh.release, beh) || GetDirectBehaviour(objType->beh.addref, beh);
 }
 
+// True if the instruction neither adds nor releases a reference, as the argument of
+// an inlined call borrows it, see CJITByteCode::AnalyseBorrows
+bool CJITCodeGen::IsBorrowed(asUINT idx) const
+{
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	if( instr.flags & JIT_INSTR_BAIL )
+		return false;
+	if( instr.op == asBC_RefCpyV )
+		return (instr.flags & JIT_INSTR_BORROW) != 0;
+	if( instr.op != asBC_FREE || m_frame == 0 )
+		return false;
+	int p = m_code->FindParam(asBC_SWORDARG0(instr.bc));
+	return p >= 0 && p < 31 && ((m_frames[m_frame].borrowed >> p) & 1);
+}
+
 // The object pointer must not be null
 void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
 {
@@ -1352,6 +1397,12 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_FREE:
+		if( IsBorrowed(idx) )
+		{
+			// The caller releases the reference
+			m_uc.store_zero_reg(Var(a0));
+			break;
+		}
 		{
 			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(bc);
 			SDirectBehaviour release;
@@ -1403,6 +1454,23 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_REFCPY:
 	case asBC_RefCpyV:
+		if( IsBorrowed(idx) )
+		{
+			// Lends the reference to the inlined call. The first of the copies for the
+			// call checks that none of them would release anything
+			const std::vector<int> &checks = m_code->GetBorrowChecks(idx);
+			if( !checks.empty() )
+			{
+				Gp any = LoadPtr(checks[0]);
+				for( asUINT n = 1; n < checks.size(); n++ )
+					m_uc.or_(any, any, LoadPtr(checks[n]));
+				m_uc.j(BailLabel(idx), test_nz(any));
+			}
+			Gp s = m_uc.new_gp_ptr();
+			m_uc.load(s, Stack(0));
+			StorePtr(a0, s);
+			break;
+		}
 		// TODO: runtime optimize: For script objects the reference counting could be done
 		//                         inline: clear gcFlag and increment or decrement refCount
 		//                         (with the atomic operations of the engine when built with

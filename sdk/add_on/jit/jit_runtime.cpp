@@ -160,6 +160,8 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 	if( descr == 0 )
 		return false;
 
+	// The VM releases the parameters of the inlined functions on the call stack
+	JIT_OwnBorrowed(regs, 0, 0);
 	ctx->HandleAppException();
 	ctx->m_callingSystemFunction = 0;
 
@@ -411,7 +413,7 @@ int JIT_Suspend(asSVMRegisters *regs) noexcept
 	return 0;
 }
 
-void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC) noexcept
+void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *frame, asDWORD *callerPC, asUINT borrowed) noexcept
 {
 	asCContext *ctx = GetContext(regs);
 	asDWORD *pc = regs->programPointer;
@@ -424,6 +426,47 @@ void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *fra
 	ctx->m_currentFunction  = func;
 	regs->programPointer    = pc;
 	regs->stackPointer      = sp;
+	if( borrowed )
+		JIT_OwnParams(func, frame, borrowed);
+}
+
+void JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcept
+{
+	int offset = (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		if( n < 31 && ((mask >> n) & 1) )
+		{
+			void *obj = *(void**)(frame + offset);
+			if( obj )
+				func->engine->CallObjectMethod(obj, func->parameterTypes[n].GetBehaviour()->addref);
+		}
+		offset += func->parameterTypes[n].GetSizeOnStackDWords();
+	}
+}
+
+void JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+	asCScriptFunction *func = ctx->m_currentFunction;
+	asDWORD *frame = regs->stackFramePointer;
+	for( asUINT n = ctx->m_callStack.GetLength(); n >= CALLSTACK_FRAME_SIZE; n -= CALLSTACK_FRAME_SIZE )
+	{
+		if( frame == rootFrame && func == rootFunc )
+			break;
+		asPWORD *s = ctx->m_callStack.AddressOf() + n - CALLSTACK_FRAME_SIZE;
+		if( s[0] == 0 )
+			break;
+		asQWORD index = asQWORD(s[4]);
+		asUINT mask = asUINT(index >> 32) & 0x7FFFFFFF;
+		if( mask )
+		{
+			JIT_OwnParams(func, frame, mask);
+			s[4] = asPWORD(index & ~(asQWORD(0x7FFFFFFF) << 32));
+		}
+		frame = (asDWORD*)s[0];
+		func  = (asCScriptFunction*)s[1];
+	}
 }
 
 void *JIT_NewScriptObject(asCObjectType *objType) noexcept

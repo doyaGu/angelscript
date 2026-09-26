@@ -237,6 +237,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		}
 		if( instr.flags & JIT_INSTR_INLINE )
 			fprintf(file, "   ; inlined");
+		if( instr.flags & JIT_INSTR_BORROW )
+			fprintf(file, "   ; borrowed");
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )

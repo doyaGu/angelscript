@@ -25,6 +25,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	frame.caller   = -1;
 	frame.callIdx  = 0;
 	frame.exitUsed = false;
+	frame.borrowed = 0;
 	m_frames.push_back(frame);
 	m_frame      = 0;
 	m_frameBase  = 0;
@@ -43,6 +44,9 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_materialDepth = 0;
 	m_shareMaterial = false;
 	m_bailMaterializedUsed = false;
+	m_materialBorrowed = false;
+	m_leaveBorrowedUsed = false;
+	m_bailMaterializedBorrowedUsed = false;
 	m_inlineExtent = 0;
 	m_failed     = false;
 }
@@ -66,7 +70,9 @@ bool CJITCodeGen::Generate()
 
 	m_bailCommon = m_uc.new_label();
 	m_bailMaterialized = m_uc.new_label();
+	m_bailMaterializedBorrowed = m_uc.new_label();
 	m_leave = m_uc.new_label();
+	m_leaveBorrowed = m_uc.new_label();
 
 	// The instructions in loops, which are the ones up to a backward branch from its target
 	std::vector<int> loopDepth(instrs.size() + 1);
@@ -186,6 +192,14 @@ bool CJITCodeGen::Generate()
 	EmitEntryStubs();
 	EmitBailStubs();
 
+	if( m_leaveBorrowedUsed )
+	{
+		m_uc.bind(m_leaveBorrowed);
+		InvokeNode *call = Invoke((const void*)JIT_OwnBorrowed, FuncSignature::build<void, asSVMRegisters*, asDWORD*, asCScriptFunction*>());
+		call->set_arg(0, m_regs);
+		call->set_arg(1, m_fp);
+		call->set_arg(2, Imm(int64_t(asPWORD(m_code->GetFunction()))));
+	}
 	m_uc.bind(m_leave);
 	Gp one = m_uc.new_gp32();
 	m_uc.mov(one, Imm(1));
@@ -265,6 +279,8 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 				continue;
 			if( isTarget[n] )
 				last = -1;
+			if( IsBorrowed(n) )
+				continue;
 			if( SharesMaterialization(instr.op) )
 			{
 				if( last >= 0 )
@@ -370,7 +386,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 					calls[idx] = node->is_invoke();
 		}
 
-		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] )
+		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] && !IsBorrowed(idx) )
 		{
 			m_shareMaterial = false;
 			EmitDematerialize();
@@ -928,10 +944,12 @@ void CJITCodeGen::EmitBailStubs()
 	{
 		SwitchFrame(m_bails[n].frame);
 		m_materialized = m_bails[n].materialized;
+		m_materialBorrowed = m_bails[n].borrowed;
 		m_uc.bind(m_bails[n].label);
 		Bail(m_bails[n].idx);
 	}
 	m_materialized = false;
+	m_materialBorrowed = false;
 
 	// The exits of the inlined functions store their callers, see EmitInlineExit
 	for( asUINT n = 1; n < m_frames.size(); n++ )
@@ -958,6 +976,15 @@ void CJITCodeGen::EmitBailStubs()
 			SyncStack();
 		m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 		Leave();
+	}
+	if( m_bailMaterializedBorrowedUsed )
+	{
+		m_uc.bind(m_bailMaterializedBorrowed);
+		if( !m_staticStack )
+			SyncStack();
+		m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
+		m_leaveBorrowedUsed = true;
+		m_uc.j(m_leaveBorrowed);
 	}
 }
 
@@ -1559,7 +1586,12 @@ void CJITCodeGen::Bail(asUINT idx)
 		SyncStack();
 	}
 	m_uc.mov(m_bailPC, Imm(int64_t(asPWORD(instr.bc))));
-	if( m_materialized )
+	if( m_materialized && m_materialBorrowed )
+	{
+		m_bailMaterializedBorrowedUsed = true;
+		m_uc.j(m_bailMaterializedBorrowed);
+	}
+	else if( m_materialized )
 	{
 		m_bailMaterializedUsed = true;
 		m_uc.j(m_bailMaterialized);
@@ -1581,6 +1613,7 @@ Label CJITCodeGen::BailLabel(asUINT idx)
 	bail.idx   = idx;
 	bail.frame = m_frame;
 	bail.materialized = m_materialized;
+	bail.borrowed = m_materialBorrowed;
 	m_bails.push_back(bail);
 	return bail.label;
 }
@@ -1590,7 +1623,7 @@ void CJITCodeGen::Leave()
 {
 	if( FailIfHidden() )
 		return;
-	m_uc.j(m_leave);
+	m_uc.j(LeaveLabel());
 }
 
 // Returns to the VM if the helper result is non-zero
@@ -1598,7 +1631,18 @@ void CJITCodeGen::EmitLeaveIf(const Gp &result)
 {
 	if( FailIfHidden() )
 		return;
-	m_uc.j(m_leave, test_nz(result));
+	m_uc.j(LeaveLabel(), test_nz(result));
+}
+
+// Where the VM takes over. The materialized frames of the inlined functions with
+// borrowed parameters get references of their own first, which the VM releases,
+// see JIT_OwnBorrowed
+Label CJITCodeGen::LeaveLabel()
+{
+	if( !m_materialized || !m_materialBorrowed )
+		return m_leave;
+	m_leaveBorrowedUsed = true;
+	return m_leaveBorrowed;
 }
 
 // Starts a cold range at the label. Returns the node to pass to EndCold
