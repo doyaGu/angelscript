@@ -3612,8 +3612,10 @@ bool Test()
 {
 	bool fail = false;
 
-	// The JIT specific tests are meaningless when the JIT is disabled
-	if( getenv("AS_JIT_DISABLE") )
+	// The JIT specific tests are meaningless when the JIT is disabled, or only takes
+	// the functions generated ahead of time
+	const char *flags = getenv("AS_JIT_FLAGS");
+	if( getenv("AS_JIT_DISABLE") || (flags && (strtoul(flags, 0, 0) & CJITCompiler::JIT_AOT_ONLY)) )
 		return false;
 
 	// Each engine gets the JIT compiler through CreateEngineWithJit

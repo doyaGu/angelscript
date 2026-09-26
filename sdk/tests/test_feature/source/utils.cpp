@@ -533,6 +533,26 @@ asIScriptEngine *CreateEngineWithJit(asDWORD version)
 		if( filter )
 			g_jit->SetLogFile(stdout, filter);
 
+		// AS_JIT_AOT_OUTPUT names a directory for the C++ code of the compiled functions,
+		// which the build with the CMake option AS_JIT_AOT_DIR set to it uses. The flag
+		// 0x100 in AS_JIT_FLAGS then leaves the other functions to the VM
+		const char *aotOutput = getenv("AS_JIT_AOT_OUTPUT");
+		if( aotOutput )
+			g_jit->SetAOTOutput(aotOutput);
+#ifdef AS_JIT_AOT_TABLE
+		// AS_JIT_AOT_EVERY=n only adds every nth function, starting with the one at
+		// AS_JIT_AOT_OFFSET, so that the JIT compiles the others, which then call the
+		// functions generated ahead of time and are called by them
+		const char *every  = getenv("AS_JIT_AOT_EVERY");
+		const char *offset = getenv("AS_JIT_AOT_OFFSET");
+		asUINT step  = every && atoi(every) > 0 ? asUINT(atoi(every)) : 1;
+		asUINT first = offset ? asUINT(atoi(offset)) : 0;
+		std::vector<SJITAOTFunction> aotFuncs;
+		for( asUINT n = first; n < g_jitAOTFunctionCount; n += step )
+			aotFuncs.push_back(g_jitAOTFunctions[n]);
+		g_jit->AddAOTFunctions(aotFuncs.empty() ? 0 : &aotFuncs[0], asUINT(aotFuncs.size()));
+#endif
+
 		// AS_JIT_BAIL_OPS lists bytecode instruction names, separated by commas,
 		// that must always be executed by the VM. Used to bisect JIT problems
 		const char *bailOps = getenv("AS_JIT_BAIL_OPS");
@@ -566,8 +586,10 @@ void ReleaseJitCompiler()
 	if( g_jit )
 	{
 		SJITStatistics stats = g_jit->GetStatistics();
-		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined\n",
-			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined);
+		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined, %d ahead of time\n",
+			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined, stats.functionsAOT);
+		if( getenv("AS_JIT_AOT_OUTPUT") && g_jit->WriteAOTOutput() < 0 )
+			PRINTF("JIT: the code generated ahead of time could not be written\n");
 		delete g_jit;
 		g_jit = 0;
 	}
