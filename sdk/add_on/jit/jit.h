@@ -20,10 +20,27 @@ struct SJITStatistics
 	asUINT instructionsBailed;   // bytecode instructions that always return control to the VM
 	asUINT callsInlined;         // script calls whose function was compiled in place, see SetMaxInlineSize
 	size_t codeSize;             // total size of the native code currently held
+	asUINT functionsAOT;         // script functions that use the code generated ahead of time, see AddAOTFunctions
 };
 
 // Callback used to decide if a function should be JIT compiled
 typedef bool (*JITCompileFilterFunc_t)(asIScriptFunction *func, void *userParam);
+
+// A function generated ahead of time, see CJITCompiler::SetAOTOutput
+typedef int (*JITAOTFunction_t)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
+struct SJITAOTFunction
+{
+	asQWORD          key0; // identifies the bytecode that the function was generated for
+	asQWORD          key1;
+	JITAOTFunction_t func;
+};
+
+#ifdef AS_JIT_AOT_TABLE
+// The functions generated ahead of time that the CMake option AS_JIT_AOT_DIR builds
+// into the library, for CJITCompiler::AddAOTFunctions
+extern const SJITAOTFunction g_jitAOTFunctions[];
+extern const asUINT          g_jitAOTFunctionCount;
+#endif
 
 // The JIT compiler translates AngelScript bytecode to native machine code with
 // the help of the AsmJit library. It implements the version 1 JIT interface, so
@@ -59,7 +76,11 @@ public:
 		JIT_NO_DIRECT_SYSTEM_CALLS = 0x40,
 
 		// Always call the script functions instead of compiling small ones in place
-		JIT_NO_INLINE = 0x80
+		JIT_NO_INLINE = 0x80,
+
+		// Only use the functions generated ahead of time, see AddAOTFunctions, and
+		// leave the others to the VM
+		JIT_AOT_ONLY = 0x100
 	};
 
 	CJITCompiler(asDWORD flags = 0);
@@ -103,6 +124,25 @@ public:
 	// compiled in place 4 times the size. The functions are still compiled on their
 	// own for the other calls. Default is 64, 0 disables inlining like JIT_NO_INLINE
 	void SetMaxInlineSize(asUINT sizeInDWords);
+
+	// Ahead-of-time compilation. With an output directory the compiler generates C++
+	// code for every function it is given, which WriteAOTOutput writes to the directory:
+	// jit_aot_NNN.cpp with the functions, and jit_aot_functions.cpp with their table,
+	// g_jitAOTFunctions. Built into the application, e.g. with the CMake option
+	// AS_JIT_AOT_DIR, and added with AddAOTFunctions, the functions are used instead
+	// of compiling the script functions with the same bytecode. They only depend on the
+	// bytecode, not on the addresses of the functions, types, or variables, so any
+	// engine and execution of the application that compiles the same scripts can use
+	// them. The functions whose bytecode differs, e.g. as a script has changed, are
+	// compiled as usual
+	void SetAOTOutput(const char *directory);
+
+	// Only writes the files that have changed, so that they aren't compiled again.
+	// Returns a negative value on failure
+	int WriteAOTOutput();
+
+	// Must be called before any function is compiled. Returns a negative value on failure
+	int AddAOTFunctions(const SJITAOTFunction *functions, asUINT count);
 
 	SJITStatistics GetStatistics() const;
 

@@ -147,8 +147,10 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	{
 		const SJITObjectLayout &layout = JIT_GetObjectLayout();
 
-		// A recursive call enters this code, which exists as it is being executed
+		// A recursive call enters this code, which exists as it is being executed. The
+		// called function itself is only needed in interop mode
 		Gp target;
+		Gp method;
 		if( (kind == JIT_CALL_SCRIPT || kind == JIT_CALL_CONSTRUCT) && callee != m_frames[0].code->GetFunction() )
 		{
 			target = m_uc.new_gp_ptr();
@@ -156,8 +158,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		}
 		else if( kind == JIT_CALL_INTERFACE )
 		{
-			target = EmitFindMethod(callee, slow);
-			m_uc.load(target, mem_ptr(target, layout.scriptData));
+			method = EmitFindMethod(callee, slow);
+			target = m_uc.new_gp_ptr();
+			m_uc.load(target, mem_ptr(method, layout.scriptData));
 			m_uc.load(target, mem_ptr(target, layout.jitFunction));
 		}
 		else if( kind == JIT_CALL_PTR )
@@ -170,9 +173,12 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, mem_ptr(*extra, layout.scriptData));
 			m_uc.load(target, mem_ptr(target, layout.jitFunction));
+			method = *extra;
 		}
 		if( target.is_valid() )
 			m_uc.j(slow, test_z(target));
+		if( m_options.interop && !method.is_valid() )
+			method = PtrConst(asPWORD(callee));
 
 		// The called function has popped the arguments. Unless the size isn't known
 		// the stack pointer is adjusted instead of waiting for the one it stored,
@@ -180,7 +186,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		// is known after any call
 		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
 		bool vrInReg = !callee || kind == JIT_CALL_PTR || CJITByteCode::ReturnsInVR(callee);
-		vrReturned = EmitNativeCall(idx, target, r, slow, !reload, vrInReg);
+		vrReturned = EmitNativeCall(idx, target, method, r, slow, !reload, vrInReg);
 		EmitLeaveIf(r);
 		if( reload || m_staticStack )
 			ReloadStackAfter(idx);
@@ -578,8 +584,9 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 // the call state may be marked with the sign bit of the stack index, so that the
 // function doesn't restore the frame and the registers, see JITFunction. It then
 // returns the value register too, which is taken if vrInReg is set and the value
-// register is live, and true is returned then
-bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg)
+// register is live, and true is returned then. In interop mode the current function
+// of the context is set to callee, and the call state isn't marked, see JITFunction
+bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
 	if( FailIfHidden() )
 		return false;
@@ -589,6 +596,11 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &result,
 	Gp t      = m_uc.new_gp_ptr();
 	m_uc.load_u32(length, ContextField(layout.callStackLength));
 	m_uc.j(slow, ucmp_ge(length.r32(), m_callLimit));
+	if( m_options.interop )
+	{
+		m_uc.store(ContextField(layout.currentFunction), callee);
+		mark = false;
+	}
 	Gp array = m_uc.new_gp_ptr();
 	m_uc.load(array, ContextField(layout.callStackArray));
 	Mem state = PtrElement(array, length);

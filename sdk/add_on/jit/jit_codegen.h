@@ -23,6 +23,7 @@ struct SJITCodeGenOptions
 	bool directSystemCalls; // call registered functions with their native calling convention
 	bool guardedEntry;      // enter through JIT_GuardedEntry when called by the VM
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
+	bool interop;           // set the current function for the native calls and don't mark their call states, for the functions generated ahead of time, see JITFunction
 };
 
 // Translates the analysed bytecode of one function to machine code through
@@ -172,7 +173,7 @@ protected:
 	void EmitStackBlockCheck(int extent, const Label &none);
 	void GetInlineRoom(asUINT idx, int &extent, int &depth) const;
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
-	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &result, const Label &slow, bool mark, bool vrInReg);
+	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
 

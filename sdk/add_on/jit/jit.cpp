@@ -1,4 +1,5 @@
 #include "jit.h"
+#include "jit_aot.h"
 #include "jit_bytecode.h"
 #include "jit_codegen.h"
 #include "jit_runtime.h"
@@ -11,6 +12,7 @@
 #include <asmjit/ujit.h>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string.h>
 
@@ -77,6 +79,9 @@ struct CJITCompiler::SImpl
 	bool                   bailOps[asBC_MAXBYTECODE];
 	SJITStatistics         stats;
 	std::map<asJITFunction, void*> unwindInfo; // registered unwind information by function
+	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
+	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
+	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
 };
 
 CJITCompiler::CJITCompiler(asDWORD flags)
@@ -136,6 +141,8 @@ void CJITCompiler::SetCompileFilter(JITCompileFilterFunc_t filter, void *userPar
 void CJITCompiler::SetNativeCallDepth(asUINT depth)
 {
 	m_impl->maxNativeCallDepth = depth;
+	// The functions generated ahead of time share it
+	JIT_nativeCallDepth = depth;
 }
 
 void CJITCompiler::SetBailInstructions(const asEBCInstr *instructions, asUINT count)
@@ -154,6 +161,41 @@ void CJITCompiler::SetMaxFunctionSize(asUINT sizeInDWords)
 void CJITCompiler::SetMaxInlineSize(asUINT sizeInDWords)
 {
 	m_impl->maxInlineSize = sizeInDWords;
+}
+
+void CJITCompiler::SetAOTOutput(const char *directory)
+{
+	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	m_impl->aotOutput.SetDirectory(directory);
+}
+
+int CJITCompiler::WriteAOTOutput()
+{
+	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	return m_impl->aotOutput.Write();
+}
+
+int CJITCompiler::AddAOTFunctions(const SJITAOTFunction *functions, asUINT count)
+{
+	if( functions == 0 && count > 0 )
+		return asINVALID_ARG;
+
+	// The code compiled before doesn't set the current function for its native calls,
+	// see SJITCodeGenOptions::interop
+	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	if( m_impl->stats.functionsCompiled > 0 )
+		return asERROR;
+	for( asUINT n = 0; n < count; n++ )
+	{
+		if( functions[n].func == 0 )
+			continue;
+		SJITAOTKey key;
+		key.key0 = functions[n].key0;
+		key.key1 = functions[n].key1;
+		m_impl->aotFunctions[key] = functions[n].func;
+		m_impl->aotPointers.insert(reinterpret_cast<asJITFunction>(functions[n].func));
+	}
+	return asSUCCESS;
 }
 
 int CJITCompiler::Prepare(asIScriptContext *ctx, asIScriptFunction *func)
@@ -268,6 +310,16 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 	}
 }
 
+// Sets the index of the entry point in the JitEntry instructions, which the VM passes to the function
+static void SetEntryArgs(asCScriptFunction *func, const CJITByteCode &code)
+{
+	asDWORD *byteCode = func->scriptData->byteCode.AddressOf();
+	const std::vector<asUINT> &entries = code.GetEntries();
+	const std::vector<SJITInstr> &instrs = code.GetInstructions();
+	for( asUINT n = 0; n < entries.size(); n++ )
+		asBC_PTRARG(byteCode + instrs[entries[n]].pos) = asPWORD(n + 1);
+}
+
 // TODO: runtime optimize: With asIJITCompilerV2 the engine only informs the compiler of each
 //                         new function with NewFunction, and the native code can be linked
 //                         at any time later with SetJITFunction. The VM reads the JIT function
@@ -282,14 +334,15 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 
 	*output = 0;
 
-	if( !IsSupported() )
-		return asNOT_SUPPORTED;
-
 	asCScriptFunction *func = static_cast<asCScriptFunction*>(function);
 	if( func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
 		return asERROR;
 
-	if( m_impl->filter && !m_impl->filter(function, m_impl->filterParam) )
+	// The functions generated ahead of time are found by the bytecode, which is decoded
+	// before the filter is asked then, as the code is generated for all functions
+	bool aotOutput = !m_impl->aotOutput.GetDirectory().empty();
+	bool aot       = aotOutput || !m_impl->aotFunctions.empty();
+	if( !aot && ((m_impl->flags & JIT_AOT_ONLY) || !IsSupported() || (m_impl->filter && !m_impl->filter(function, m_impl->filterParam))) )
 		return asNOT_SUPPORTED;
 
 	// Decode and analyse the bytecode
@@ -303,6 +356,51 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		m_impl->stats.functionsFailed++;
 		return asERROR;
 	}
+
+	bool log = (m_impl->flags & JIT_LOG) && m_impl->logFile &&
+	           (m_impl->logFilter.empty() || strstr(func->GetDeclaration(true, true), m_impl->logFilter.c_str()) != 0);
+
+	if( aot )
+	{
+		SJITAOTKey key = JIT_GetAOTKey(code);
+		if( aotOutput )
+		{
+			CJITAOTOutput::EResult result;
+			{
+				std::lock_guard<std::mutex> lock(m_impl->mutex);
+				result = m_impl->aotOutput.Add(code, key, func->GetDeclaration(true, true));
+			}
+			if( result == CJITAOTOutput::AOT_CONFLICT )
+			{
+				std::string message = "Other code was generated ahead of time with the key of '";
+				message += func->GetDeclaration(true, true);
+				message += "', neither is written";
+				func->GetEngine()->WriteMessage("JIT", 0, 0, asMSGTYPE_WARNING, message.c_str());
+			}
+		}
+
+		if( m_impl->filter && !m_impl->filter(function, m_impl->filterParam) )
+			return asNOT_SUPPORTED;
+
+		std::map<SJITAOTKey, JITAOTFunction_t>::const_iterator it = m_impl->aotFunctions.find(key);
+		if( it != m_impl->aotFunctions.end() )
+		{
+			if( log )
+				fprintf(m_impl->logFile, "\n; ---- %s ----\n; generated ahead of time as %s\n", func->GetDeclaration(true, true), JIT_GetAOTName(key).c_str());
+			SetEntryArgs(func, code);
+			std::lock_guard<std::mutex> lock(m_impl->mutex);
+			m_impl->stats.functionsAOT++;
+			*output = reinterpret_cast<asJITFunction>(it->second);
+			return asSUCCESS;
+		}
+		if( (m_impl->flags & JIT_AOT_ONLY) || !IsSupported() )
+		{
+			if( log )
+				fprintf(m_impl->logFile, "\n; ---- %s ----\n; not generated ahead of time\n", func->GetDeclaration(true, true));
+			return asNOT_SUPPORTED;
+		}
+	}
+
 	// The dirty masks hold one bit per cached slot, and the bit of the frame
 	asUINT maxCachedSlots = m_impl->maxCachedSlots < 31 ? m_impl->maxCachedSlots : 31;
 	// The functions left to the compile filter are left to their calls too
@@ -313,8 +411,6 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	code.SetBailInstructions(m_impl->bailOps);
 	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots, &inlining);
 
-	bool log = (m_impl->flags & JIT_LOG) && m_impl->logFile &&
-	           (m_impl->logFilter.empty() || strstr(func->GetDeclaration(true, true), m_impl->logFilter.c_str()) != 0);
 	if( log )
 	{
 		fprintf(m_impl->logFile, "\n; ---- %s ----\n", func->GetDeclaration(true, true));
@@ -348,6 +444,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	options.noScriptCalls  = (m_impl->flags & JIT_NO_SCRIPT_CALLS) != 0;
 	options.syncEveryInstr = (m_impl->flags & JIT_SYNC_EVERY_INSTR) != 0;
 	options.maxNativeCallDepth = m_impl->maxNativeCallDepth;
+	options.interop = !m_impl->aotFunctions.empty();
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = (m_impl->flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
@@ -411,13 +508,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	if( log )
 		fprintf(m_impl->logFile, "; code at %p, %u bytes\n", (void*)jitFunc, (unsigned)holder.code_size());
 
-	// Set the entry point index in the JitEntry instructions
-	asDWORD *byteCode = func->scriptData->byteCode.AddressOf();
-	const std::vector<asUINT> &entries = code.GetEntries();
-	const std::vector<SJITInstr> &instrs = code.GetInstructions();
-	for( asUINT n = 0; n < entries.size(); n++ )
-		asBC_PTRARG(byteCode + instrs[entries[n]].pos) = asPWORD(n + 1);
-
+	SetEntryArgs(func, code);
 	*output = jitFunc;
 	return asSUCCESS;
 }
@@ -428,6 +519,9 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 		return;
 
 	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	// The functions generated ahead of time are part of the application
+	if( m_impl->aotPointers.count(func) )
+		return;
 	std::map<asJITFunction, void*>::iterator it = m_impl->unwindInfo.find(func);
 	if( it != m_impl->unwindInfo.end() )
 	{

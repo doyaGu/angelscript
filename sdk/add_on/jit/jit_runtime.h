@@ -25,22 +25,28 @@ class asCScriptFunction;
 
 // Signature of the generated functions. The VM calls them as asJITFunction, with
 // the 1-based index of the entry point in jitArg, and ignores the return value.
-// Native callers push the call state of the caller like asCContext::PushCallState
-// and call them with jitArg 0, the arguments on the script stack, and their stack
-// pointer in stackPointer, which the VM registers may not have on 64bit hosts. On
-// 32bit hosts the generated code leaves stackPointer out and has the stack pointer
-// in the VM registers. The VM leaves callLimit and stackPointer undefined. The
-// function then sets up its frame the way
-// asCContext::PrepareScriptFunction does, but writes the frame, i.e. the stack
-// frame pointer and the current function of the context, back only where the VM
-// or the engine may see it. On 64bit hosts native callers may mark the call state
-// by setting the sign bit of the stack index, whose upper half the VM ignores. The
-// function then returns without restoring the frame, the program pointer, and the
-// stack pointer of the caller, which keeps them itself. The VM entry clears the
-// mark of the call state on top, as the function doesn't return to a native caller
-// once the VM has executed it. callLimit is the length of the call
-// stack up to which further native calls may push call states. The VM entry sets it
-// to the capacity of the call stack, which is a multiple of the size of a call state
+// Native callers push the call state of the caller like asCContext::PushCallState,
+// set the current function of the context to the called function, and call them
+// with jitArg 0, the arguments on the script stack, and their stack pointer in
+// stackPointer, which the VM registers may not have on 64bit hosts. Only the
+// functions generated ahead of time need the current function, as they are shared
+// by the functions with the same bytecode, so the generated code only sets it if
+// the compiler has them, see SJITCodeGenOptions::interop. On 32bit hosts the
+// generated code leaves stackPointer out and has the stack pointer in the VM
+// registers. The VM leaves callLimit and stackPointer undefined. The function then
+// sets up its frame the way asCContext::PrepareScriptFunction does, but writes the
+// frame, i.e. the stack frame pointer and the current function of the context,
+// back only where the VM or the engine may see it. On 64bit hosts native callers
+// may mark the call state by setting the sign bit of the stack index, whose upper
+// half the VM ignores. The function then returns without restoring the frame, the
+// program pointer, and the stack pointer of the caller, which keeps them itself.
+// The VM entry clears the mark of the call state on top, as the function doesn't
+// return to a native caller once the VM has executed it. The functions generated
+// ahead of time restore everything whether the call state is marked or not, and
+// don't return the value register natively, so the generated code doesn't mark the
+// call states if the compiler has them. callLimit is the length of the call stack
+// up to which further native calls may push call states. The VM entry sets it to
+// the capacity of the call stack, which is a multiple of the size of a call state
 // and doesn't shrink, or less to allow no more than the maximum number of nested
 // native calls. The return value is 0 if the function returned to its caller, and
 // non-zero if the VM must take over, in which case the VM registers describe where

@@ -266,6 +266,7 @@ static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptF
 
 	if( ctx->PushCallState() < 0 )
 		return 1;
+	ctx->m_currentFunction = func;
 	return jitFunc(regs, 0, callLimit, regs->stackPointer);
 }
 
