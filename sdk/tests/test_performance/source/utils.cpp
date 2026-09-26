@@ -111,6 +111,7 @@ bool g_jitNoDirectCalls = false;
 const char *g_jitLogFilter = 0;
 const char *g_aotOutput = 0;
 const char *g_jitThresholds = 0;
+const char *g_jitProfile = 0;
 static CJITCompiler *g_jit = 0;
 
 asIScriptEngine *CreateEngineForTest(asDWORD version)
@@ -136,6 +137,8 @@ asIScriptEngine *CreateEngineForTest(asDWORD version)
 				asUINT calls = asUINT(strtoul(g_jitThresholds, &end, 0));
 				g_jit->SetCompileThresholds(calls, *end == ',' ? asUINT(strtoul(end + 1, 0, 0)) : 0);
 			}
+			if( g_jitProfile )
+				g_jit->SetProfileThreshold(asUINT(strtoul(g_jitProfile, 0, 0)));
 #ifdef AS_JIT_AOT_TABLE
 			if( g_useAot )
 				g_jit->AddAOTFunctions(g_jitAOTFunctions, g_jitAOTFunctionCount);
@@ -167,10 +170,10 @@ void ReleaseJitCompiler()
 {
 	if( g_jit && g_aotOutput && g_jit->WriteAOTOutput() < 0 )
 		printf("Failed to write the code generated ahead of time to %s\n", g_aotOutput);
-	if( g_jit && g_jitThresholds )
+	if( g_jit && (g_jitThresholds || g_jitProfile) )
 	{
 		SJITStatistics stats = g_jit->GetStatistics();
-		printf("JIT: %u functions compiled, %u deferred\n", stats.functionsCompiled, stats.functionsDeferred);
+		printf("JIT: %u functions compiled, %u deferred, %u recompiled\n", stats.functionsCompiled, stats.functionsDeferred, stats.functionsRecompiled);
 	}
 	delete g_jit;
 	g_jit = 0;

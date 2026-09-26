@@ -14,6 +14,7 @@ extern bool      g_jitNoDirectCalls;
 extern const char *g_jitLogFilter;
 extern const char *g_aotOutput;
 extern const char *g_jitThresholds;
+extern const char *g_jitProfile;
 #define asCreateScriptEngine(...) CreateEngineForTest(__VA_ARGS__)
 
 // Prepare and Execute of the JIT compiler when the test is run with --jit, otherwise of the context

@@ -117,9 +117,11 @@ int main(int argc, char **argv)
 	// AS_JIT_AOT_DIR), and leaves the other functions to the VM, or with --jit
 	// to the JIT compiler. --tiered <calls>[,<iterations>] compiles the functions only
 	// when they have been called that many times, or a loop has run that many
-	// iterations, see CJITCompiler::SetCompileThresholds
+	// iterations, see CJITCompiler::SetCompileThresholds. --profile <calls> compiles
+	// them again with the classes that their calls have seen after that many calls,
+	// 0 never, see CJITCompiler::SetProfileThreshold
 	bool useJit = false, directCalls = false, noDirectCalls = false, usePool = false, useAot = false;
-	const char *logFilter = 0, *aotOutput = 0, *thresholds = 0;
+	const char *logFilter = 0, *aotOutput = 0, *thresholds = 0, *profile = 0;
 	for( int a = 1; a < argc; a++ )
 	{
 		if( strcmp(argv[a], "--log") == 0 && a + 1 < argc )
@@ -128,6 +130,8 @@ int main(int argc, char **argv)
 			aotOutput = argv[++a];
 		if( strcmp(argv[a], "--tiered") == 0 && a + 1 < argc )
 			thresholds = argv[++a];
+		if( strcmp(argv[a], "--profile") == 0 && a + 1 < argc )
+			profile = argv[++a];
 		if( strcmp(argv[a], "--jit") == 0 )
 			useJit = true;
 		if( strcmp(argv[a], "--aot") == 0 )
@@ -147,6 +151,7 @@ int main(int argc, char **argv)
 	g_jitLogFilter = logFilter;
 	g_aotOutput = aotOutput;
 	g_jitThresholds = thresholds;
+	g_jitProfile = profile;
 	if( usePool )
 		UsePooledMemory();
 #ifndef AS_JIT_AOT_TABLE
@@ -154,7 +159,7 @@ int main(int argc, char **argv)
 		printf("The test wasn't built with code generated ahead of time\n");
 #endif
 #else
-	if( useJit || usePool || useAot || aotOutput || thresholds )
+	if( useJit || usePool || useAot || aotOutput || thresholds || profile )
 		printf("The test wasn't built with the JIT compiler\n");
 #endif
 
@@ -168,6 +173,8 @@ int main(int argc, char **argv)
 		printf(" (AOT)");
 	if( thresholds )
 		printf(" (tiered %s)", thresholds);
+	if( profile )
+		printf(" (profile %s)", profile);
 	if( usePool )
 		printf(" (pooled memory)");
 	printf("\n");
