@@ -115,15 +115,19 @@ int main(int argc, char **argv)
 	// for the functions compiled to <dir>, and --aot runs the tests with the code
 	// generated ahead of time that the test was built with (the CMake option
 	// AS_JIT_AOT_DIR), and leaves the other functions to the VM, or with --jit
-	// to the JIT compiler
+	// to the JIT compiler. --tiered <calls>[,<iterations>] compiles the functions only
+	// when they have been called that many times, or a loop has run that many
+	// iterations, see CJITCompiler::SetCompileThresholds
 	bool useJit = false, directCalls = false, noDirectCalls = false, usePool = false, useAot = false;
-	const char *logFilter = 0, *aotOutput = 0;
+	const char *logFilter = 0, *aotOutput = 0, *thresholds = 0;
 	for( int a = 1; a < argc; a++ )
 	{
 		if( strcmp(argv[a], "--log") == 0 && a + 1 < argc )
 			logFilter = argv[++a];
 		if( strcmp(argv[a], "--aot-output") == 0 && a + 1 < argc )
 			aotOutput = argv[++a];
+		if( strcmp(argv[a], "--tiered") == 0 && a + 1 < argc )
+			thresholds = argv[++a];
 		if( strcmp(argv[a], "--jit") == 0 )
 			useJit = true;
 		if( strcmp(argv[a], "--aot") == 0 )
@@ -142,6 +146,7 @@ int main(int argc, char **argv)
 	g_jitNoDirectCalls = noDirectCalls;
 	g_jitLogFilter = logFilter;
 	g_aotOutput = aotOutput;
+	g_jitThresholds = thresholds;
 	if( usePool )
 		UsePooledMemory();
 #ifndef AS_JIT_AOT_TABLE
@@ -149,7 +154,7 @@ int main(int argc, char **argv)
 		printf("The test wasn't built with code generated ahead of time\n");
 #endif
 #else
-	if( useJit || usePool || useAot || aotOutput )
+	if( useJit || usePool || useAot || aotOutput || thresholds )
 		printf("The test wasn't built with the JIT compiler\n");
 #endif
 
@@ -161,6 +166,8 @@ int main(int argc, char **argv)
 		printf(noDirectCalls ? " (JIT, no direct calls)" : directCalls ? " (JIT, direct calls)" : " (JIT)");
 	if( useAot )
 		printf(" (AOT)");
+	if( thresholds )
+		printf(" (tiered %s)", thresholds);
 	if( usePool )
 		printf(" (pooled memory)");
 	printf("\n");
