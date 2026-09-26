@@ -24,13 +24,13 @@
 //
 //  - Inline calls of imported functions and delegates. They still go through
 //    JIT_CallScript (jit_codegen_call.cpp, EmitScriptCall).
-//  - Inline the methods that several classes implement for the type of the handle, which
-//    the bytecode doesn't tell for the methods overridden by derived classes, or for the
-//    classes seen at run time (jit_bytecode.cpp, FindInlinees).
-//  - Profiles for the tiered compilation: note the classes of the objects that the
-//    virtual and interface calls see while the VM executes the deferred functions, and
-//    inline the methods of the classes seen, or compile the hot functions again with
-//    them (TieredEntry below).
+//  - Inline the methods of the two or three classes that a call has seen, each checked
+//    for, and those that several classes implement for the type of the handle, which the
+//    bytecode doesn't tell for the methods overridden by derived classes (jit_bytecode.cpp,
+//    FindInlinees).
+//  - Compile the functions in a background thread while the VM or the code compiled
+//    before goes on, and note the classes that the calls see while the VM executes the
+//    deferred functions too (TieredEntry below).
 //  - Inline calls in the code generated ahead of time, and borrow the references of the
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
@@ -98,11 +98,41 @@ struct CJITCompiler::SImpl
 	asUINT                 callThreshold; // see SetCompileThresholds
 	asUINT                 loopThreshold;
 	std::set<asCScriptFunction*> compiling; // the deferred functions being compiled
+	asUINT                 profileThreshold; // see SetProfileThreshold
+
+	// The profile of the code of a function, which is passed to Recompile when the code
+	// has counted down the calls
+	struct SProfile : SJITProfile
+	{
+		SImpl             *impl;
+		asCScriptFunction *func;
+		asJITFunction      code;       // the code noting the classes
+		asUINT             generation; // the times the function has been compiled again before
+		bool               recompiled; // Recompile has compiled the function again, or has begun to
+		SJITProfile        compiledWith; // the classes that the code was compiled with
+	};
+
+	// The profiles of the code of a function, and the code that the function had before
+	// it was compiled again, which the calls under way may still execute. They are
+	// released with the current code
+	struct SHistory
+	{
+		std::vector<asJITFunction> retired;
+		std::vector<SProfile*>     profiles;
+	};
+	std::map<asJITFunction, SHistory> histories; // by the current code of the functions
 
 	bool IsLogged(asCScriptFunction *func) const;
-	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output);
+	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, const SProfile *source = 0);
 	JITFunction TierUp(asCScriptFunction *func);
+	void Release(asJITFunction code);
+	static int Recompile(SJITProfile *profile);
 };
+
+// The times that a function is compiled again at most, see SetProfileThreshold
+static const asUINT JIT_MAX_RECOMPILES = 2;
+// The count of the profiles whose code doesn't compile the function again
+static const int JIT_PROFILE_DONE = 0x7FFFFFFF;
 
 CJITCompiler::CJITCompiler(asDWORD flags)
 {
@@ -117,6 +147,7 @@ CJITCompiler::CJITCompiler(asDWORD flags)
 	m_impl->maxNativeCallDepth = 256;
 	m_impl->callThreshold   = 0;
 	m_impl->loopThreshold   = 0;
+	m_impl->profileThreshold = 10000;
 	memset(m_impl->bailOps, 0, sizeof(m_impl->bailOps));
 	memset(&m_impl->stats, 0, sizeof(m_impl->stats));
 }
@@ -126,6 +157,9 @@ CJITCompiler::~CJITCompiler()
 	// Releasing the runtime frees all code that is still held
 	for( std::map<asJITFunction, void*>::iterator it = m_impl->unwindInfo.begin(); it != m_impl->unwindInfo.end(); ++it )
 		CJITUnwindInfo::Unregister(it->second);
+	for( std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.begin(); it != m_impl->histories.end(); ++it )
+		for( size_t n = 0; n < it->second.profiles.size(); n++ )
+			delete it->second.profiles[n];
 	delete m_impl;
 }
 
@@ -195,6 +229,11 @@ int CJITCompiler::SetCompileThresholds(asUINT calls, asUINT iterations)
 	m_impl->callThreshold = calls < JIT_ENTRY_MAX_COUNT ? calls : JIT_ENTRY_MAX_COUNT;
 	m_impl->loopThreshold = iterations < JIT_ENTRY_MAX_COUNT ? iterations : JIT_ENTRY_MAX_COUNT;
 	return asSUCCESS;
+}
+
+void CJITCompiler::SetProfileThreshold(asUINT calls)
+{
+	m_impl->profileThreshold = calls < asUINT(JIT_PROFILE_DONE) ? calls : asUINT(JIT_PROFILE_DONE);
 }
 
 void CJITCompiler::SetAOTOutput(const char *directory)
@@ -317,6 +356,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		}
 		if( instr.flags & JIT_INSTR_INLINE )
 			fprintf(file, "   ; inlined");
+		if( instr.flags & JIT_INSTR_PROFILE )
+			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? " for the class seen" : "   ; classes noted");
 		if( instr.flags & JIT_INSTR_BORROW )
 			fprintf(file, "   ; borrowed");
 		if( instr.flags & (JIT_INSTR_MOVE | JIT_INSTR_MOVED) )
@@ -484,8 +525,9 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 }
 
 // Analyses the decoded bytecode of the function and generates its code. The entry
-// points are set in the JitEntry instructions then
-int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output)
+// points are set in the JitEntry instructions then. The code is compiled again with
+// the classes in the profile of the source, see Recompile
+int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, const SProfile *source)
 {
 	using namespace asmjit;
 	using namespace asmjit::ujit;
@@ -497,12 +539,35 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	inlining.maxSize     = (flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : maxInlineSize;
 	inlining.filter      = filter;
 	inlining.filterParam = filterParam;
+	// The calls note the classes that they see, and the calls not made yet go on noting
+	// them in the code compiled again, up to JIT_MAX_RECOMPILES
+	asUINT generation = source ? source->generation + 1 : 0;
+	inlining.profile     = profileThreshold > 0 && inlining.maxSize > 0 && generation < JIT_MAX_RECOMPILES;
+	// The classes seen before stay in the profile for the next time. The code of the
+	// source may go on noting them, so the analysis takes them from the copy
+	SProfile *profile = 0;
+	if( inlining.profile )
+	{
+		profile = new SProfile;
+		if( source )
+			profile->compiledWith.classes = source->classes;
+		profile->classes    = profile->compiledWith.classes;
+		profile->countdown  = int(profileThreshold);
+		profile->impl       = this;
+		profile->func       = func;
+		profile->code       = 0;
+		profile->generation = generation;
+		profile->recompiled = false;
+	}
+	inlining.classes     = profile ? &profile->compiledWith : source;
 	code.SetBailInstructions(bailOps);
 	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
 
 	if( log )
 	{
 		fprintf(logFile, "\n; ---- %s ----\n", func->GetDeclaration(true, true));
+		if( source )
+			fprintf(logFile, "; compiled again with the classes seen by the calls\n");
 		DumpByteCode(logFile, code);
 	}
 
@@ -535,6 +600,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	options.maxNativeCallDepth = maxNativeCallDepth;
 	options.interop = !aotFunctions.empty();
 	options.tieredEntry = callThreshold > 0 ? (const void*)TieredEntry : 0;
+	options.profile   = profile;
+	options.recompile = (const void*)Recompile;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
@@ -562,6 +629,13 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 		errorHandler.message = "no unwind information for the prologue";
 	}
 
+	// The code that notes no classes doesn't need the profile
+	if( profile && gen.GetProfiledCallCount() == 0 )
+	{
+		delete profile;
+		profile = 0;
+	}
+
 	asJITFunction jitFunc = 0;
 	if( ok )
 	{
@@ -578,7 +652,15 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 			unwindInfo[jitFunc] = unwindHandle;
 		if( ok )
 		{
-			stats.functionsCompiled++;
+			if( source )
+				stats.functionsRecompiled++;
+			else
+				stats.functionsCompiled++;
+			if( profile )
+			{
+				profile->code = jitFunc;
+				histories[jitFunc].profiles.push_back(profile);
+			}
 			stats.instructionsCompiled += gen.GetInstructionCount();
 			stats.instructionsBailed   += gen.GetBailCount();
 			stats.callsInlined         += gen.GetInlinedCallCount();
@@ -590,13 +672,18 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	{
 		if( log )
 			fprintf(logFile, "; compilation failed: %s\n", errorHandler.message.c_str());
+		delete profile;
 		std::lock_guard<std::mutex> lock(mutex);
 		stats.functionsFailed++;
 		return asERROR;
 	}
 
 	if( log )
+	{
 		fprintf(logFile, "; code at %p, %u bytes\n", (void*)jitFunc, (unsigned)holder.code_size());
+		if( profile )
+			fprintf(logFile, "; %u calls note their classes\n", gen.GetProfiledCallCount());
+	}
 
 	SetEntryArgs(func, code);
 	*output = jitFunc;
@@ -637,6 +724,55 @@ JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func)
 	return reinterpret_cast<JITFunction>(jitFunc);
 }
 
+// Compiles the function of the profile again with the classes that the calls of its
+// code have seen, unless another thread does or has, and installs the new code. The
+// entry points stay the same, so the VM may enter either code at them. Called by the
+// code when it has counted down the calls, which leaves the call to the VM if 1 is
+// returned, i.e. the function has new code, so that the VM goes on in that after the
+// call
+int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
+{
+	SProfile *profile = static_cast<SProfile*>(jitProfile);
+	SImpl *impl = profile->impl;
+	asCScriptFunction *func = profile->func;
+	{
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		bool current = func->scriptData->jitFunction == profile->code;
+		if( profile->recompiled || !current )
+		{
+			// The calls of the code don't come here again for a long time
+			profile->countdown = JIT_PROFILE_DONE;
+			return profile->recompiled && !current;
+		}
+		// The code goes on noting the classes unless the new code would inline more
+		if( !profile->HasNewClass(profile->compiledWith) )
+		{
+			profile->countdown = int(impl->profileThreshold);
+			return 0;
+		}
+		profile->countdown = JIT_PROFILE_DONE;
+		profile->recompiled = true;
+	}
+
+	CJITByteCode code;
+	asJITFunction jitFunc = 0;
+	if( code.Decode(func) < 0 || impl->Compile(func, code, impl->IsLogged(func), &jitFunc, profile) < 0 )
+		return 0;
+
+	std::lock_guard<std::mutex> lock(impl->mutex);
+	std::map<asJITFunction, SHistory>::iterator old = impl->histories.find(profile->code);
+	SHistory &history = impl->histories[jitFunc];
+	history.retired.push_back(profile->code);
+	if( old != impl->histories.end() )
+	{
+		history.retired.insert(history.retired.end(), old->second.retired.begin(), old->second.retired.end());
+		history.profiles.insert(history.profiles.end(), old->second.profiles.begin(), old->second.profiles.end());
+		impl->histories.erase(old);
+	}
+	func->scriptData->jitFunction = jitFunc;
+	return 1;
+}
+
 // The code of the deferred functions, which counts down the argument of the JitEntry
 // instruction, see JIT_ENTRY_COUNT_SHIFT, and compiles the function when it runs out.
 // The VM enters it at the instruction at the program pointer, and native callers at
@@ -644,11 +780,10 @@ JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func)
 // compiled code then, and otherwise in the VM
 //
 // TODO: runtime optimize: The classes of the objects that the virtual and interface
-//                         calls see until the function is compiled could be noted, for
-//                         FindInlinees to inline the methods of those classes instead of
-//                         only those of the only class implementing them. The hot
-//                         functions could also be compiled again with the classes seen
-//                         by the compiled code, like the second tier of HotSpot.
+//                         calls see until the function is compiled could be noted too,
+//                         so that the first code inlines their methods, see SJITProfile.
+//                         The functions could be compiled in a background thread, while
+//                         the VM goes on.
 int CJITCompiler::TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer)
 {
 	asCContext *ctx = static_cast<asCContext*>(regs->ctx);
@@ -704,14 +839,30 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 	// The functions generated ahead of time are part of the application
 	if( m_impl->aotPointers.count(func) )
 		return;
-	std::map<asJITFunction, void*>::iterator it = m_impl->unwindInfo.find(func);
-	if( it != m_impl->unwindInfo.end() )
+	// The code that the function had before goes with it, see Recompile
+	std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.find(func);
+	if( it != m_impl->histories.end() )
+	{
+		for( size_t n = 0; n < it->second.retired.size(); n++ )
+			m_impl->Release(it->second.retired[n]);
+		for( size_t n = 0; n < it->second.profiles.size(); n++ )
+			delete it->second.profiles[n];
+		m_impl->histories.erase(it);
+	}
+	m_impl->Release(func);
+	m_impl->stats.functionsReleased++;
+}
+
+// Frees the code and its unwind information. Must be called with the lock held
+void CJITCompiler::SImpl::Release(asJITFunction code)
+{
+	std::map<asJITFunction, void*>::iterator it = unwindInfo.find(code);
+	if( it != unwindInfo.end() )
 	{
 		CJITUnwindInfo::Unregister(it->second);
-		m_impl->unwindInfo.erase(it);
+		unwindInfo.erase(it);
 	}
-	m_impl->runtime.release(func);
-	m_impl->stats.functionsReleased++;
+	runtime.release(code);
 }
 
 END_AS_NAMESPACE

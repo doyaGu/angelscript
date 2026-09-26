@@ -562,6 +562,14 @@ static asCScriptFunction *GetImplementation(asCObjectType *cls, asCScriptFunctio
 	return index < cls->virtualFunctionTable.GetLength() ? cls->virtualFunctionTable[index] : 0;
 }
 
+// Returns true if objects of the class can call the virtual or interface method
+static bool CanCall(asCObjectType *cls, asCScriptFunction *method)
+{
+	if( !(cls->flags & asOBJ_SCRIPT_OBJECT) || (cls->flags & asOBJ_ABSTRACT) || cls->IsInterface() )
+		return false;
+	return method->funcType == asFUNC_INTERFACE ? cls->Implements(method->objectType) : cls->DerivesFrom(method->objectType);
+}
+
 // Returns the implementation of a virtual or interface method in the classes of the
 // module of the caller that objects calling it can be of, or null if they implement
 // it differently. If only one class can, it is returned in objType, and the class of
@@ -572,8 +580,7 @@ static asCScriptFunction *GetImplementation(asCObjectType *cls, asCScriptFunctio
 static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *&objType)
 {
 	objType = 0;
-	asCObjectType *type = method->objectType;
-	if( caller->module == 0 || type == 0 || method->vfTableIdx < 0 )
+	if( caller->module == 0 || method->objectType == 0 || method->vfTableIdx < 0 )
 		return 0;
 
 	asCScriptFunction *found = 0;
@@ -582,9 +589,7 @@ static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScrip
 	for( asUINT n = 0; n < classes.GetLength(); n++ )
 	{
 		asCObjectType *cls = classes[n];
-		if( !(cls->flags & asOBJ_SCRIPT_OBJECT) || (cls->flags & asOBJ_ABSTRACT) || cls->IsInterface() )
-			continue;
-		if( method->funcType == asFUNC_INTERFACE ? !cls->Implements(type) : !cls->DerivesFrom(type) )
+		if( !CanCall(cls, method) )
 			continue;
 		asCScriptFunction *impl = GetImplementation(cls, method);
 		if( impl == 0 || (count > 0 && (impl != found || method->funcType == asFUNC_INTERFACE)) )
@@ -593,6 +598,70 @@ static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScrip
 		objType = count++ == 0 ? cls : 0;
 	}
 	return found;
+}
+
+// Returns true if the class that a profile has seen is one of the module of the
+// function. The others may have been destroyed, and are only compared with those
+static bool IsModuleClass(asCScriptFunction *func, asCObjectType *seen)
+{
+	if( func->module == 0 )
+		return false;
+	const asCArray<asCObjectType*> &classes = func->module->m_classTypes;
+	for( asUINT n = 0; n < classes.GetLength(); n++ )
+		if( classes[n] == seen )
+			return true;
+	return false;
+}
+
+// Returns the implementation of a virtual or interface method in the class that the
+// profile has seen at the call, which is returned in objType, if it is a class of the
+// module of the caller that objects calling the method can be of
+static asCScriptFunction *FindSeenImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *seen, asCObjectType *&objType)
+{
+	objType = 0;
+	if( method->objectType == 0 || method->vfTableIdx < 0 || !IsModuleClass(caller, seen) || !CanCall(seen, method) )
+		return 0;
+	objType = seen;
+	return GetImplementation(seen, method);
+}
+
+// Returns true if a class of the module of the caller that objects calling a virtual
+// or interface method can be of implements it with a script function small enough
+// to be inlined, so that the classes that the call sees are worth noting
+static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction *method, asUINT maxSize)
+{
+	if( caller->module == 0 || method->objectType == 0 || method->vfTableIdx < 0 )
+		return false;
+
+	const asCArray<asCObjectType*> &classes = caller->module->m_classTypes;
+	for( asUINT n = 0; n < classes.GetLength(); n++ )
+	{
+		asCScriptFunction *impl = CanCall(classes[n], method) ? GetImplementation(classes[n], method) : 0;
+		if( impl && impl->funcType == asFUNC_SCRIPT && impl->scriptData && impl->scriptData->byteCode.GetLength() <= maxSize )
+			return true;
+	}
+	return false;
+}
+
+asCObjectType *SJITProfile::Find(asCScriptFunction *func, asUINT instrIdx) const
+{
+	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*>::const_iterator it = classes.find(std::make_pair(func, instrIdx));
+	return it == classes.end() ? 0 : it->second;
+}
+
+// The calls that have seen several classes, or those of other modules, or none, gain
+// nothing from compiling the function again, and neither do those that were inlined
+// for the class, or couldn't be
+bool SJITProfile::HasNewClass(const SJITProfile &compiledWith) const
+{
+	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*>::const_iterator it;
+	for( it = classes.begin(); it != classes.end(); ++it )
+	{
+		asCObjectType *seen = it->second;
+		if( seen != compiledWith.Find(it->first.first, it->first.second) && IsModuleClass(it->first.first, seen) )
+			return true;
+	}
+	return false;
 }
 
 // The search for the functions to inline into a function and into those
@@ -613,7 +682,9 @@ struct CJITByteCode::SInlineSearch
 // bounds. Recursion and functions with catch blocks are left to the calls. The
 // virtual and interface methods are inlined if the classes that can implement them
 // all have the same implementation, which the object is checked for, see
-// FindImplementation
+// FindImplementation. Otherwise the calls note the classes that they see in the
+// profile, and the methods are inlined for the class that a call has seen when the
+// function is compiled again with it, where the call notes the others then
 void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
@@ -632,15 +703,26 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 
 		asCScriptFunction *func = 0;
 		asCObjectType *objType = 0;
+		bool profiled = false;
 		int id = asBC_INTARG(instr.bc);
 		if( id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
 			func = engine->scriptFunctions[id];
 		if( func && instr.op == asBC_CALLINTF )
 		{
-			if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
-				func = FindImplementation(m_func, func, objType);
-			else
-				func = 0;
+			asCScriptFunction *method = func;
+			func = 0;
+			if( method->funcType == asFUNC_VIRTUAL || method->funcType == asFUNC_INTERFACE )
+			{
+				func = FindImplementation(m_func, method, objType);
+				asCObjectType *seen = func == 0 && inlining.classes ? inlining.classes->Find(m_func, n) : 0;
+				if( seen )
+				{
+					func = FindSeenImplementation(m_func, method, seen, objType);
+					profiled = inlining.profile && func;
+				}
+				else if( func == 0 && inlining.profile && HasSmallImplementation(m_func, method, inlining.maxSize) )
+					instr.flags |= JIT_INSTR_PROFILE;
+			}
 		}
 		if( func == 0 || std::find(search.path.begin(), search.path.end(), func->GetId()) != search.path.end() )
 			continue;
@@ -686,6 +768,8 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 			budget -= size;
 			m_inlinedLength += size;
 			instr.flags |= JIT_INSTR_INLINE;
+			if( profiled )
+				instr.flags |= JIT_INSTR_PROFILE;
 			m_inlinees[n] = it->second;
 			if( objType )
 				m_inlineObjTypes[n] = objType;

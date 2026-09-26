@@ -39,6 +39,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_instrCount = 0;
 	m_bailCount  = 0;
 	m_callsInlined = 0;
+	m_callsProfiled = 0;
 	m_inlineCalls  = false;
 	m_materialized = false;
 	m_materialDepth = 0;

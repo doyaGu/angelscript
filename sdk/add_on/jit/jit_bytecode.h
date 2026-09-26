@@ -30,7 +30,8 @@ enum EJITInstrFlags
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
-	JIT_INSTR_FREE_LIST   = 0x800  // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
+	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
+	JIT_INSTR_PROFILE     = 0x1000 // asBC_CALLINTF whose classes are noted in the profile, or, if inlined for the class seen before, the others, see SJITProfile
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -108,12 +109,38 @@ static const asUINT JIT_FRAME_BIT = 0x80000000u;
 #define JIT_INPLACE_REFCOUNT
 #endif
 
+// The classes of the objects that the virtual and interface calls marked with
+// JIT_INSTR_PROFILE have seen, by the function and the index of the call, for the
+// calls whose method several classes implement. The calls that have seen several
+// note JIT_PROFILE_MANY, and so do those inlined for the class seen before when they
+// see another. The compiled code counts down the calls, and compiles the function
+// again with the classes seen when the count runs out, if a call has seen a new one,
+// see SJITCodeGenOptions. The code may note the classes in several threads at once,
+// which only loses counts or classes, as the classes are only compared with those of
+// the module of the call. The count runs out when it isn't positive, so a count that
+// a thread takes below 0 while another starts it again runs out at the next call
+struct SJITProfile
+{
+	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*> classes;
+	int countdown;
+
+	// Returns the class noted for the call, or null
+	asCObjectType *Find(asCScriptFunction *func, asUINT instrIdx) const;
+	// Returns true if a call has seen only one class of the module of its function,
+	// which it hadn't in the profile that the code was compiled with
+	bool HasNewClass(const SJITProfile &compiledWith) const;
+};
+
+static asCObjectType *const JIT_PROFILE_MANY = reinterpret_cast<asCObjectType*>(asPWORD(1));
+
 // The functions that Analyse lets the code generator emit in place of their calls
 struct SJITInlineOptions
 {
 	asUINT maxSize;  // largest bytecode in dwords, 0 inlines nothing
 	bool (*filter)(asIScriptFunction *func, void *param); // must accept the function unless null
 	void  *filterParam;
+	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
+	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
 };
 
 // Decodes the bytecode of a script function and gathers the information
@@ -130,7 +157,8 @@ public:
 	// Performs the analysis. Must be called after Decode. The small functions called
 	// with asBC_CALL are analysed too, so that their code can be emitted in place, and
 	// so are the methods called with asBC_CALLINTF if all the classes that can
-	// implement them have the same implementation, see FindInlinees
+	// implement them have the same implementation, or if the profile has seen one
+	// class at the call, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	// Performs the analysis for the code generated ahead of time, which must depend
@@ -222,9 +250,10 @@ public:
 	const CJITByteCode *GetInlinee(asUINT instrIdx) const;
 
 	// Returns the class that the object must be of for an inlined asBC_CALLINTF to
-	// call the inlined method, or null for asBC_CALL, and for the virtual methods that
-	// several classes inherit, for which the class of the object must have the inlined
-	// method in its table
+	// call the inlined method, which is the only class of the module that can, or the
+	// one that the profile has seen. Null for asBC_CALL, and for the virtual methods
+	// that several classes inherit, for which the class of the object must have the
+	// inlined method in its table
 	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
 
 	// Returns true if the function or one inlined into it calls something that may

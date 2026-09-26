@@ -25,6 +25,8 @@ struct SJITCodeGenOptions
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 	bool interop;           // set the current function for the native calls and don't mark their call states, for the functions generated ahead of time, see JITFunction
 	const void *tieredEntry; // the code of the functions whose compilation is deferred, whose calls are left to the helpers unless interop is set, or null
+	SJITProfile *profile;    // where the calls marked with JIT_INSTR_PROFILE note their classes, or null
+	const void *recompile;   // int (*)(SJITProfile*), called when the profile has counted down the calls, returns non-zero if the function has new code, which the VM goes on in after the call
 };
 
 // Translates the analysed bytecode of one function to machine code through
@@ -57,6 +59,7 @@ public:
 	asUINT GetInstructionCount() const { return m_instrCount; }
 	asUINT GetBailCount() const        { return m_bailCount; }
 	asUINT GetInlinedCallCount() const { return m_callsInlined; }
+	asUINT GetProfiledCallCount() const { return m_callsProfiled; } // the calls that note their classes in the profile
 
 protected:
 	typedef asmjit::ujit::Gp        Gp;
@@ -173,7 +176,10 @@ protected:
 	void EmitInlineRoom();
 	void EmitStackBlockCheck(int extent, const Label &none);
 	void GetInlineRoom(asUINT idx, int &extent, int &depth) const;
-	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow);
+	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow, asCObjectType **seen);
+	asCObjectType **ProfileCell(asUINT idx);
+	Gp   EmitCountDown();
+	void EmitRecompile(asUINT idx);
 	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
@@ -330,6 +336,7 @@ protected:
 	asUINT m_instrCount;
 	asUINT m_bailCount;
 	asUINT m_callsInlined;
+	asUINT m_callsProfiled;
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
 	bool   m_materialized; // the frames of the inlined calls are on the call stack, see EmitMaterialize
 	int    m_materialDepth; // the number of call states pushed for them

@@ -22,6 +22,7 @@ struct SJITStatistics
 	size_t codeSize;             // total size of the native code currently held
 	asUINT functionsAOT;         // script functions that use the code generated ahead of time, see AddAOTFunctions
 	asUINT functionsDeferred;    // script functions whose compilation was deferred, see SetCompileThresholds
+	asUINT functionsRecompiled;  // compiled functions compiled again with the classes seen by their calls, see SetProfileThreshold
 };
 
 // Callback used to decide if a function should be JIT compiled
@@ -137,6 +138,18 @@ public:
 	// this compiler itself, not one that forwards to it. Must be called before any
 	// function is compiled. Returns a negative value on failure
 	int SetCompileThresholds(asUINT calls, asUINT iterations);
+
+	// Profiles. The virtual and interface calls whose method several classes of the
+	// module implement note the classes of their objects, and when the calls of a
+	// function have been made that many times, the function is compiled again if a
+	// call has seen only one class since the function was compiled, with the method
+	// compiled in place for the objects of that class. The calls are counted again
+	// otherwise. The objects of other classes call the method, and are noted too, and
+	// the calls not made yet go on noting their classes, so a function is compiled at
+	// most 3 times. The call that has counted down goes on in the new code, and so do
+	// the next calls of the function, and the old code is released with the function.
+	// Default is 10000, 0 doesn't note the classes
+	void SetProfileThreshold(asUINT calls);
 
 	// Ahead-of-time compilation. With an output directory the compiler generates C++
 	// code for every function it is given, which WriteAOTOutput writes to the directory:

@@ -158,7 +158,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		}
 		else if( kind == JIT_CALL_INTERFACE )
 		{
-			method = EmitFindMethod(callee, slow);
+			method = EmitFindMethod(callee, slow, (instr.flags & JIT_INSTR_INLINE) ? 0 : ProfileCell(idx));
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, mem_ptr(method, layout.scriptData));
 			m_uc.load(target, mem_ptr(target, layout.jitFunction));
@@ -242,7 +242,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // of its frame pushes the call state, see EmitInlineExit, and where it calls
 // functions, its frame is materialized, see EmitMaterialize. A method called through
 // asBC_CALLINTF is inlined for objects of one class, or of the classes that inherit
-// the method, and the others call the method.
+// the method, and the others call the method. If the class is the one seen before by
+// the call, the others are noted in the profile, and count down its calls.
 // The calls in the inlined functions only check the class, as the outermost call
 // has checked the room for them, and that the VM has nothing to do if the functions
 // called before may have given it something. The VM makes the call otherwise
@@ -276,7 +277,21 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		m_uc.load(type, Stack(0));
 		m_uc.j(own, test_z(type));
 		m_uc.load(type, mem_ptr(type, layout.objectType));
-		if( objType )
+		asCObjectType **seen = objType ? ProfileCell(idx) : 0;
+		if( seen )
+		{
+			Label other = m_uc.new_label();
+			m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(objType))));
+			BaseNode *cold = BeginCold(other);
+			Gp many = m_uc.new_gp_ptr();
+			m_uc.mov(many, Imm(int64_t(asPWORD(JIT_PROFILE_MANY))));
+			m_uc.store(mem_ptr(PtrConst(asPWORD(seen))), many);
+			m_uc.j(own, scmp_gt(EmitCountDown(), Imm(0)));
+			EmitRecompile(idx);
+			EndCold(cold, own);
+			m_callsProfiled++;
+		}
+		else if( objType )
 			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(objType))));
 		else
 		{
@@ -556,8 +571,9 @@ CJITCodeGen::Gp CJITCodeGen::FramePointer(int base)
 
 // Finds the implementation of a virtual or interface method for the object on the
 // stack, like asCContext::CallInterfaceMethod. Jumps to slow if there is no object
-// or it doesn't implement the interface, for the VM to raise the exception
-CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Label &slow)
+// or it doesn't implement the interface, for the VM to raise the exception. The class
+// of the object is noted in seen unless it is null, see SJITProfile
+CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Label &slow, asCObjectType **seen)
 {
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
 	const uint32_t ptrShift = Is64Bit() ? 3 : 2;
@@ -565,6 +581,26 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	m_uc.load(type, Stack(0));
 	m_uc.j(slow, test_z(type));
 	m_uc.load(type, mem_ptr(type, layout.objectType));
+	if( seen )
+	{
+		// The first class is noted, and JIT_PROFILE_MANY once another one comes
+		Gp cell = PtrConst(asPWORD(seen));
+		Gp noted = m_uc.new_gp_ptr();
+		Label other = m_uc.new_label();
+		Label first = m_uc.new_label();
+		Label cont  = m_uc.new_label();
+		m_uc.j(other, cmp_ne(type, mem_ptr(cell)));
+		BaseNode *cold = BeginCold(other);
+		m_uc.load(noted, mem_ptr(cell));
+		m_uc.j(first, test_z(noted));
+		m_uc.mov(noted, Imm(int64_t(asPWORD(JIT_PROFILE_MANY))));
+		m_uc.store(mem_ptr(cell), noted);
+		m_uc.j(cont);
+		m_uc.bind(first);
+		m_uc.store(mem_ptr(cell), type);
+		EndCold(cold, cont);
+		m_uc.bind(cont);
+	}
 	Gp table = m_uc.new_gp_ptr();
 	m_uc.load(table, mem_ptr(type, layout.virtualFunctionTable));
 	Gp found = m_uc.new_gp_ptr();
@@ -596,6 +632,39 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	m_uc.add(n, n, Imm(method->vfTableIdx));
 	m_uc.load(found, mem_ptr(table, n, ptrShift));
 	return found;
+}
+
+// Returns where the call notes the classes that it sees, if it is marked with
+// JIT_INSTR_PROFILE and the code has a profile, else null
+asCObjectType **CJITCodeGen::ProfileCell(asUINT idx)
+{
+	if( m_options.profile == 0 || !(m_code->GetInstructions()[idx].flags & JIT_INSTR_PROFILE) )
+		return 0;
+	return &m_options.profile->classes[std::make_pair(m_code->GetFunction(), idx)];
+}
+
+// Counts down the calls for the profile. Returns the count left, which has run out
+// if it isn't positive, see SJITProfile
+CJITCodeGen::Gp CJITCodeGen::EmitCountDown()
+{
+	Gp countdown = PtrConst(asPWORD(&m_options.profile->countdown));
+	Gp count = m_uc.new_gp32();
+	m_uc.load_u32(count, mem_ptr(countdown));
+	m_uc.sub(count, count, Imm(1));
+	m_uc.store_u32(mem_ptr(countdown), count);
+	return count;
+}
+
+// Compiles the function again when the profile has counted down the calls, and leaves
+// the call to the VM if the function has new code then, which the VM goes on in after
+// the call. The call is made here otherwise
+void CJITCodeGen::EmitRecompile(asUINT idx)
+{
+	InvokeNode *call = Invoke(m_options.recompile, FuncSignature::build<int, SJITProfile*>());
+	Gp r = m_uc.new_gp32();
+	call->set_arg(0, Imm(int64_t(asPWORD(m_options.profile))));
+	call->set_ret(0, r);
+	m_uc.j(BailLabel(idx), test_nz(r));
 }
 
 // Pushes the call state like asCContext::PushCallState and calls the native code
@@ -795,7 +864,21 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		else if( instr.flags & JIT_INSTR_INLINE )
 			EmitInlineCall(idx);
 		else
+		{
+			// The calls that note their classes count down the calls for the profile
+			if( ProfileCell(idx) )
+			{
+				Label recompile = m_uc.new_label();
+				Label cont = m_uc.new_label();
+				m_uc.j(recompile, scmp_le(EmitCountDown(), Imm(0)));
+				BaseNode *cold = BeginCold(recompile);
+				EmitRecompile(idx);
+				EndCold(cold, cont);
+				m_uc.bind(cont);
+				m_callsProfiled++;
+			}
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(bc), 0, 0);
+		}
 		break;
 
 	case asBC_CALLBND:
