@@ -75,11 +75,13 @@ void asCByteCode::Finalize(const asCArray<int> &tempVariableOffsets)
 	// Optimize the code
 	Optimize();
 
+	// Build line numbers buffer. This removes the line instructions that
+	// will not be in the final bytecode, so it must be done before the
+	// absolute positions of the catch blocks are determined
+	ExtractLineNumbers();
+
 	// Resolve jumps
 	ResolveJumpAddresses();
-
-	// Build line numbers buffer
-	ExtractLineNumbers();
 }
 
 void asCByteCode::ClearAll()

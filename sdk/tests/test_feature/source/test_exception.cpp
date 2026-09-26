@@ -1050,6 +1050,49 @@ bool Test()
 		engine->Release();
 	}
 
+	// Test catching an exception when the function starts with a declaration of multiple variables.
+	// The line cues of the declaration were removed after the position of the catch block was
+	// determined, so the exception handler resumed in the middle of an instruction
+	{
+		asIScriptEngine *engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+		engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test",
+			"class T { int v; } \n"
+			"int multi() \n"
+			"{ \n"
+			"  int x, y; \n"
+			"  T@ t; \n"
+			"  int r = 0; \n"
+			"  try { r = t.v; } catch { r = 1; } \n"
+			"  return r; \n"
+			"} \n"
+			"int handles() \n"
+			"{ \n"
+			"  T@ a, b; \n"
+			"  int r = 0; \n"
+			"  try { r = a.v + b.v; } catch { r = 2; } \n"
+			"  return r; \n"
+			"} \n");
+		r = mod->Build();
+		if( r < 0 )
+			TEST_FAILED;
+
+		asIScriptContext *ctx = engine->CreateContext();
+		r = ctx->Prepare(mod->GetFunctionByName("multi"));
+		r = ctx->Execute();
+		if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 1 )
+			TEST_FAILED;
+		r = ctx->Prepare(mod->GetFunctionByName("handles"));
+		r = ctx->Execute();
+		if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 2 )
+			TEST_FAILED;
+		ctx->Release();
+
+		engine->ShutDownAndRelease();
+	}
+
 	// Success
 	return fail;
 }
