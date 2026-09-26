@@ -279,7 +279,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 				continue;
 			if( isTarget[n] )
 				last = -1;
-			if( IsBorrowed(n) )
+			if( IsBorrowed(n) || (instr.flags & JIT_INSTR_MOVED) )
 				continue;
 			if( SharesMaterialization(instr.op) )
 			{

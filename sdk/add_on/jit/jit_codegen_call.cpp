@@ -1397,9 +1397,10 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_FREE:
-		if( IsBorrowed(idx) )
+		if( IsBorrowed(idx) || (instr.flags & JIT_INSTR_MOVED) )
 		{
-			// The caller releases the reference
+			// The caller releases the reference, or the copy before has taken it
+			// over, see CJITByteCode::FindMovedRefs
 			m_uc.store_zero_reg(Var(a0));
 			break;
 		}
@@ -1481,6 +1482,9 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			SDirectBehaviour addref, release;
 			bool counted = !(objType->flags & (asOBJ_NOCOUNT | asOBJ_VALUE));
 			bool direct = counted && GetDirectBehaviour(objType->beh.release, release) && GetDirectBehaviour(objType->beh.addref, addref);
+			// The handle may take over the reference of the variable that is released
+			// next, see CJITByteCode::FindMovedRefs
+			bool move = (instr.flags & JIT_INSTR_MOVE) != 0;
 
 			// REFCPY pops the address of the destination, RefCpyV takes a variable
 			Gp d = m_uc.new_gp_ptr();
@@ -1507,11 +1511,23 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 					m_uc.j(noOld, test_z(old));
 					EmitBehaviourCall(release, old);
 					m_uc.bind(noOld);
-					Label noNew = m_uc.new_label();
-					m_uc.j(noNew, test_z(s));
-					EmitBehaviourCall(addref, s);
-					m_uc.bind(noNew);
+					if( !move )
+					{
+						Label noNew = m_uc.new_label();
+						m_uc.j(noNew, test_z(s));
+						EmitBehaviourCall(addref, s);
+						m_uc.bind(noNew);
+					}
 				}
+				m_uc.store(mem_ptr(d), s);
+			}
+			else if( move )
+			{
+				// Releases the old object and clears the variable
+				InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
+				call->set_arg(0, m_regs);
+				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
+				call->set_arg(2, d);
 				m_uc.store(mem_ptr(d), s);
 			}
 			else

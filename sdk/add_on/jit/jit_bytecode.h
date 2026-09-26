@@ -24,7 +24,9 @@ enum EJITInstrFlags
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
 	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
-	JIT_INSTR_BORROW      = 0x80  // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
+	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
+	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
+	JIT_INSTR_MOVED       = 0x200  // asBC_FREE of the variable whose reference has been taken over, which only clears it
 };
 
 // One decoded bytecode instruction
@@ -243,6 +245,7 @@ protected:
 	void AnalyseBorrows();
 	void FindBorrowableParams();
 	void FindBorrowedArgs();
+	void FindMovedRefs();
 	int  FindVarConsumer(asUINT idx) const;
 	int  FindPush(asUINT idx, int top) const;
 	bool HoldsReference(int var) const;

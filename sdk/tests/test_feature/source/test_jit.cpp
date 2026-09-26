@@ -2439,7 +2439,53 @@ namespace RefCounting
 		"  int r = 0;                                                             \n"
 		"  for( int i = 0; i < n; i++ ) { FN@ t = g; r += t(i); }                 \n"
 		"  return r;                                                              \n"
+		"}                                                                        \n"
+		// The handles in the temporary variables are moved, also over the same
+		// object, and the releases of the old objects execute the destructors
+		"R@ idR(R@ r) { return r; }                                               \n"
+		"Node@ idNode(Node@ n) { Mark(100 + n.id); return n; }                    \n"
+		"int moves(int n)                                                         \n"
+		"{                                                                        \n"
+		"  R@ a = MakeR(6);                                                       \n"
+		"  R@ b = idR(a);                                                         \n"
+		"  @a = idR(a);                                                           \n"
+		"  @b = MakeR(7);                                                         \n"
+		"  @b = idR(b);                                                           \n"
+		"  Node@ p = Node(30);                                                    \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    @p = Node(31 + i);                                                   \n"
+		"    @p = idNode(p);                                                      \n"
+		"    if( i % 3 == 0 ) @b = MakeR(40 + i);                                 \n"
+		"  }                                                                      \n"
+		"  @p = null;                                                             \n"
+		"  return a.id + b.id;                                                    \n"
 		"}                                                                        \n";
+
+	// The JIT leaves out the references that the handles moved from temporary
+	// variables would add and release right after, see CJITByteCode::FindMovedRefs,
+	// so the traces are compared without the calls of AddRef that are followed by a
+	// release of the same object
+	static std::string Collapse(const std::string &trace, size_t &refs)
+	{
+		std::stringstream in(trace);
+		std::vector<std::string> kept;
+		std::string t;
+		refs = 0;
+		while( in >> t )
+		{
+			if( t[0] == '+' || t[0] == '-' )
+				refs++;
+			if( t[0] == '-' && !kept.empty() && kept.back() == "+" + t.substr(1) )
+				kept.pop_back();
+			else
+				kept.push_back(t);
+		}
+		std::string out;
+		for( asUINT n = 0; n < kept.size(); n++ )
+			out += kept[n] + " ";
+		return out;
+	}
 
 	// Executes the functions and returns what was observed, one line per function
 	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
@@ -2478,7 +2524,7 @@ namespace RefCounting
 		if( mod->Build() < 0 )
 			TEST_FAILED;
 
-		const char *funcs[] = { "int scriptObjects(int)", "int appTypes(int)", "int funcHandles(int)" };
+		const char *funcs[] = { "int scriptObjects(int)", "int appTypes(int)", "int funcHandles(int)", "int moves(int)" };
 		std::string result;
 		asIScriptContext *ctx = engine->CreateContext();
 		for( asUINT n = 0; n < sizeof(funcs)/sizeof(funcs[0]); n++ )
@@ -2537,13 +2583,22 @@ static bool TestRefCounting()
 		if( g_live != 0 )
 			TEST_FAILED;
 
+		// The handles are moved in every configuration
+		size_t vmRefs, jitRefs;
+		std::string collapsedVM = Collapse(expected, vmRefs), collapsedJIT = Collapse(actual, jitRefs);
+		if( jitRefs >= vmRefs )
+		{
+			PRINTF("%s: %u calls of AddRef and Release, the VM makes %u\n", configs[c].name, unsigned(jitRefs), unsigned(vmRefs));
+			TEST_FAILED;
+		}
+
 		SJITStatistics stats = jit.GetStatistics();
 		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
 		{
 			PRINTF("%s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
 			TEST_FAILED;
 		}
-		if( actual != expected )
+		if( collapsedJIT != collapsedVM )
 		{
 			std::stringstream e(expected), a(actual);
 			std::string el, al;

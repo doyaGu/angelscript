@@ -773,7 +773,7 @@ static bool IsCountedRef(asCTypeInfo *type)
 void CJITByteCode::AnalyseBorrows()
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
-		m_instrs[n].flags &= ~JIT_INSTR_BORROW;
+		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED);
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_borrowedArgs.clear();
@@ -785,6 +785,47 @@ void CJITByteCode::AnalyseBorrows()
 		FindBorrowedArgs();
 	}
 #endif
+	FindMovedRefs();
+}
+
+// The handles copied from variables that are released right after the copy, e.g.
+// the temporary variables holding the results of expressions, are moved instead:
+//
+//   PshVPtr vT; RefCpyV vD; PopPtr; FREE vT
+//
+// The copy doesn't add a reference to the object then, and the release of vT only
+// clears it. The copy still releases the old object of vD first, like the VM. The
+// handle on the stack is the one in vT, as nothing is in between that could enter
+// the code or return to the VM, which would release vT
+void CJITByteCode::FindMovedRefs()
+{
+	for( asUINT n = 1; n + 1 < m_instrs.size(); n++ )
+	{
+		SJITInstr &copy = m_instrs[n];
+		const SJITInstr &push = m_instrs[n - 1];
+		if( copy.op != asBC_RefCpyV || push.op != asBC_PshVPtr || (copy.flags & JIT_INSTR_BORROW) )
+			continue;
+		asUINT f = n + 1;
+		if( m_instrs[f].op == asBC_PopPtr && f + 1 < m_instrs.size() )
+			f++;
+		SJITInstr &release = m_instrs[f];
+
+		// The parameters may borrow the references of the callers
+		int temp = asBC_SWORDARG0(push.bc);
+		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(copy.bc));
+		if( release.op != asBC_FREE || asBC_SWORDARG0(release.bc) != temp || temp == asBC_SWORDARG0(copy.bc) || temp <= 0 ||
+		    reinterpret_cast<asCObjectType*>(asBC_PTRARG(release.bc)) != type || !IsCountedRef(type) )
+			continue;
+
+		bool plain = !(push.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD));
+		for( asUINT k = n; k <= f && plain; k++ )
+			plain = !(m_instrs[k].flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_ENTRY | JIT_INSTR_BAIL | JIT_INSTR_DEAD));
+		if( !plain )
+			continue;
+
+		copy.flags    |= JIT_INSTR_MOVE;
+		release.flags |= JIT_INSTR_MOVED;
+	}
 }
 
 // The handle parameters that the function doesn't store or hand over anywhere, but
@@ -1097,6 +1138,8 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 			continue;
 		if( instr.flags & JIT_INSTR_INLINE )
 			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints(GetBorrowedArgs(n));
+		else if( instr.flags & JIT_INSTR_MOVED )
+			continue;
 		else if( instr.op == asBC_FREE )
 		{
 			// The parameters that may borrow references are left to HasSyncPoints
