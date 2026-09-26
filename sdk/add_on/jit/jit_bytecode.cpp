@@ -708,6 +708,19 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
+// The depth of the stack depends on the callees, and the borrows on the objects
+void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
+{
+	MarkUnreachable(false);
+	m_staticStack = false;
+	m_stackDepth.assign(m_instrs.size(), -1);
+	m_inlinees.clear();
+	m_inlineObjTypes.clear();
+	m_inlinedLength = 0;
+	ClearBorrows();
+	AnalyseBody(true, maxCachedSlots);
+}
+
 // The variables in the operands of an instruction. Returns their number
 static int GetVarOperands(const SJITInstr &instr, int vars[3])
 {
@@ -772,12 +785,7 @@ static bool IsCountedRef(asCTypeInfo *type)
 // room there
 void CJITByteCode::AnalyseBorrows()
 {
-	for( asUINT n = 0; n < m_instrs.size(); n++ )
-		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST);
-	m_borrowableParams = 0;
-	m_releasedParams   = 0;
-	m_borrowedArgs.clear();
-	m_borrowChecks.clear();
+	ClearBorrows();
 #ifdef JIT_NATIVE_RETURN
 	if( m_staticStack )
 	{
@@ -788,6 +796,16 @@ void CJITByteCode::AnalyseBorrows()
 	FindMovedRefs();
 	FindInPlaceRefCounts();
 	FindListFrees();
+}
+
+void CJITByteCode::ClearBorrows()
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST);
+	m_borrowableParams = 0;
+	m_releasedParams   = 0;
+	m_borrowedArgs.clear();
+	m_borrowChecks.clear();
 }
 
 // The handles copied from variables that are released right after the copy, e.g.

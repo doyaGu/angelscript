@@ -122,6 +122,11 @@ public:
 	// them, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
+	// Performs the analysis for the code generated ahead of time, which must depend
+	// only on the key of the function, see JIT_GetAOTKey. Nothing is inlined, and the
+	// instructions aren't marked with what their objects and callees allow
+	void AnalyseForAOT(asUINT maxCachedSlots);
+
 	asCScriptFunction             *GetFunction() const     { return m_func; }
 	const asDWORD                 *GetByteCode() const     { return m_byteCode; }
 	asUINT                         GetLength() const       { return m_length; }
@@ -254,6 +259,7 @@ protected:
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
 	bool CanBeInlined() const;
 	void AnalyseBorrows();
+	void ClearBorrows();
 	void FindBorrowableParams();
 	void FindBorrowedArgs();
 	void FindMovedRefs();
