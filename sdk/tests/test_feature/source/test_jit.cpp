@@ -3580,6 +3580,373 @@ static bool TestMemoryFunctions()
 	return fail;
 }
 
+// Tiered compilation, see CJITCompiler::SetCompileThresholds. The VM executes the
+// functions until they have been called often enough, or one of their loops has run
+// long enough, and they go on in the compiled code then. Everything that the
+// application can observe must be the same as with the VM
+namespace Tiered
+{
+	static int g_lines = 0;
+
+	static void CountLines(asIScriptContext *, void *) { g_lines++; }
+	static void Suspend() { asGetActiveContext()->Suspend(); }
+
+	// Records the named integer variables of the function that are in scope. The line number
+	// isn't, as the VM leaves the program pointer at the next statement after a call
+	// that suspends, but at the JitEntry after the call with the JIT instructions
+	static void DumpVars(asIScriptContext *ctx, std::stringstream &s)
+	{
+		for( int v = 0; v < ctx->GetVarCount(0); v++ )
+		{
+			const char *name;
+			int typeId;
+			ctx->GetVar(v, 0, &name, &typeId);
+			if( name && name[0] && typeId == asTYPEID_INT32 && ctx->IsVarInScope(v, 0) )
+				s << " " << name << "=" << *(int*)ctx->GetAddressOfVar(v, 0);
+		}
+	}
+
+	// The warm up functions are left to the VM
+	static bool NotWarm(asIScriptFunction *func, void *) { return strncmp(func->GetName(), "warm", 4) != 0; }
+
+	static const char *script =
+		"interface I { int get(int); }                                      \n"
+		"class A : I                                                        \n"
+		"{                                                                  \n"
+		"  int v;                                                           \n"
+		"  A(int a) { v = a; }                                              \n"
+		"  int get(int a) { return v + a; }                                 \n"
+		"}                                                                  \n"
+		"funcdef int F(int);                                                \n"
+		"int rare(int a) { return a + 100; }                                \n"
+		"int leaf(int a) { return a * 2 + 1; }                              \n"
+		"int fact(int n) { return n <= 1 ? 1 : n * fact(n - 1); }           \n"
+		"int loop(int n)                                                    \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"  {                                                                \n"
+		"    r += i * 3;                                                    \n"
+		"    if( (i & 7) == 0 ) r ^= i;                                     \n"
+		"  }                                                                \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int shortLoop(int n) { int r = 0; for( int i = 0; i < n; i++ ) r += i; return r; } \n"
+		"int nested(int n)                                                  \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"    for( int j = 0; j < n; j++ )                                   \n"
+		"      r += i * j + leaf(j);                                        \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int late(int n)                                                    \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"    if( i >= 20 ) r += fact(i % 8);                                \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int whileLoop(int n) { int r = 0; while( n > 0 ) { r += n; n--; } return r; } \n"
+		"int doLoop(int n) { int r = 0; do { r += n * n; } while( --n > 0 ); return r; } \n"
+		"int calls(int n)                                                   \n"
+		"{                                                                  \n"
+		"  A a(3); I@ intf = @a; F@ f = rare;                               \n"
+		"  int r = 0;                                                       \n"
+		"  for( int k = 0; k < n; k++ )                                     \n"
+		"    r += a.get(k) + intf.get(k) + f(k);                            \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"string text(int n) { string s; for( int i = 0; i < n; i++ ) s += i; return s; } \n"
+		"int suspended(int n)                                               \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"  {                                                                \n"
+		"    r += i;                                                        \n"
+		"    if( i == 5 || i == 50 ) suspend();                             \n"
+		"  }                                                                \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int raise(int n, int at)                                           \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"    r += 100 / (at - i);                                           \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int lines(int n)                                                   \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ )                                     \n"
+		"  {                                                                \n"
+		"    r += i;                                                        \n"
+		"    r ^= 3;                                                        \n"
+		"  }                                                                \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int host(int n) { return rare(n) * 2; }                            \n"
+		"int warm5() { return 1; }                                          \n"
+		"int warm4() { return warm5() + 1; }                                \n"
+		"int warm3() { return warm4() + 1; }                                \n"
+		"int warm2() { return warm3() + 1; }                                \n"
+		"int warm() { return warm2() + 1; }                                 \n"
+		"int spinLeaf(int a) { return (a ^ 5) + 1; }                        \n"
+		"int spinCall(int a)                                                \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int k = 0; k < 4; k++ ) r += spinLeaf(a + k);               \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n"
+		"int spin(int n)                                                    \n"
+		"{                                                                  \n"
+		"  int r = 0;                                                       \n"
+		"  for( int i = 0; i < n; i++ ) r = (r + spinCall(i)) & 0xFFFFFF;   \n"
+		"  return r;                                                        \n"
+		"}                                                                  \n";
+
+	struct SConfig
+	{
+		const char *name;
+		asUINT      calls;
+		asUINT      iterations;
+		asUINT      inlineSize;
+	};
+	static const SConfig configs[] =
+	{
+		{ "3,10",           3, 10, 64 },
+		{ "3,10 no inline", 3, 10, 0 },
+		{ "1,1",            1, 1,  64 },
+		{ "5,0",            5, 0,  64 },
+	};
+
+	// Executed with the methods of the context, the ones of the JIT compiler, or with a line callback
+	enum EMode { CTX, HOST, LINES };
+
+	// The number of functions that each step compiles in each configuration, or -1
+	// where it depends on the functions that are compiled in place
+	struct SStep
+	{
+		const char *decl;
+		int         args[2];
+		EMode       mode;
+		int         compiled[4];
+	};
+	static const SStep steps[] =
+	{
+		{ "int rare(int)",      { 1 },      CTX,   { 0, 0, 1, 0 } },
+		{ "int rare(int)",      { 2 },      CTX,   { 0, 0, 0, 0 } },
+		{ "int rare(int)",      { 3 },      CTX,   { 1, 1, 0, 0 } },
+		{ "int loop(int)",      { 1000 },   CTX,   { 1, 1, 1, 0 } },
+		{ "int shortLoop(int)", { 5 },      CTX,   { 0, 0, 1, 0 } },
+		{ "int shortLoop(int)", { 9 },      CTX,   { 1, 1, 0, 0 } },
+		{ "int nested(int)",    { 20 },     CTX,   { 2, 2, -1, 1 } },
+		{ "int late(int)",      { 40 },     CTX,   { 2, 2, 2, 1 } },
+		{ "int whileLoop(int)", { 50 },     CTX,   { 1, 1, 1, 0 } },
+		{ "int doLoop(int)",    { 50 },     CTX,   { 1, 1, 1, 0 } },
+		{ "int calls(int)",     { 30 },     CTX,   { -1, -1, -1, -1 } },
+		{ "string text(int)",   { 30 },     CTX,   { 1, 1, 1, 0 } },
+		{ "int suspended(int)", { 100 },    CTX,   { 1, 1, 1, 0 } },
+		{ "int raise(int, int)", { 20, 5 },  CTX,   { 0, 0, 1, 0 } },
+		{ "int raise(int, int)", { 100, 50 }, CTX, { 1, 1, 0, 0 } },
+		{ "int lines(int)",     { 30 },     LINES, { 1, 1, 1, 0 } },
+		{ "int host(int)",      { 1 },      HOST,  { 0, 0, 1, 0 } },
+		{ "int host(int)",      { 2 },      HOST,  { 0, 0, 0, 0 } },
+		{ "int host(int)",      { 3 },      HOST,  { 1, 1, 0, 0 } },
+		{ "int host(int)",      { 4 },      HOST,  { 0, 0, 0, 0 } },
+		{ "int host(int)",      { 5 },      HOST,  { 0, 0, 0, 1 } },
+	};
+
+	static const int THREADS    = 4;
+	static const int SPIN_COUNT = 20000;
+	static std::mutex g_lock;
+
+	static int Spun(int n)
+	{
+		int r = 0;
+		for( int i = 0; i < n; i++ )
+		{
+			int c = 0;
+			for( int k = 0; k < 4; k++ )
+				c += ((i + k) ^ 5) + 1;
+			r = (r + c) & 0xFFFFFF;
+		}
+		return r;
+	}
+
+	// The threads compile the functions at the same time. The memory functions of the
+	// tests aren't thread safe, so the data of the thread and the call stack of the
+	// context are allocated before under the lock, by the warm up functions
+	static void Spin(asIScriptEngine *engine, asIScriptFunction *warm, asIScriptFunction *spin, std::atomic<int> *ready, int *result)
+	{
+		asIScriptContext *ctx;
+		{
+			std::lock_guard<std::mutex> lock(g_lock);
+			ctx = engine->CreateContext();
+			ctx->Prepare(warm);
+			ctx->Execute();
+			ctx->Prepare(spin);
+			ctx->SetArgDWord(0, SPIN_COUNT);
+		}
+		(*ready)++;
+		while( *ready < THREADS )
+			std::this_thread::yield();
+		*result = ctx->Execute() == asEXECUTION_FINISHED ? int(ctx->GetReturnDWord()) : -1;
+
+		std::lock_guard<std::mutex> lock(g_lock);
+		ctx->Release();
+		asThreadCleanup();
+	}
+
+	// Returns what was observed
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, asUINT config, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterStdString(engine);
+		int r = engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		// Nothing is compiled when the module is built, and the thresholds can't change anymore
+		const char *name = configs[config].name;
+		if( jit )
+		{
+			SJITStatistics stats = jit->GetStatistics();
+			if( stats.functionsCompiled != 0 || stats.functionsDeferred == 0 || jit->SetCompileThresholds(1, 1) >= 0 )
+			{
+				PRINTF("%s: %u functions compiled and %u deferred by the build\n", name, stats.functionsCompiled, stats.functionsDeferred);
+				TEST_FAILED;
+			}
+		}
+
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(steps)/sizeof(steps[0]); n++ )
+		{
+			const SStep &step = steps[n];
+			asIScriptFunction *func = mod->GetFunctionByDecl(step.decl);
+			bool host = jit && step.mode == HOST;
+			asUINT compiled = jit ? jit->GetStatistics().functionsCompiled : 0;
+			s << step.decl << " " << step.args[0] << ":";
+
+			g_lines = 0;
+			if( step.mode == LINES )
+				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			r = host ? jit->Prepare(ctx, func) : ctx->Prepare(func);
+			for( asUINT a = 0; r >= 0 && a < func->GetParamCount(); a++ )
+				ctx->SetArgDWord(a, step.args[a]);
+			while( r >= 0 )
+			{
+				r = host ? jit->Execute(ctx) : ctx->Execute();
+				if( r != asEXECUTION_SUSPENDED )
+					break;
+				s << " suspended with";
+				DumpVars(ctx, s);
+			}
+			if( r == asEXECUTION_FINISHED && func->GetReturnTypeId() == asTYPEID_INT32 )
+				s << " returned " << int(ctx->GetReturnDWord());
+			else if( r == asEXECUTION_FINISHED )
+				s << " returned '" << *(std::string*)ctx->GetReturnObject() << "'";
+			else if( r == asEXECUTION_EXCEPTION )
+				s << " " << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" << ctx->GetExceptionLineNumber();
+			else
+				s << " failed with " << r;
+			if( step.mode == LINES )
+			{
+				s << ", " << g_lines << " lines";
+				ctx->ClearLineCallback();
+			}
+			s << "\n";
+
+			if( jit )
+			{
+				compiled = jit->GetStatistics().functionsCompiled - compiled;
+				if( step.compiled[config] >= 0 && compiled != asUINT(step.compiled[config]) )
+				{
+					PRINTF("%s: %s %d compiled %u functions instead of %d\n", name, step.decl, step.args[0], compiled, step.compiled[config]);
+					TEST_FAILED;
+				}
+			}
+		}
+		ctx->Release();
+
+		std::atomic<int> ready(0);
+		int results[THREADS];
+		std::vector<std::thread> threads;
+		for( int n = 0; n < THREADS; n++ )
+			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int warm()"), mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+		for( int n = 0; n < THREADS; n++ )
+			threads[n].join();
+		s << "spin";
+		for( int n = 0; n < THREADS; n++ )
+		{
+			s << " " << results[n];
+			if( results[n] != Spun(SPIN_COUNT) )
+				TEST_FAILED;
+		}
+		s << "\n";
+
+		return s.str();
+	}
+}
+
+static bool TestTiered()
+{
+	using namespace Tiered;
+	bool fail = false;
+
+	// The line callback must be called as by the VM
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, 0, fail);
+	engine->ShutDownAndRelease();
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(envFlags);
+		jit.SetMaxInlineSize(configs[c].inlineSize);
+		jit.SetCompileFilter(NotWarm, 0);
+		if( jit.SetCompileThresholds(configs[c].calls, configs[c].iterations) < 0 )
+			TEST_FAILED;
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, c, fail);
+		engine->ShutDownAndRelease();
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("tiered %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("tiered %s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -3650,6 +4017,7 @@ bool Test()
 	fail = TestListFrees() || fail;
 	fail = TestHostCalls() || fail;
 	fail = TestMemoryFunctions() || fail;
+	fail = TestTiered() || fail;
 
 	return fail;
 }
