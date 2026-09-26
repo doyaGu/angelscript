@@ -714,10 +714,6 @@ asCScriptFunction *CJITCppGen::FindCallee(asCScriptFunction *func, bool virtualC
 	return found;
 }
 
-// The function is called natively if it has been compiled and the call stack has
-// room, like JIT_CallScript does, which is left the rest. The code of the function
-// expected is called directly if the function has it, see AOT_PopCall. The call
-// state gets the frame, which is only stored for JIT_CallScript
 void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 {
 	asUINT pos = m_pos;
@@ -726,9 +722,6 @@ void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 	int id = asBC_INTARG(instr.bc);
 	asCScriptFunction *callee = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
 	callee = FindCallee(callee, virtualCall);
-	std::string target;
-	if( m_target && callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData )
-		target = m_target(callee, m_targetParam);
 
 	Emit("{");
 	Put(m_sync.empty() ? "" : "\t" + m_sync);
@@ -743,43 +736,57 @@ void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 		Emit("\tasCScriptFunction *f_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
 		Emit("\tJITFunction t_ = (JITFunction)f_->scriptData->jitFunction;");
 	}
-	Emit("\tasUINT n_ = ctx->m_callStack.GetLength();");
+	EmitCall(callee, pos + 2, "\t", Format("JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit)", virtualCall ? "JIT_CALL_INTERFACE" : "JIT_CALL_SCRIPT", pos + 1));
+	EmitReload("\t");
+	Emit("}");
+}
+
+// Calls the script function f_, whose code is t_, with the arguments pushed. The
+// function is called natively if it has been compiled and the call stack has room,
+// like JIT_CallScript does, which is left the rest and called by slow. The code of
+// the function expected is called directly if the function has it, see AOT_PopCall.
+// The call state gets the frame, which is only stored for JIT_CallScript. next is
+// the position after the instruction
+void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow)
+{
+	std::string target;
+	if( m_target && callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData )
+		target = m_target(callee, m_targetParam);
+
+	Emit("%sasUINT n_ = ctx->m_callStack.GetLength();", indent);
 	if( !target.empty() )
 	{
 		// The function pops the arguments like asBC_RET does
-		int args = callee->GetSpaceNeededForArguments() + (callee->objectType ? AS_PTR_SIZE : 0) + (callee->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
 		m_out += JIT_CPPGEN_REGION;
 		m_out += target;
 		m_out += '\n';
-		Emit("\tif( t_ == %s && n_ < callLimit )", target.c_str());
-		Emit("\t{");
-		Emit("\t\tAOT_PushCall(ctx, n_, self, fp, bc + %u, sp);", pos + 2);
-		Emit("\t\tif( %s_d(ctx, f_, sp, callLimit) )", target.c_str());
-		Emit("\t\t\treturn 1;");
-		Emit("\t\tsp += %d;", args);
-		Emit("\t\tvr = regs->valueRegister;");
-		Emit("\t}");
-		Emit("\telse");
+		Emit("%sif( t_ == %s && n_ < callLimit )", indent, target.c_str());
+		Emit("%s{", indent);
+		Emit("%s\tAOT_PushCall(ctx, n_, self, fp, bc + %u, sp);", indent, next);
+		Emit("%s\tif( %s_d(ctx, f_, sp, callLimit) )", indent, target.c_str());
+		Emit("%s\t\treturn 1;", indent);
+		Emit("%s\tsp += %d;", indent, CJITByteCode::GetPopSize(callee));
+		Emit("%s\tvr = regs->valueRegister;", indent);
+		Emit("%s}", indent);
+		Emit("%selse", indent);
 		m_out += JIT_CPPGEN_REGION_END;
 		m_out += '\n';
 	}
-	Emit("\tif( t_ && n_ < callLimit )");
-	Emit("\t{");
-	Emit("\t\tif( AOT_CallNative(regs, ctx, n_, self, f_, t_, fp, bc + %u, sp, callLimit) )", pos + 2);
-	Emit("\t\t\treturn 1;");
-	Emit("\t\tAOT_RELOAD();");
-	Emit("\t}");
-	Emit("\telse");
-	Emit("\t{");
+	Emit("%sif( t_ && n_ < callLimit )", indent);
+	Emit("%s{", indent);
+	Emit("%s\tif( AOT_CallNative(regs, ctx, n_, self, f_, t_, fp, bc + %u, sp, callLimit) )", indent, next);
+	Emit("%s\t\treturn 1;", indent);
+	Emit("%s\tAOT_RELOAD();", indent);
+	Emit("%s}", indent);
+	Emit("%selse", indent);
+	Emit("%s{", indent);
 	if( m_frame )
-		Emit("\t\tAOT_FRAME();");
-	Emit("\t\tAOT_SYNC(%u);", pos);
-	Emit("\t\tif( JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit) )", virtualCall ? "JIT_CALL_INTERFACE" : "JIT_CALL_SCRIPT", pos + 1);
-	Emit("\t\t\treturn 1;");
-	Emit("\t\tAOT_RELOAD();");
-	Emit("\t}");
-	EmitReload("\t");
-	Emit("}");
+		Emit("%s\tAOT_FRAME();", indent);
+	Emit("%s\tAOT_SYNC(%u);", indent, m_pos);
+	Emit("%s\tif( %s )", indent, slow.c_str());
+	Emit("%s\t\treturn 1;", indent);
+	Emit("%s\tAOT_RELOAD();", indent);
+	Emit("%s}", indent);
 }
 
 void CJITCppGen::EmitReload(const char *indent)
@@ -1174,15 +1181,38 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_ALLOC:
-		// Script classes are constructed by a script function
-		Emit("{");
-		Emit("\tasCObjectType *o_ = (asCObjectType*)AOT_PW(%u);", pos + 1);
-		EmitSync("\t");
-		Emit("\tif( (o_->flags & asOBJ_SCRIPT_OBJECT) ? JIT_CallScript(regs, JIT_CALL_ALLOC, AOT_INT(%u), (asPWORD)o_, callLimit) : JIT_Alloc(regs, o_, AOT_INT(%u)) )", pos + 1 + P, pos + 1 + P);
-		Emit("\t\treturn 1;");
-		Emit("\tAOT_RELOAD();");
-		EmitReload("\t");
-		Emit("}");
+		{
+			// The objects of script classes are allocated like the VM does, with
+			// everything stored, as the allocation may reuse the context for nested
+			// calls, and stored in the variable whose address is pushed before the
+			// arguments. Then they are pushed for the constructor, a script function
+			// called like by asBC_CALL
+			asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
+			int id = asBC_INTARG(instr.bc + P);
+			asCScriptFunction *callee = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+			Emit("{");
+			Emit("\tasCObjectType *o_ = (asCObjectType*)AOT_PW(%u);", pos + 1);
+			EmitSync("\t");
+			Emit("\tif( o_->flags & asOBJ_SCRIPT_OBJECT )");
+			Emit("\t{");
+			Emit("\t\tasCScriptFunction *f_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1 + P);
+			Emit("\t\tvoid *m_ = JIT_NewScriptObject(o_);");
+			Emit("\t\tvoid **a_ = (void**)AOT_S(pw, f_->GetSpaceNeededForArguments());");
+			Emit("\t\tif( a_ )");
+			Emit("\t\t\t*a_ = m_;");
+			Emit("\t\tsp -= %d; AOT_S(pw, 0) = (asPWORD)m_;", P);
+			Emit("\t\tJITFunction t_ = (JITFunction)f_->scriptData->jitFunction;");
+			EmitCall(callee, pos + 2 + P, "\t\t", Format("JIT_CallScript(regs, JIT_CALL_CONSTRUCT, AOT_INT(%u), 0, callLimit)", pos + 1 + P));
+			Emit("\t}");
+			Emit("\telse");
+			Emit("\t{");
+			Emit("\t\tif( JIT_Alloc(regs, o_, AOT_INT(%u)) )", pos + 1 + P);
+			Emit("\t\t\treturn 1;");
+			Emit("\t\tAOT_RELOAD();");
+			Emit("\t}");
+			EmitReload("\t");
+			Emit("}");
+		}
 		break;
 
 	case asBC_FREE:

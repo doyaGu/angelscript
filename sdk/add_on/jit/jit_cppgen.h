@@ -104,6 +104,7 @@ protected:
 	void EmitSync(const char *indent = "");
 	void EmitReload(const char *indent = "");
 	void EmitScriptCall(const SJITInstr &instr);
+	void EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow);
 	void EmitSystemCall(asUINT idx, const SJITSystemCall &call);
 	bool GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const;
 

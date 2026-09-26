@@ -1281,12 +1281,13 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 // script classes. The inlined functions with sync points leave their own frame in
 // the VM registers, see CJITCodeGen::EmitDematerialize. The code generated ahead of
 // time restores the frame after the calls, but those of the functions it calls
-// directly, see CJITCppGen::EmitScriptCall
+// directly, see CJITCppGen::EmitCall, which include the constructors of any type
+// allocated, as the type isn't part of the key
 bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 {
 	const SJITInstr &instr = m_instrs[instrIdx];
 	if( m_aot )
-		return instr.op == asBC_CALL || instr.op == asBC_CALLINTF;
+		return instr.op == asBC_CALL || instr.op == asBC_CALLINTF || instr.op == asBC_ALLOC;
 	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints(GetBorrowedArgs(instrIdx)) )
 		return true;
 #ifdef JIT_NATIVE_RETURN
