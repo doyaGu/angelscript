@@ -1187,6 +1187,10 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 			// calls, and stored in the variable whose address is pushed before the
 			// arguments. Then they are pushed for the constructor, a script function
 			// called like by asBC_CALL
+			//
+			// TODO: runtime optimize: The objects of registered types could be allocated
+			//                         and constructed directly too, with the call of the
+			//                         constructor in the key like for asBC_CALLSYS.
 			asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
 			int id = asBC_INTARG(instr.bc + P);
 			asCScriptFunction *callee = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;

@@ -19,6 +19,10 @@ const asQWORD JIT_AOT_FORMAT_VERSION = 6;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
+//
+// TODO: runtime optimize: Read and write the booleans at their offsets on big endian
+//                         hosts, so that the variables can be kept in local variables
+//                         there too.
 #ifdef AS_BIG_ENDIAN
 const asUINT JIT_AOT_MAX_LOCALS = 0;
 #else

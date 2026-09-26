@@ -713,6 +713,11 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 // The depth of the stack depends on the callees, and the borrows on the objects.
 // The moved references, those counted in place, and the list frees only depend on
 // the kinds of the types, which are part of the key, see GetRefKind
+//
+// TODO: runtime optimize: Inline the calls, and borrow the references of the handle
+//                         arguments, with the bytecode of the callees and the kinds of
+//                         the objects in the key. Most of the difference to the JIT
+//                         compiled code is in these calls.
 void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
 {
 	MarkUnreachable(false);

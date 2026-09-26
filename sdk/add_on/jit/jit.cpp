@@ -27,15 +27,24 @@
 //  - Lazy or tiered compilation through asIJITCompilerV2 (CompileFunction below). The
 //    engine currently compiles every function when the module is built. A class cannot
 //    implement both interface versions, so this would be a second compiler class.
-//  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall), and
-//    unwind information on the platforms besides 64bit Windows and Linux (jit_unwind.h).
+//  - Inline calls in the code generated ahead of time, and borrow the references of the
+//    handle arguments there, which is where the JIT compiled code is still much faster.
+//    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
+//    AnalyseForAOT).
+//  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall,
+//    and jit_cppgen.cpp, GetSystemCall), and unwind information on the platforms besides
+//    64bit Windows and Linux (jit_unwind.h).
+//  - Construct the objects of the registered types directly in the code generated ahead
+//    of time, which calls JIT_Alloc for them (jit_cppgen.cpp, asBC_ALLOC).
 //  - Count the references of the script objects in place on AArch64 too, which needs the
 //    LSE atomics or loops of exclusive loads and stores (jit_codegen_arch.cpp).
 //  - Borrow the references of the handle arguments on 32bit hosts, whose call states have
 //    no room to note the borrowed parameters, and for the calls that aren't inlined, which
 //    would need entry points of the callees that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
-//  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots).
+//  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots),
+//    and local variables for the variables in the code generated ahead of time on big endian
+//    hosts (jit_aot.cpp, JIT_AOT_MAX_LOCALS).
 //  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer
 //    operations instead of calling JIT_I64Op.
