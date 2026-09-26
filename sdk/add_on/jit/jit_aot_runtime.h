@@ -20,6 +20,9 @@
 #include <math.h>
 #include <string.h>
 #include <stddef.h>
+#if defined(_MSC_VER) && !defined(AS_NO_THREADS) && !defined(AS_NO_ATOMIC)
+#include <intrin.h>
+#endif
 
 BEGIN_AS_NAMESPACE
 
@@ -203,6 +206,76 @@ inline asCScriptFunction *AOT_Virtual(asCScriptObject *obj, asCScriptFunction *f
 		return type->virtualFunctionTable[func->vfTableIdx];
 	return JIT_FindInterfaceMethod(type, func);
 }
+
+// The references of the script objects, which the code counts in place like the
+// JIT does, see CJITByteCode::FindInPlaceRefCounts. Like asCScriptObject::AddRef
+// and Release the flag of the GC is cleared. They return false for what is left to
+// those, see JIT_AddRefScriptObject and JIT_ReleaseScriptObject: the objects that
+// are being destroyed, which AddRef reports, and the last reference, for which
+// Release destroys the object. With atomic reference counts another thread may
+// release a reference between the check and the decrement, which is given back
+// then. The atomic operations are those of asAtomicInc and asAtomicDec
+struct SAOTScriptObject : asCScriptObject
+{
+	static bool AddRefInPlace(void *obj)
+	{
+		SAOTScriptObject *o = static_cast<SAOTScriptObject*>(obj);
+		if( o->hasRefCountReachedZero )
+			return false;
+		o->gcFlag = false;
+		Inc(o);
+		return true;
+	}
+
+	static bool ReleaseInPlace(void *obj)
+	{
+		SAOTScriptObject *o = static_cast<SAOTScriptObject*>(obj);
+		o->gcFlag = false;
+		if( *Count(o) <= 1 )
+			return false;
+		if( Dec(o) == 0 )
+		{
+			Inc(o);
+			return false;
+		}
+		return true;
+	}
+
+	static volatile asDWORD *Count(SAOTScriptObject *o)
+	{
+		return reinterpret_cast<volatile asDWORD*>(&o->refCount);
+	}
+
+	static asDWORD Inc(SAOTScriptObject *o)
+	{
+#if defined(AS_NO_THREADS) || defined(AS_NO_ATOMIC)
+		return ++*Count(o);
+#elif defined(_MSC_VER)
+		return asDWORD(_InterlockedIncrement(reinterpret_cast<volatile long*>(Count(o))));
+#elif defined(__GNUC__) || defined(__clang__)
+		return __atomic_add_fetch(Count(o), 1, __ATOMIC_SEQ_CST);
+#else
+		return o->refCount.atomicInc();
+#endif
+	}
+
+	static asDWORD Dec(SAOTScriptObject *o)
+	{
+#if defined(AS_NO_THREADS) || defined(AS_NO_ATOMIC)
+		return --*Count(o);
+#elif defined(_MSC_VER)
+		return asDWORD(_InterlockedDecrement(reinterpret_cast<volatile long*>(Count(o))));
+#elif defined(__GNUC__) || defined(__clang__)
+		return __atomic_sub_fetch(Count(o), 1, __ATOMIC_SEQ_CST);
+#else
+		return o->refCount.atomicDec();
+#endif
+	}
+};
+static_assert(sizeof(asCAtomic) == sizeof(asDWORD), "the reference counts are changed as 32bit integers");
+
+inline bool AOT_AddRef(void *obj)  { return SAOTScriptObject::AddRefInPlace(obj); }
+inline bool AOT_Release(void *obj) { return SAOTScriptObject::ReleaseInPlace(obj); }
 
 // The call limit when the VM enters a function, like the JIT computes it
 inline asUINT AOT_CallLimit(asCContext *ctx)

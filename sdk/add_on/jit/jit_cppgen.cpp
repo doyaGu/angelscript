@@ -1216,12 +1216,40 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_FREE:
-		// The release may execute a script destructor, which leaves the variables
-		// kept in local variables alone
+		if( instr.flags & JIT_INSTR_MOVED )
+		{
+			// The copy before has taken over the reference, see CJITByteCode::FindMovedRefs
+			Put(SetVar("pw", SW0, "0"));
+			break;
+		}
 		Emit("if( %s )", Var("pw", SW0).c_str());
 		Emit("{");
-		EmitSync("\t");
-		Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
+		if( instr.flags & JIT_INSTR_FREE_LIST )
+		{
+			// Nothing in the list is destroyed, see CJITByteCode::FindListFrees
+			Emit("\tJIT_FreeMem((void*)%s);", Var("pw", SW0).c_str());
+			Emit("\t%s", SetVar("pw", SW0, "0").c_str());
+		}
+		else if( instr.flags & JIT_INSTR_REFCOUNT )
+		{
+			// The references of the script objects are counted in place, see
+			// CJITByteCode::FindInPlaceRefCounts. Like the VM the variable is cleared
+			// after the release
+			Emit("\tvoid *o_ = (void*)%s;", Var("pw", SW0).c_str());
+			Emit("\tif( !AOT_Release(o_) )");
+			Emit("\t{");
+			EmitSync("\t\t");
+			Emit("\t\tJIT_ReleaseScriptObject(o_);");
+			Emit("\t}");
+			Emit("\t%s", SetVar("pw", SW0, "0").c_str());
+		}
+		else
+		{
+			// The release may execute a script destructor, which leaves the variables
+			// kept in local variables alone
+			EmitSync("\t");
+			Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
+		}
 		Emit("}");
 		break;
 
@@ -1232,19 +1260,55 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_GETREF:   Emit("{ aot_pw *a_ = (aot_pw*)(sp + %u); *a_ = (asPWORD)(fp - (int)*a_); }", W0); break;
 
 	case asBC_REFCPY:
-		Emit("{");
-		Emit("\tvoid **d_ = (void**)AOT_S(pw, 0);");
-		Emit("\tsp += %d;", P);
-		EmitSync("\t");
-		Emit("\tJIT_RefCpy(regs, (asCObjectType*)AOT_PW(%u), d_, (void*)AOT_S(pw, 0));", pos + 1);
-		EmitReload("\t");
-		Emit("}");
-		break;
-
 	case asBC_RefCpyV:
-		EmitSync();
-		Emit("JIT_RefCpy(regs, (asCObjectType*)AOT_PW(%u), (void**)%s, (void*)AOT_S(pw, 0));", pos + 1, VarAddr(SW0).c_str());
-		EmitReload();
+		// REFCPY pops the address of the destination, RefCpyV takes a variable
+		Emit("{");
+		if( instr.op == asBC_REFCPY )
+		{
+			Emit("\tvoid **d_ = (void**)AOT_S(pw, 0);");
+			Emit("\tsp += %d;", P);
+		}
+		else
+			Emit("\tvoid **d_ = (void**)%s;", VarAddr(SW0).c_str());
+		Emit("\tvoid *s_ = (void*)AOT_S(pw, 0);");
+		if( instr.flags & JIT_INSTR_REFCOUNT )
+		{
+			// The references of the script objects are counted in place, see
+			// CJITByteCode::FindInPlaceRefCounts. Like the VM the old object is
+			// released before the new one gets its reference, which the handle may
+			// take over from the variable released next, and the destination is set last
+			Emit("\tvoid *o_ = *d_;");
+			Emit("\tif( o_ && !AOT_Release(o_) )");
+			Emit("\t{");
+			EmitSync("\t\t");
+			Emit("\t\tJIT_ReleaseScriptObject(o_);");
+			Emit("\t}");
+			if( !(instr.flags & JIT_INSTR_MOVE) )
+			{
+				Emit("\tif( s_ && !AOT_AddRef(s_) )");
+				Emit("\t{");
+				EmitSync("\t\t");
+				Emit("\t\tJIT_AddRefScriptObject(s_);");
+				Emit("\t}");
+			}
+			Emit("\t*d_ = s_;");
+		}
+		else if( instr.flags & JIT_INSTR_MOVE )
+		{
+			// The handle takes over the reference of the variable released next, see
+			// CJITByteCode::FindMovedRefs, and the old object is released like the VM does
+			EmitSync("\t");
+			Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)d_);", pos + 1);
+			Emit("\t*d_ = s_;");
+			EmitReload("\t");
+		}
+		else
+		{
+			EmitSync("\t");
+			Emit("\tJIT_RefCpy(regs, (asCObjectType*)AOT_PW(%u), d_, s_);", pos + 1);
+			EmitReload("\t");
+		}
+		Emit("}");
 		break;
 
 	case asBC_CHKREF:   Emit("if( AOT_S(pw, 0) == 0 ) %s", Bail().c_str()); break;

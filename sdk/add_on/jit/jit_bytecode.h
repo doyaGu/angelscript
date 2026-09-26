@@ -11,8 +11,10 @@
 
 BEGIN_AS_NAMESPACE
 
+class asCScriptEngine;
 class asCScriptFunction;
 class asCObjectType;
+class asCTypeInfo;
 
 // Flags for SJITInstr
 enum EJITInstrFlags
@@ -29,6 +31,15 @@ enum EJITInstrFlags
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
 	JIT_INSTR_FREE_LIST   = 0x800  // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
+};
+
+// How the handles of a type are copied and released, see CJITByteCode::GetRefKind
+enum EJITRefKind
+{
+	JIT_REF_OTHER,         // anything else
+	JIT_REF_COUNTED,       // counted references, which the copies may take over, see FindMovedRefs
+	JIT_REF_SCRIPT_OBJECT, // counted references of script objects, which may be counted in place, see FindInPlaceRefCounts
+	JIT_REF_PLAIN_LIST     // initialization lists with nothing to destroy, see FindListFrees
 };
 
 // One decoded bytecode instruction
@@ -187,6 +198,11 @@ public:
 	// returns: the arguments, the object pointer, and the pointer to the location of
 	// a value returned on the stack. Registered functions pop the same
 	static int GetPopSize(asCScriptFunction *func);
+
+	// Returns how the handles of the type in the operand of asBC_FREE, asBC_REFCPY,
+	// or asBC_RefCpyV are copied and released. The code generated ahead of time
+	// depends on it, as the types aren't part of the key
+	static EJITRefKind GetRefKind(asCScriptEngine *engine, asCTypeInfo *type);
 
 	// Returns true if the value register may be read before being written after
 	// the instruction, or when the instruction is reached, respectively

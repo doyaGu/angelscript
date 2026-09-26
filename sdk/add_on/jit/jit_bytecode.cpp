@@ -710,7 +710,9 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
-// The depth of the stack depends on the callees, and the borrows on the objects
+// The depth of the stack depends on the callees, and the borrows on the objects.
+// The moved references, those counted in place, and the list frees only depend on
+// the kinds of the types, which are part of the key, see GetRefKind
 void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
 {
 	MarkUnreachable(false);
@@ -721,6 +723,9 @@ void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
 	m_inlineObjTypes.clear();
 	m_inlinedLength = 0;
 	ClearBorrows();
+	FindMovedRefs();
+	FindInPlaceRefCounts();
+	FindListFrees();
 	AnalyseBody(true, maxCachedSlots);
 }
 
@@ -776,6 +781,48 @@ static bool IsCountedRef(asCTypeInfo *type)
 	return ot && (ot->flags & asOBJ_REF) && !(ot->flags & asOBJ_NOCOUNT) && ot->beh.addref && ot->beh.release;
 }
 
+// The initialization lists whose elements are primitives, enums, or value types
+// without a destructor have nothing to destroy
+static bool IsPlainList(asCScriptEngine *engine, asCObjectType *listType)
+{
+	if( !listType || !(listType->flags & asOBJ_LIST_PATTERN) || listType->beh.destruct || listType->templateSubTypes.GetLength() == 0 )
+		return false;
+	asCObjectType *type = CastToObjectType(listType->templateSubTypes[0].GetTypeInfo());
+	int factory = type ? type->beh.listFactory : 0;
+	if( factory <= 0 || asUINT(factory) >= engine->scriptFunctions.GetLength() || !engine->scriptFunctions[factory] )
+		return false;
+
+	for( asSListPatternNode *node = engine->scriptFunctions[factory]->listPattern; node; node = node->next )
+	{
+		if( node->type != asLPT_TYPE )
+			continue;
+		const asCDataType &dt = static_cast<asSListPatternDataTypeNode*>(node)->dataType;
+		asCTypeInfo *ti = dt.GetTypeInfo();
+		if( dt.GetTokenType() == ttQuestion )
+			return false;
+		if( ti && !(ti->flags & asOBJ_ENUM) )
+		{
+			asCObjectType *ot = CastToObjectType(ti);
+			if( !ot || !(ot->flags & asOBJ_VALUE) || ot->beh.destruct )
+				return false;
+		}
+	}
+	return true;
+}
+
+EJITRefKind CJITByteCode::GetRefKind(asCScriptEngine *engine, asCTypeInfo *ti)
+{
+	asCObjectType *type = CastToObjectType(ti);
+	if( IsPlainList(engine, type) )
+		return JIT_REF_PLAIN_LIST;
+	if( !IsCountedRef(type) )
+		return JIT_REF_OTHER;
+	const asSTypeBehaviour &beh = engine->scriptTypeBehaviours.beh;
+	if( (type->flags & asOBJ_SCRIPT_OBJECT) && type->beh.addref == beh.addref && type->beh.release == beh.release )
+		return JIT_REF_SCRIPT_OBJECT;
+	return JIT_REF_COUNTED;
+}
+
 // The calls copy the handles that they pass, which adds a reference that the called
 // function releases when it returns. An inlined function that only reads a handle
 // parameter can borrow the reference of the variable that the caller copies it
@@ -819,9 +866,13 @@ void CJITByteCode::ClearBorrows()
 // The copy doesn't add a reference to the object then, and the release of vT only
 // clears it. The copy still releases the old object of vD first, like the VM. The
 // handle on the stack is the one in vT, as nothing is in between that could enter
-// the code or return to the VM, which would release vT
+// the code or return to the VM, which would release vT. The code generated ahead
+// of time only knows the kinds of the types, see GetRefKind, and moves the
+// references between the types of the same kind, e.g. from a script class to its
+// base class
 void CJITByteCode::FindMovedRefs()
 {
+	asCScriptEngine *engine = m_func->engine;
 	for( asUINT n = 1; n + 1 < m_instrs.size(); n++ )
 	{
 		SJITInstr &copy = m_instrs[n];
@@ -836,8 +887,10 @@ void CJITByteCode::FindMovedRefs()
 		// The parameters may borrow the references of the callers
 		int temp = asBC_SWORDARG0(push.bc);
 		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(copy.bc));
-		if( release.op != asBC_FREE || asBC_SWORDARG0(release.bc) != temp || temp == asBC_SWORDARG0(copy.bc) || temp <= 0 ||
-		    reinterpret_cast<asCObjectType*>(asBC_PTRARG(release.bc)) != type || !IsCountedRef(type) )
+		if( release.op != asBC_FREE || asBC_SWORDARG0(release.bc) != temp || temp == asBC_SWORDARG0(copy.bc) || temp <= 0 || !IsCountedRef(type) )
+			continue;
+		asCObjectType *freed = reinterpret_cast<asCObjectType*>(asBC_PTRARG(release.bc));
+		if( m_aot ? GetRefKind(engine, freed) != GetRefKind(engine, type) : freed != type )
 			continue;
 
 		bool plain = !(push.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD));
@@ -856,61 +909,38 @@ void CJITByteCode::FindMovedRefs()
 // cleared, and the counter is incremented or decremented. AddRef is only called
 // for the objects that are being destroyed, to report the error, and Release for
 // the last reference, which destroys the object. The copies of the handles aren't
-// sync points then, as the cached variables are only stored on the rare paths
+// sync points then, as the cached variables are only stored on the rare paths. The
+// code generated ahead of time counts them in place on every host, see AOT_AddRef
 void CJITByteCode::FindInPlaceRefCounts()
 {
-#ifdef JIT_INPLACE_REFCOUNT
-	const asSTypeBehaviour &beh = m_func->engine->scriptTypeBehaviours.beh;
+#ifndef JIT_INPLACE_REFCOUNT
+	if( !m_aot )
+		return;
+#endif
+	asCScriptEngine *engine = m_func->engine;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
 		if( (instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV) ||
 		    (instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_BORROW | JIT_INSTR_MOVED)) )
 			continue;
-		asCObjectType *type = CastToObjectType(reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc)));
-		if( type && (type->flags & asOBJ_SCRIPT_OBJECT) && IsCountedRef(type) &&
-		    type->beh.addref == beh.addref && type->beh.release == beh.release )
+		if( GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_SCRIPT_OBJECT )
 			instr.flags |= JIT_INSTR_REFCOUNT;
 	}
-#endif
 }
 
-// The initialization lists whose elements are primitives, enums, or value types
-// without a destructor have nothing to destroy. Their memory is freed right away
-// then, instead of asCScriptEngine::DestroyList going through the list pattern for
-// each element, and as nothing is executed the VM registers aren't synced for it
+// The initialization lists that have nothing to destroy, see IsPlainList. Their
+// memory is freed right away, instead of asCScriptEngine::DestroyList going through
+// the list pattern for each element, and as nothing is executed the VM registers
+// aren't synced for it
 void CJITByteCode::FindListFrees()
 {
 	asCScriptEngine *engine = m_func->engine;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
-		if( instr.op != asBC_FREE || (instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) )
-			continue;
-		asCObjectType *listType = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
-		if( !listType || !(listType->flags & asOBJ_LIST_PATTERN) || listType->beh.destruct || listType->templateSubTypes.GetLength() == 0 )
-			continue;
-		asCObjectType *type = CastToObjectType(listType->templateSubTypes[0].GetTypeInfo());
-		int factory = type ? type->beh.listFactory : 0;
-		if( factory <= 0 || asUINT(factory) >= engine->scriptFunctions.GetLength() || !engine->scriptFunctions[factory] )
-			continue;
-
-		bool plain = true;
-		for( asSListPatternNode *node = engine->scriptFunctions[factory]->listPattern; node && plain; node = node->next )
-		{
-			if( node->type != asLPT_TYPE )
-				continue;
-			const asCDataType &dt = static_cast<asSListPatternDataTypeNode*>(node)->dataType;
-			asCTypeInfo *ti = dt.GetTypeInfo();
-			if( dt.GetTokenType() == ttQuestion )
-				plain = false;
-			else if( ti && !(ti->flags & asOBJ_ENUM) )
-			{
-				asCObjectType *ot = CastToObjectType(ti);
-				plain = ot && (ot->flags & asOBJ_VALUE) && !ot->beh.destruct;
-			}
-		}
-		if( plain )
+		if( instr.op == asBC_FREE && !(instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) &&
+		    GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_PLAIN_LIST )
 			instr.flags |= JIT_INSTR_FREE_LIST;
 	}
 }
