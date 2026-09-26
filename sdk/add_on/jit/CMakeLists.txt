@@ -48,6 +48,8 @@ add_library(angelscript_jit STATIC
     jit_codegen_math.cpp
     jit_codegen_call.cpp
     jit_codegen_arch.cpp
+    jit_cppgen.h
+    jit_cppgen.cpp
     jit_memory.cpp
     jit_runtime.h
     jit_runtime.cpp
