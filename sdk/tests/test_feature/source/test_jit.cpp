@@ -3973,6 +3973,359 @@ static bool TestTiered()
 	return fail;
 }
 
+// Profiles, see CJITCompiler::SetProfileThreshold. The functions are compiled again
+// with the methods of the classes that their virtual and interface calls have seen,
+// which the objects of other classes must still call. Everything that the application
+// can observe must be the same as with the VM
+namespace Profiles
+{
+	static int g_lines = 0;
+
+	static void CountLines(asIScriptContext *, void *) { g_lines++; }
+	static void Suspend() { asGetActiveContext()->Suspend(); }
+
+	// Implements the interface shared with the module of the test
+	static const char *otherScript =
+		"shared interface Shape { int area(int k); }                                       \n"
+		"class Hex : Shape { int area(int k) { return k * 6; } }                           \n"
+		"Shape@ makeHex() { return Hex(); }                                                \n";
+
+	static const char *script =
+		"shared interface Shape { int area(int k); }                                       \n"
+		"import Shape@ makeHex() from \"other\";                                           \n"
+		"class Sq : Shape { int s; Sq(int a) { s = a; } int area(int k) { return s * s + k; } } \n"
+		"class Rect : Shape { int w, h; Rect(int a, int b) { w = a; h = b; } int area(int k) { return w * h - k; } } \n"
+		"class Tri : Shape { int b, h; Tri(int a, int c) { b = a; h = c; } int area(int k) { return b * h / 2 + k * 2; } } \n"
+		"class Base { int v; Base(int a) { v = a; } int get(int k) { return v + k; } }     \n"
+		"class Mid : Base { Mid(int a) { super(a); } int get(int k) override { return v * 2 + k; } } \n"
+		"class Leaf : Mid { Leaf(int a) { super(a); } int get(int k) override { return v * 3 - k; } } \n"
+		"Shape@ gs = Sq(2);                                                                \n"
+		// The call sees one class
+		"int mono(int n) {                                                                 \n"
+		"  Shape@ s = Sq(3);                                                               \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) r += s.area(i);                                    \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The call sees several classes, which gains nothing from compiling it again
+		"int poly(int n) {                                                                 \n"
+		"  Shape@ a = Sq(2), b = Rect(2, 3), c = Tri(4, 5);                                \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    Shape@ s = a;                                                                 \n"
+		"    if( i % 3 == 1 ) @s = b;                                                      \n"
+		"    else if( i % 3 == 2 ) @s = c;                                                 \n"
+		"    r += s.area(i);                                                               \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// Another class comes after the method has been inlined for the first
+		"int turn(int n) {                                                                 \n"
+		"  Shape@ s = Sq(3);                                                               \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    if( i == n / 2 ) @s = Rect(2, 5);                                             \n"
+		"    r += s.area(i);                                                               \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The second call is only made after the function has been compiled again for
+		// the first, and it is compiled a third time for the second
+		"int late(int n) {                                                                 \n"
+		"  Shape@ a = Sq(4), b = Tri(2, 6);                                                \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    r += a.area(i);                                                               \n"
+		"    if( i >= n / 2 ) r += b.area(i);                                              \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The method that the derived classes override
+		"int virt(int n) {                                                                 \n"
+		"  Base@ b = Mid(4);                                                               \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) r += b.get(i);                                     \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The class of the other module isn't compared with
+		"int foreign(int n) {                                                              \n"
+		"  Shape@ s = makeHex();                                                           \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) r += s.area(i);                                    \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The inlined method isn't called for the null handle
+		"int nullCall(int n) {                                                             \n"
+		"  Shape@ s = Sq(1);                                                               \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    if( i == n - 2 ) @s = null;                                                   \n"
+		"    r += s.area(i);                                                               \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The call is in a function compiled in place
+		"int areaOf(Shape@ s, int k) { return s.area(k); }                                 \n"
+		"int nested(int n) {                                                               \n"
+		"  Shape@ s = Rect(3, 4);                                                          \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) r += areaOf(s, i);                                 \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		"int suspended(int n) {                                                            \n"
+		"  Shape@ s = Tri(3, 4);                                                           \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    r += s.area(i);                                                               \n"
+		"    if( i % 25 == 0 ) suspend();                                                  \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// The threads compile the function again at the same time
+		"int warm() { return gs.area(1); }                                                 \n"
+		"int spin(int n) {                                                                 \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) r = (r + gs.area(i)) & 0xFFFFFF;                   \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n";
+
+	struct SConfig
+	{
+		const char *name;
+		asUINT      calls;
+		asUINT      iterations;
+		asUINT      inlineSize;
+		asUINT      profile;
+	};
+	static const SConfig configs[] =
+	{
+		{ "5",           0, 0,  64, 5 },
+		{ "3,10 and 5",  3, 10, 64, 5 },
+		{ "5 no inline", 0, 0,  0,  5 },
+		{ "1",           0, 0,  64, 1 },
+	};
+
+	enum EMode { CTX, LINES };
+
+	// The number of functions that each step compiles again in each configuration,
+	// or -1 where it depends on when the functions compiled in place are compiled.
+	// After one call the calls of poly have only seen one class
+	struct SStep
+	{
+		const char *decl;
+		int         arg;
+		EMode       mode;
+		int         recompiled[4];
+	};
+	static const SStep steps[] =
+	{
+		{ "int mono(int)",      100, LINES, { 1, 1, 0, 1 } },
+		{ "int mono(int)",      100, CTX,   { 0, 0, 0, 0 } },
+		{ "int poly(int)",      100, CTX,   { 0, 0, 0, 1 } },
+		{ "int turn(int)",      100, CTX,   { 1, 1, 0, 1 } },
+		{ "int turn(int)",      100, LINES, { 0, 0, 0, 0 } },
+		{ "int late(int)",      100, CTX,   { 2, 2, 0, 2 } },
+		{ "int late(int)",      100, CTX,   { 0, 0, 0, 0 } },
+		{ "int virt(int)",      100, CTX,   { 1, 1, 0, 1 } },
+		{ "int foreign(int)",   100, CTX,   { 0, 0, 0, 0 } },
+		{ "int nullCall(int)",  100, CTX,   { 1, 1, 0, 1 } },
+		{ "int nested(int)",    100, CTX,   { 1, -1, 0, 1 } },
+		{ "int suspended(int)", 100, CTX,   { 1, 1, 0, 1 } },
+	};
+
+	static const int THREADS    = 4;
+	static const int SPIN_COUNT = 20000;
+	static std::mutex g_lock;
+
+	// gs.area(i) of the script
+	static int Spun(int n)
+	{
+		int r = 0;
+		for( int i = 0; i < n; i++ )
+			r = (r + 4 + i) & 0xFFFFFF;
+		return r;
+	}
+
+	// The memory functions of the tests aren't thread safe, so the call stack of the
+	// context is allocated before under the lock, by the warm up function
+	static void Spin(asIScriptEngine *engine, asIScriptFunction *warm, asIScriptFunction *spin, std::atomic<int> *ready, int *result)
+	{
+		asIScriptContext *ctx;
+		{
+			std::lock_guard<std::mutex> lock(g_lock);
+			ctx = engine->CreateContext();
+			ctx->Prepare(warm);
+			ctx->Execute();
+			ctx->Prepare(spin);
+			ctx->SetArgDWord(0, SPIN_COUNT);
+		}
+		(*ready)++;
+		while( *ready < THREADS )
+			std::this_thread::yield();
+		*result = ctx->Execute() == asEXECUTION_FINISHED ? int(ctx->GetReturnDWord()) : -1;
+
+		std::lock_guard<std::mutex> lock(g_lock);
+		ctx->Release();
+		asThreadCleanup();
+	}
+
+	// The warm up function is left to the VM
+	static bool NotWarm(asIScriptFunction *func, void *) { return strcmp(func->GetName(), "warm") != 0; }
+
+	// Returns what was observed. The functions compiled again are only checked if the
+	// calls can be compiled in place
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, asUINT config, bool inlining, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r = engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *other = engine->GetModule("other", asGM_ALWAYS_CREATE);
+		other->AddScriptSection("other", otherScript);
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( other->Build() < 0 || mod->Build() < 0 || mod->BindAllImportedFunctions() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *name = configs[config].name;
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(steps)/sizeof(steps[0]); n++ )
+		{
+			const SStep &step = steps[n];
+			asIScriptFunction *func = mod->GetFunctionByDecl(step.decl);
+			asUINT recompiled = jit ? jit->GetStatistics().functionsRecompiled : 0;
+			s << step.decl << " " << step.arg << ":";
+
+			g_lines = 0;
+			if( step.mode == LINES )
+				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			r = ctx->Prepare(func);
+			if( r >= 0 )
+				ctx->SetArgDWord(0, step.arg);
+			int suspends = 0;
+			while( r >= 0 )
+			{
+				r = ctx->Execute();
+				if( r != asEXECUTION_SUSPENDED )
+					break;
+				suspends++;
+			}
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			else if( r == asEXECUTION_EXCEPTION )
+				s << " " << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" << ctx->GetExceptionLineNumber();
+			else
+				s << " failed with " << r;
+			s << ", " << suspends << " suspends";
+			if( step.mode == LINES )
+			{
+				s << ", " << g_lines << " lines";
+				ctx->ClearLineCallback();
+			}
+			s << "\n";
+
+			if( jit )
+			{
+				recompiled = jit->GetStatistics().functionsRecompiled - recompiled;
+				int expected = inlining ? step.recompiled[config] : 0;
+				if( expected >= 0 && recompiled != asUINT(expected) )
+				{
+					PRINTF("profiles %s: %s %d compiled %u functions again instead of %d\n", name, step.decl, step.arg, recompiled, expected);
+					TEST_FAILED;
+				}
+			}
+		}
+		ctx->Release();
+
+		// One of the threads compiles the function again
+		asUINT recompiled = jit ? jit->GetStatistics().functionsRecompiled : 0;
+		std::atomic<int> ready(0);
+		int results[THREADS];
+		std::vector<std::thread> threads;
+		for( int n = 0; n < THREADS; n++ )
+			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int warm()"), mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+		for( int n = 0; n < THREADS; n++ )
+			threads[n].join();
+		s << "spin";
+		for( int n = 0; n < THREADS; n++ )
+		{
+			s << " " << results[n];
+			if( results[n] != Spun(SPIN_COUNT) )
+				TEST_FAILED;
+		}
+		s << "\n";
+		if( jit )
+		{
+			recompiled = jit->GetStatistics().functionsRecompiled - recompiled;
+			asUINT expected = inlining && configs[config].inlineSize > 0 ? 1 : 0;
+			if( recompiled != expected )
+			{
+				PRINTF("profiles %s: the threads compiled %u functions again instead of %u\n", name, recompiled, expected);
+				TEST_FAILED;
+			}
+		}
+
+		return s.str();
+	}
+}
+
+static bool TestProfiles()
+{
+	using namespace Profiles;
+	bool fail = false;
+
+	// The line callback must be called as by the VM, and the calls must be compiled in
+	// place for the classes to be noted
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+	bool inlining = (envFlags & (CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR)) == 0;
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, 0, false, fail);
+	engine->ShutDownAndRelease();
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(envFlags);
+		jit.SetMaxInlineSize(configs[c].inlineSize);
+		jit.SetProfileThreshold(configs[c].profile);
+		jit.SetCompileFilter(NotWarm, 0);
+		if( jit.SetCompileThresholds(configs[c].calls, configs[c].iterations) < 0 )
+			TEST_FAILED;
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, c, inlining, fail);
+		engine->ShutDownAndRelease();
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("profiles %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("profiles %s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -4044,6 +4397,7 @@ bool Test()
 	fail = TestHostCalls() || fail;
 	fail = TestMemoryFunctions() || fail;
 	fail = TestTiered() || fail;
+	fail = TestProfiles() || fail;
 
 	return fail;
 }
