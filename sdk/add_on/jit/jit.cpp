@@ -91,6 +91,9 @@ struct CJITCompiler::SImpl
 	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
+
+	bool IsLogged(asCScriptFunction *func) const;
+	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output);
 };
 
 CJITCompiler::CJITCompiler(asDWORD flags)
@@ -319,6 +322,12 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 	}
 }
 
+bool CJITCompiler::SImpl::IsLogged(asCScriptFunction *func) const
+{
+	return (flags & JIT_LOG) && logFile &&
+	       (logFilter.empty() || strstr(func->GetDeclaration(true, true), logFilter.c_str()) != 0);
+}
+
 // Sets the index of the entry point in the JitEntry instructions, which the VM passes to the function
 static void SetEntryArgs(asCScriptFunction *func, const CJITByteCode &code)
 {
@@ -338,9 +347,6 @@ static void SetEntryArgs(asCScriptFunction *func, const CJITByteCode &code)
 //                         cost for functions that are rarely executed.
 int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *output)
 {
-	using namespace asmjit;
-	using namespace asmjit::ujit;
-
 	*output = 0;
 
 	asCScriptFunction *func = static_cast<asCScriptFunction*>(function);
@@ -366,8 +372,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		return asERROR;
 	}
 
-	bool log = (m_impl->flags & JIT_LOG) && m_impl->logFile &&
-	           (m_impl->logFilter.empty() || strstr(func->GetDeclaration(true, true), m_impl->logFilter.c_str()) != 0);
+	bool log = m_impl->IsLogged(func);
 
 	if( aot )
 	{
@@ -410,31 +415,41 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		}
 	}
 
+	return m_impl->Compile(func, code, log, output);
+}
+
+// Analyses the decoded bytecode of the function and generates its code. The entry
+// points are set in the JitEntry instructions then
+int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output)
+{
+	using namespace asmjit;
+	using namespace asmjit::ujit;
+
 	// The dirty masks hold one bit per cached slot, and the bit of the frame
-	asUINT maxCachedSlots = m_impl->maxCachedSlots < 31 ? m_impl->maxCachedSlots : 31;
+	asUINT cachedSlots = maxCachedSlots < 31 ? maxCachedSlots : 31;
 	// The functions left to the compile filter are left to their calls too
 	SJITInlineOptions inlining;
-	inlining.maxSize     = (m_impl->flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : m_impl->maxInlineSize;
-	inlining.filter      = m_impl->filter;
-	inlining.filterParam = m_impl->filterParam;
-	code.SetBailInstructions(m_impl->bailOps);
-	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots, &inlining);
+	inlining.maxSize     = (flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : maxInlineSize;
+	inlining.filter      = filter;
+	inlining.filterParam = filterParam;
+	code.SetBailInstructions(bailOps);
+	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
 
 	if( log )
 	{
-		fprintf(m_impl->logFile, "\n; ---- %s ----\n", func->GetDeclaration(true, true));
-		DumpByteCode(m_impl->logFile, code);
+		fprintf(logFile, "\n; ---- %s ----\n", func->GetDeclaration(true, true));
+		DumpByteCode(logFile, code);
 	}
 
 	// Generate the code. Everything here is local to the call so that
 	// functions can be compiled concurrently and recursively
 	CJITErrorHandler errorHandler;
 	CodeHolder holder;
-	holder.init(m_impl->runtime.environment(), m_impl->runtime.cpu_features());
+	holder.init(runtime.environment(), runtime.cpu_features());
 	holder.set_error_handler(&errorHandler);
 
 #ifndef ASMJIT_NO_LOGGING
-	FileLogger logger(m_impl->logFile);
+	FileLogger logger(logFile);
 	if( log )
 	{
 		logger.add_flags(FormatFlags::kMachineCode);
@@ -445,24 +460,24 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	BackendCompiler cc;
 	holder.attach(&cc);
 
-	UniCompiler uc(&cc, m_impl->runtime.cpu_features(), CpuHints::kNone);
+	UniCompiler uc(&cc, runtime.cpu_features(), CpuHints::kNone);
 	uc.init_vec_width(VecWidth::k128);
 
 	SJITCodeGenOptions options;
-	options.noSuspend      = (m_impl->flags & JIT_NO_SUSPEND) != 0;
-	options.noScriptCalls  = (m_impl->flags & JIT_NO_SCRIPT_CALLS) != 0;
-	options.syncEveryInstr = (m_impl->flags & JIT_SYNC_EVERY_INSTR) != 0;
-	options.maxNativeCallDepth = m_impl->maxNativeCallDepth;
-	options.interop = !m_impl->aotFunctions.empty();
+	options.noSuspend      = (flags & JIT_NO_SUSPEND) != 0;
+	options.noScriptCalls  = (flags & JIT_NO_SCRIPT_CALLS) != 0;
+	options.syncEveryInstr = (flags & JIT_SYNC_EVERY_INSTR) != 0;
+	options.maxNativeCallDepth = maxNativeCallDepth;
+	options.interop = !aotFunctions.empty();
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
-	options.directSystemCalls = (m_impl->flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
+	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
 	options.guardedEntry = false;
 #else
 	// The C++ exceptions thrown by the functions called directly can only be caught
 	// if they can pass through the generated code
-	options.directSystemCalls = (m_impl->flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0 &&
-	                            (CJITUnwindInfo::IsSupported() || (m_impl->flags & JIT_DIRECT_SYSTEM_CALLS) != 0);
+	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0 &&
+	                            (CJITUnwindInfo::IsSupported() || (flags & JIT_DIRECT_SYSTEM_CALLS) != 0);
 	options.guardedEntry = options.directSystemCalls && CJITUnwindInfo::IsSupported();
 #endif
 
@@ -484,38 +499,38 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	asJITFunction jitFunc = 0;
 	if( ok )
 	{
-		std::lock_guard<std::mutex> lock(m_impl->mutex);
-		ok = (m_impl->runtime.add(&jitFunc, &holder) == Error::kOk);
+		std::lock_guard<std::mutex> lock(mutex);
+		ok = (runtime.add(&jitFunc, &holder) == Error::kOk);
 		void *unwindHandle = 0;
 		if( ok && gen.IsGuarded() && !unwind.Register((void*)jitFunc, &unwindHandle) )
 		{
-			m_impl->runtime.release(jitFunc);
+			runtime.release(jitFunc);
 			ok = false;
 			errorHandler.message = "the unwind information could not be registered";
 		}
 		if( unwindHandle )
-			m_impl->unwindInfo[jitFunc] = unwindHandle;
+			unwindInfo[jitFunc] = unwindHandle;
 		if( ok )
 		{
-			m_impl->stats.functionsCompiled++;
-			m_impl->stats.instructionsCompiled += gen.GetInstructionCount();
-			m_impl->stats.instructionsBailed   += gen.GetBailCount();
-			m_impl->stats.callsInlined         += gen.GetInlinedCallCount();
-			m_impl->stats.codeSize             += holder.code_size();
+			stats.functionsCompiled++;
+			stats.instructionsCompiled += gen.GetInstructionCount();
+			stats.instructionsBailed   += gen.GetBailCount();
+			stats.callsInlined         += gen.GetInlinedCallCount();
+			stats.codeSize             += holder.code_size();
 		}
 	}
 
 	if( !ok )
 	{
 		if( log )
-			fprintf(m_impl->logFile, "; compilation failed: %s\n", errorHandler.message.c_str());
-		std::lock_guard<std::mutex> lock(m_impl->mutex);
-		m_impl->stats.functionsFailed++;
+			fprintf(logFile, "; compilation failed: %s\n", errorHandler.message.c_str());
+		std::lock_guard<std::mutex> lock(mutex);
+		stats.functionsFailed++;
 		return asERROR;
 	}
 
 	if( log )
-		fprintf(m_impl->logFile, "; code at %p, %u bytes\n", (void*)jitFunc, (unsigned)holder.code_size());
+		fprintf(logFile, "; code at %p, %u bytes\n", (void*)jitFunc, (unsigned)holder.code_size());
 
 	SetEntryArgs(func, code);
 	*output = jitFunc;
