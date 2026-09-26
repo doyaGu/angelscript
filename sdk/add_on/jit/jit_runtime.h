@@ -135,6 +135,13 @@ const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
 // outside of the direct calls are passed on
 int    JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg);
 
+#ifndef AS_NO_EXCEPTIONS
+// Catches the C++ exceptions like JIT_GuardedEntry, for the code generated ahead of
+// time, which catches them where it is entered, see CJITCppGen. Returns false if the
+// exception must be passed on
+bool   JIT_CatchException(asSVMRegisters *regs);
+#endif
+
 // Script function calls. Performs the call and, if possible, executes the called
 // function natively before returning. callLimit is the one of the calling function,
 // see JITFunction. Returns 0 if the call completed. Not noexcept, as the C++

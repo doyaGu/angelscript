@@ -182,7 +182,27 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		if( !local.read )
 			text += Format("\t(void)%s;\n", local.name.c_str());
 	}
-	text += m_out;
+
+	// The C++ exceptions of the registered functions that the functions called
+	// natively call directly are caught where the code is entered, like
+	// CallSystemFunction does. The direct entries are called by that code only
+	if( calls && !direct )
+	{
+		text += "#ifndef AS_NO_EXCEPTIONS\n\ttry\n#endif\n\t{\n";
+		for( size_t pos = 0; pos < m_out.size(); )
+		{
+			size_t end = m_out.find('\n', pos);
+			end = end == std::string::npos ? m_out.size() : end + 1;
+			if( m_out[pos] == '\t' )
+				text += '\t';
+			text.append(m_out, pos, end - pos);
+			pos = end;
+		}
+		text += "\t}\n#ifndef AS_NO_EXCEPTIONS\n";
+		text += "\tcatch(...)\n\t{\n\t\tif( !JIT_CatchException(regs) )\n\t\t\tthrow;\n\t\treturn 1;\n\t}\n#endif\n";
+	}
+	else
+		text += m_out;
 	text += "}\n";
 
 	out += text;
@@ -229,21 +249,12 @@ void CJITCppGen::EmitEntry(bool calls)
 
 	Emit("if( jitArg != 0 )");
 	Emit("{");
-	if( calls )
-	{
-		// The C++ exceptions of the registered functions that the functions called
-		// natively call directly are caught there
-		m_out += "#ifndef AS_NO_EXCEPTIONS\n";
-		Emit("\tif( !(jitArg & JIT_GUARDED_ENTRY) )");
-		Emit("\t\treturn JIT_GuardedEntry(regs, jitArg);");
-		m_out += "#endif\n";
-	}
 	Emit("\tfp = regs->stackFramePointer;");
 	Emit("\tsp = regs->stackPointer;");
 	Emit("\tvr = regs->valueRegister;");
 	if( calls )
 		Emit("\tcallLimit = AOT_CallLimit(ctx);");
-	Emit("\tswitch( jitArg & ~JIT_GUARDED_ENTRY )");
+	Emit("\tswitch( jitArg )");
 	Emit("\t{");
 	for( asUINT n = 0; n < entries.size(); n++ )
 	{

@@ -250,6 +250,13 @@ int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 #endif
 }
 
+#ifndef AS_NO_EXCEPTIONS
+bool JIT_CatchException(asSVMRegisters *regs)
+{
+	return CatchDirectCallException(regs, GetContext(regs));
+}
+#endif
+
 // Calls a script function. The program pointer must be after the call instruction
 // and the arguments on the stack. If the function has been compiled and the call
 // stack is below the call limit the function is executed natively, otherwise the VM
