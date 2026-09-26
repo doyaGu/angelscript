@@ -22,23 +22,17 @@
 
 BEGIN_AS_NAMESPACE
 
-// The value register, kept in a local variable
-union UJITAOTValue
-{
-	asQWORD     q;
-	asINT64     i64;
-	double      d;
-	float       f;
-	asDWORD     u32;
-	int         i32;
-	asWORD      w;
-	short       s;
-	asBYTE      b;
-	signed char c;
-	asPWORD     pw;
-	void       *p;
-	asBYTE      bytes[8];
-};
+// The value register, kept in the local variable vr of type asQWORD, which the
+// compiler keeps in a register. The VM accesses the first bytes in memory through
+// casts. The writes of the smaller types clear the rest like the JIT does, as the
+// bytecode never reads more than it wrote
+#ifdef AS_BIG_ENDIAN
+#define AOT_VR_SHIFT(T) (64 - 8 * sizeof(T))
+#else
+#define AOT_VR_SHIFT(T) 0
+#endif
+#define AOT_GETVR(T)    ((T)(vr >> AOT_VR_SHIFT(T)))
+#define AOT_SETVR(T, x) (vr = (asQWORD)(T)(x) << AOT_VR_SHIFT(T))
 
 // The variables and the stack hold values of any type, which the VM accesses through
 // casts. The types used for that may alias anything, and the 64bit ones are only
@@ -72,7 +66,7 @@ typedef asPWORD     aot_pw;
 // A variable of the frame, a value on the stack, and a value where the value register points
 #define AOT_V(T, off) (*(aot_##T*)(fp - (off)))
 #define AOT_S(T, off) (*(aot_##T*)(sp + (off)))
-#define AOT_R(T)      (*(aot_##T*)vr.p)
+#define AOT_R(T)      (*(aot_##T*)AOT_GETVR(asPWORD))
 
 // The operands that differ between the functions sharing the code, e.g. pointers
 // and function ids, are read from the bytecode like the VM does. pos is the offset
@@ -83,23 +77,27 @@ typedef asPWORD     aot_pw;
 
 // Stores the registers kept in local variables, with the program pointer at the
 // instruction at pos, and returns to the VM, which continues there
-#define AOT_SYNC(pos) (regs->programPointer = bc + (pos), regs->stackPointer = sp, regs->valueRegister = vr.q)
+#define AOT_SYNC(pos) (regs->programPointer = bc + (pos), regs->stackPointer = sp, regs->valueRegister = vr)
 #define AOT_BAIL(pos) do { AOT_SYNC(pos); return 1; } while(0)
 
+// Stores the frame of the function, self being the function, which is left to the
+// places where the VM or the engine may see it, see JIT_FRAME_BIT
+#define AOT_FRAME() (regs->stackFramePointer = fp, ctx->m_currentFunction = self)
+
 // The registers after a call, which the called function or the helper has updated
-#define AOT_RELOAD() (sp = regs->stackPointer, vr.q = regs->valueRegister)
+#define AOT_RELOAD() (sp = regs->stackPointer, vr = regs->valueRegister)
 
 // Booleans. The VM writes the byte of a boolean and clears the rest of the dword,
 // or of the value register for the tests
 #if AS_SIZEOF_BOOL == 1
 #define AOT_NOT(off) do { asBYTE v_ = AOT_V(u8, off) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0; AOT_V(u32, off) = 0; AOT_V(u8, off) = v_; } while(0)
 #define AOT_NOTL(l) ((l) = ((asBYTE)(l) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0))
-#define AOT_TEST(cond) do { asBYTE v_ = (cond) ? VALUE_OF_BOOLEAN_TRUE : 0; vr.q = 0; vr.bytes[0] = v_; } while(0)
-#define AOT_CLRHI() (vr.bytes[1] = 0, vr.bytes[2] = 0, vr.bytes[3] = 0)
+#define AOT_TEST(cond) AOT_SETVR(asBYTE, (cond) ? VALUE_OF_BOOLEAN_TRUE : 0)
+#define AOT_CLRHI() AOT_SETVR(asBYTE, AOT_GETVR(asBYTE))
 #else
 #define AOT_NOT(off) (AOT_V(u32, off) = AOT_V(u32, off) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0)
 #define AOT_NOTL(l) ((l) = ((l) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0))
-#define AOT_TEST(cond) (vr.i32 = (cond) ? VALUE_OF_BOOLEAN_TRUE : 0)
+#define AOT_TEST(cond) AOT_SETVR(asDWORD, (cond) ? VALUE_OF_BOOLEAN_TRUE : 0)
 #define AOT_CLRHI() ((void)0)
 #endif
 
@@ -143,25 +141,56 @@ template<class T> inline int aot_cmp(T a, T b)
 	return a == b ? 0 : (a < b ? -1 : 1);
 }
 
-// Pushes the call state like asCContext::PushCallState and calls the code of a
-// script function natively, see JITFunction. The call stack must have room for the
-// call state, i.e. its length must be below callLimit
-inline int AOT_CallNative(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *callee, JITFunction target,
-                          asDWORD *fp, asDWORD *pc, asDWORD *sp, asUINT callLimit)
+// Pushes the call state like asCContext::PushCallState, with the frame of the
+// calling function, which may not have been stored. The call stack must have room
+// for it, i.e. its length must be below callLimit
+inline void AOT_PushCall(asCContext *ctx, asUINT length, asCScriptFunction *caller, asDWORD *fp, asDWORD *pc, asDWORD *sp)
 {
-	asUINT length = ctx->m_callStack.GetLength();
 	size_t *s = ctx->m_callStack.AddressOf() + length;
 	s[0] = (size_t)fp;
-	s[1] = (size_t)ctx->m_currentFunction;
+	s[1] = (size_t)caller;
 	s[2] = (size_t)pc;
 	s[3] = (size_t)sp;
 	s[4] = (size_t)ctx->m_stackIndex;
 	ctx->m_callStack.SetLengthNoAllocate(length + CALLSTACK_FRAME_SIZE);
+}
+
+// Calls the code of a script function natively, see JITFunction. The called
+// function restores the frame of the caller when it returns
+inline int AOT_CallNative(asSVMRegisters *regs, asCContext *ctx, asUINT length, asCScriptFunction *caller, asCScriptFunction *callee,
+                          JITFunction target, asDWORD *fp, asDWORD *pc, asDWORD *sp, asUINT callLimit)
+{
+	AOT_PushCall(ctx, length, caller, fp, pc, sp);
 	ctx->m_currentFunction = callee;
 #if AS_PTR_SIZE == 1
 	regs->stackPointer = sp;
 #endif
 	return target(regs, 0, callLimit, sp);
+}
+
+// The code generated for a function is also called directly by the code of the
+// functions calling it, which pushes the call state and passes the function and the
+// arguments. Unless it returns to the VM, the function returns the value register in
+// the VM registers and only pops the call state, and the caller pops the arguments
+// and stores its frame where it is seen, like JIT_NATIVE_RETURN. The direct entries
+// have the signature
+//
+//   int name_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp, asUINT callLimit)
+inline void AOT_PopCall(asCContext *ctx)
+{
+	asUINT length = ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE;
+	ctx->m_stackIndex = (int)ctx->m_callStack.AddressOf()[length + 4];
+	ctx->m_callStack.SetLengthNoAllocate(length);
+}
+
+// The implementation of a virtual or interface method for the object, like
+// asCContext::CallInterfaceMethod, or null if the object doesn't implement it
+inline asCScriptFunction *AOT_Virtual(asCScriptObject *obj, asCScriptFunction *func)
+{
+	asCObjectType *type = obj->objType;
+	if( func->funcType != asFUNC_INTERFACE )
+		return type->virtualFunctionTable[func->vfTableIdx];
+	return JIT_FindInterfaceMethod(type, func);
 }
 
 // The call limit when the VM enters a function, like the JIT computes it

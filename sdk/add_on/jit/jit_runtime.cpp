@@ -287,12 +287,20 @@ static asCScriptFunction *ResolveVirtual(asSVMRegisters *regs, asCContext *ctx, 
 	if( func->funcType != asFUNC_INTERFACE )
 		return objType->virtualFunctionTable[func->vfTableIdx];
 
-	for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
-		if( objType->interfaces[n] == func->objectType )
-			return objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
+	asCScriptFunction *real = JIT_FindInterfaceMethod(objType, func);
+	if( real )
+		return real;
 
 	ctx->m_needToCleanupArgs = true;
 	ctx->SetInternalException(TXT_NULL_POINTER_ACCESS);
+	return 0;
+}
+
+asCScriptFunction *JIT_FindInterfaceMethod(asCObjectType *objType, asCScriptFunction *func) noexcept
+{
+	for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
+		if( objType->interfaces[n] == func->objectType )
+			return objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
 	return 0;
 }
 
@@ -947,14 +955,7 @@ static asCScriptFunction *FindMethod(asCScriptFunction *func, asCScriptObject *o
 			real = objType->virtualFunctionTable[func->vfTableIdx];
 	}
 	else
-	{
-		for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
-			if( objType->interfaces[n] == func->objectType )
-			{
-				real = objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
-				break;
-			}
-	}
+		real = JIT_FindInterfaceMethod(objType, func);
 	return real && real->signatureId == func->signatureId ? real : 0;
 }
 

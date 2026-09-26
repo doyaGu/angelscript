@@ -18,6 +18,7 @@ CJITByteCode::CJITByteCode()
 	m_retReadsVR = false;
 	m_tempMask   = 0;
 	m_staticStack = false;
+	m_aot = false;
 	m_inlinedLength = 0;
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
@@ -689,6 +690,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 {
 	// The instructions returning to the VM may have been set since the decoding
 	MarkUnreachable(false);
+	m_aot = false;
 	AnalyseStackDepth();
 	m_inlinees.clear();
 	m_inlineObjTypes.clear();
@@ -712,6 +714,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
 {
 	MarkUnreachable(false);
+	m_aot = true;
 	m_staticStack = false;
 	m_stackDepth.assign(m_instrs.size(), -1);
 	m_inlinees.clear();
@@ -1276,10 +1279,14 @@ bool CJITByteCode::IsSyncPoint(asEBCInstr op)
 // restored, see JIT_NATIVE_RETURN. The function pointers are restored unless the
 // stack is static, see CJITCodeGen::EmitScriptCall. So are the constructors of
 // script classes. The inlined functions with sync points leave their own frame in
-// the VM registers, see CJITCodeGen::EmitDematerialize
+// the VM registers, see CJITCodeGen::EmitDematerialize. The code generated ahead of
+// time restores the frame after the calls, but those of the functions it calls
+// directly, see CJITCppGen::EmitScriptCall
 bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 {
 	const SJITInstr &instr = m_instrs[instrIdx];
+	if( m_aot )
+		return instr.op == asBC_CALL || instr.op == asBC_CALLINTF;
 	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints(GetBorrowedArgs(instrIdx)) )
 		return true;
 #ifdef JIT_NATIVE_RETURN

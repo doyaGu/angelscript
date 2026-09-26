@@ -28,7 +28,8 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code);
 std::string JIT_GetAOTName(const SJITAOTKey &key);
 
 // Collects the code generated for the compiled functions, one function per key, and
-// writes it to C++ files, see CJITCompiler::SetAOTOutput
+// writes it to C++ files, see CJITCompiler::SetAOTOutput. The code of the functions
+// calls the code written for the functions it calls directly, see CJITCppGen
 class CJITAOTOutput
 {
 public:
@@ -54,9 +55,13 @@ public:
 	int Write();
 
 protected:
+	// The code of a function and of its direct entry, with the regions that call the
+	// code of other functions, see JIT_CPPGEN_REGION. The other functions with the key
+	// must have the same code without the regions
 	struct SFunc
 	{
 		std::string text;
+		std::string direct;
 		std::string decl;
 		bool        conflict;
 	};

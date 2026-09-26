@@ -124,7 +124,8 @@ public:
 
 	// Performs the analysis for the code generated ahead of time, which must depend
 	// only on the key of the function, see JIT_GetAOTKey. Nothing is inlined, and the
-	// instructions aren't marked with what their objects and callees allow
+	// instructions aren't marked with what their objects and callees allow. The script
+	// calls that the code may make directly leave the frame dirty, see CJITCppGen
 	void AnalyseForAOT(asUINT maxCachedSlots);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
@@ -304,6 +305,7 @@ protected:
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;
+	bool                    m_aot;            // see AnalyseForAOT
 	bool                    m_retReadsVR;
 	bool                    m_hasSyncPoints;
 };

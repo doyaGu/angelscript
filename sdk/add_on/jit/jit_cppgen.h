@@ -25,15 +25,31 @@ BEGIN_AS_NAMESPACE
 // ids, and type ids, are read from the bytecode at run time, so the same code
 // serves every function whose bytecode only differs in them. Everything else is
 // part of the key of the function, see JIT_GetAOTKey, and the code must depend on
-// nothing that the key leaves out
+// nothing that the key leaves out.
+//
+// The script calls to the functions whose code is generated too call the code
+// directly if the function called at run time has that code, see AOT_PopCall. The
+// lines of the code for that are a region, which begins with a line of
+// JIT_CPPGEN_REGION followed by the name of the code called, and ends with a line of
+// JIT_CPPGEN_REGION_END. The output keeps the region, without the two lines, if it
+// writes the code called, and removes it otherwise. The code without the regions
+// depends on the key only
+const char JIT_CPPGEN_REGION     = '\x01';
+const char JIT_CPPGEN_REGION_END = '\x02';
+
 class CJITCppGen
 {
 public:
-	CJITCppGen(const CJITByteCode &code);
+	// Returns the name of the code generated for the function, or an empty string if
+	// there is none
+	typedef std::string (*TargetCallback)(asCScriptFunction *func, void *param);
 
-	// Appends the definition of the function with the name. Returns false if the
+	CJITCppGen(const CJITByteCode &code, TargetCallback target = 0, void *targetParam = 0);
+
+	// Appends the definition of the function with the name, or of its direct entry,
+	// which has the name with _d appended, see AOT_PopCall. Returns false if the
 	// bytecode can't be translated
-	bool Generate(const char *name, std::string &out);
+	bool Generate(const char *name, std::string &out, bool direct = false);
 
 	// The object variables on the heap that the function clears when entered, by offset
 	static void GetHeapVariables(asCScriptFunction *func, std::vector<int> &offsets);
@@ -60,6 +76,9 @@ protected:
 	bool EmitInstr(asUINT idx);
 	void EmitSync(const char *indent = "");
 	void EmitReload(const char *indent = "");
+	void EmitScriptCall(const SJITInstr &instr);
+
+	static asCScriptFunction *FindCallee(asCScriptFunction *func, bool virtualCall);
 
 	SLocal     *FindLocal(int offset);
 	std::string Var(const char *type, int offset);
@@ -73,6 +92,9 @@ protected:
 	static const char *LocalType(int kind);
 
 	const CJITByteCode &m_code;
+	TargetCallback      m_target;
+	void               *m_targetParam;
+	bool                m_direct; // generating the direct entry
 	std::string         m_out;
 	std::vector<bool>   m_labels; // instructions that are jumped to
 	std::vector<SLocal> m_locals;
@@ -80,10 +102,12 @@ protected:
 
 	// For the instruction being translated, its position and the statements that
 	// store the local variables to the frame before it may be seen, and that load
-	// them after it may have been modified
+	// them after it may have been modified, and whether the frame must be stored
+	// before it may be seen, see JIT_FRAME_BIT
 	asUINT              m_pos;
 	std::string         m_sync;
 	std::string         m_reload;
+	bool                m_frame;
 };
 
 END_AS_NAMESPACE

@@ -141,6 +141,10 @@ int    JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg);
 // exceptions caught by JIT_GuardedEntry may pass through it
 int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT callLimit);
 
+// The implementation of the interface method in the class, or null if the class
+// doesn't implement the interface
+asCScriptFunction *JIT_FindInterfaceMethod(asCObjectType *objType, asCScriptFunction *func) noexcept;
+
 // Sets up the frame of a function entered natively with jitArg 0, when the stack
 // block is too small or regs->doProcessSuspend is set. The stack pointer in the VM
 // registers must be the one the function was called with, and the program pointer

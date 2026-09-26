@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 2;
+const asQWORD JIT_AOT_FORMAT_VERSION = 3;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -218,6 +218,47 @@ std::string JIT_GetAOTName(const SJITAOTKey &key)
 	return name;
 }
 
+// The name of the code for the function that a call calls, see CJITCppGen. Whether
+// the code is written is known when the output is
+static std::string GetTargetName(asCScriptFunction *func, void *)
+{
+	CJITByteCode code;
+	if( code.Decode(func) < 0 )
+		return "";
+	return JIT_GetAOTName(JIT_GetAOTKey(code));
+}
+
+// The code with the regions that call the code in the set, without the lines that
+// begin and end them, see JIT_CPPGEN_REGION. The other regions are removed, and so
+// are all without a set. The names of the code that the kept regions call are added
+// to the calls
+static std::string FilterRegions(const std::string &text, const std::set<std::string> *keep, std::set<std::string> *calls)
+{
+	std::string out;
+	bool skip = false;
+	size_t pos = 0;
+	while( pos < text.size() )
+	{
+		size_t end = text.find('\n', pos);
+		end = end == std::string::npos ? text.size() : end + 1;
+		if( text[pos] == JIT_CPPGEN_REGION )
+		{
+			std::string name = text.substr(pos + 1, end - pos - 1);
+			if( !name.empty() && name[name.size() - 1] == '\n' )
+				name.erase(name.size() - 1);
+			skip = keep == 0 || keep->find(name) == keep->end();
+			if( !skip && calls )
+				calls->insert(name);
+		}
+		else if( text[pos] == JIT_CPPGEN_REGION_END )
+			skip = false;
+		else if( !skip )
+			out.append(text, pos, end - pos);
+		pos = end;
+	}
+	return out;
+}
+
 CJITAOTOutput::CJITAOTOutput()
 {
 }
@@ -229,23 +270,30 @@ CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAO
 	CJITByteCode analysed(code);
 	analysed.AnalyseForAOT(JIT_AOT_MAX_LOCALS);
 
+	std::string name = JIT_GetAOTName(key);
 	std::string text;
-	CJITCppGen gen(analysed);
-	if( !gen.Generate(JIT_GetAOTName(key).c_str(), text) )
+	CJITCppGen gen(analysed, GetTargetName, 0);
+	if( !gen.Generate(name.c_str(), text) )
 		return AOT_FAILED;
 
+	// The calls of the first function with the key are kept
 	std::map<SJITAOTKey, SFunc>::iterator it = m_funcs.find(key);
 	if( it != m_funcs.end() )
 	{
-		if( it->second.text == text && !it->second.conflict )
+		if( !it->second.conflict && FilterRegions(it->second.text, 0, 0) == FilterRegions(text, 0, 0) )
 			return AOT_EXISTS;
 		it->second.conflict = true;
 		return AOT_CONFLICT;
 	}
 
+	std::string direct;
+	if( !gen.Generate(name.c_str(), direct, true) )
+		return AOT_FAILED;
+
 	// The declaration is only a comment, which must not continue on the next line
 	SFunc &f = m_funcs[key];
 	f.text     = text;
+	f.direct   = direct;
 	f.decl     = decl ? decl : "";
 	f.conflict = false;
 	for( size_t n = 0; n < f.decl.size(); n++ )
@@ -285,6 +333,13 @@ static std::string ChunkPath(const std::string &dir, asUINT index)
 	return (std::filesystem::path(dir) / name).string();
 }
 
+static asUINT FindGroup(std::vector<asUINT> &parent, asUINT n)
+{
+	while( parent[n] != n )
+		n = parent[n] = parent[parent[n]];
+	return n;
+}
+
 int CJITAOTOutput::Write()
 {
 	if( m_dir.empty() )
@@ -303,23 +358,131 @@ int CJITAOTOutput::Write()
 
 	// The functions are sorted by key, so that the same functions end up in the same files
 	std::vector<const std::pair<const SJITAOTKey, SFunc>*> funcs;
+	std::map<std::string, asUINT> index;
+	std::set<std::string> written;
 	for( std::map<SJITAOTKey, SFunc>::const_iterator it = m_funcs.begin(); it != m_funcs.end(); ++it )
-		if( !it->second.conflict )
-			funcs.push_back(&*it);
+	{
+		if( it->second.conflict )
+			continue;
+		std::string name = JIT_GetAOTName(it->first);
+		index[name] = asUINT(funcs.size());
+		written.insert(name);
+		funcs.push_back(&*it);
+	}
+
+	// The calls to the code that is written call it directly, so the direct entries
+	// of the functions called so are written too, and those of the functions they call
+	std::vector<std::string> texts(funcs.size()), directs(funcs.size());
+	std::vector<std::set<std::string> > calls(funcs.size());
+	std::vector<bool> called(funcs.size(), false);
+	std::vector<asUINT> work;
+	for( asUINT n = 0; n < funcs.size() || !work.empty(); )
+	{
+		std::set<std::string> found;
+		if( n < funcs.size() )
+		{
+			texts[n] = FilterRegions(funcs[n]->second.text, &written, &found);
+			calls[n].insert(found.begin(), found.end());
+			n++;
+		}
+		else
+		{
+			asUINT f = work.back();
+			work.pop_back();
+			directs[f] = FilterRegions(funcs[f]->second.direct, &written, &found);
+			calls[f].insert(found.begin(), found.end());
+		}
+		for( std::set<std::string>::const_iterator it = found.begin(); it != found.end(); ++it )
+		{
+			asUINT c = index[*it];
+			if( !called[c] )
+			{
+				called[c] = true;
+				work.push_back(c);
+			}
+		}
+	}
+
+	// The functions that call each other are put in the same file, so that the
+	// compiler can inline the calls, unless there are too many
+	std::vector<asUINT> parent(funcs.size());
+	for( asUINT n = 0; n < funcs.size(); n++ )
+		parent[n] = n;
+	for( asUINT n = 0; n < funcs.size(); n++ )
+		for( std::set<std::string>::const_iterator it = calls[n].begin(); it != calls[n].end(); ++it )
+		{
+			asUINT a = FindGroup(parent, n), b = FindGroup(parent, index[*it]);
+			parent[a] = b;
+		}
+
+	std::vector<std::vector<asUINT> > groups;
+	std::map<asUINT, asUINT> groupOf;
+	for( asUINT n = 0; n < funcs.size(); n++ )
+	{
+		asUINT root = FindGroup(parent, n);
+		std::map<asUINT, asUINT>::iterator it = groupOf.find(root);
+		if( it == groupOf.end() )
+		{
+			it = groupOf.insert(std::make_pair(root, asUINT(groups.size()))).first;
+			groups.push_back(std::vector<asUINT>());
+		}
+		groups[it->second].push_back(n);
+	}
+
+	std::vector<std::vector<asUINT> > chunkFuncs;
+	std::vector<asUINT> chunkOf(funcs.size());
+	for( asUINT g = 0; g < groups.size(); g++ )
+	{
+		if( chunkFuncs.empty() || (!chunkFuncs.back().empty() && chunkFuncs.back().size() + groups[g].size() > JIT_AOT_CHUNK_SIZE) )
+			chunkFuncs.push_back(std::vector<asUINT>());
+		for( asUINT n = 0; n < groups[g].size(); n++ )
+		{
+			if( chunkFuncs.back().size() >= JIT_AOT_CHUNK_SIZE )
+				chunkFuncs.push_back(std::vector<asUINT>());
+			chunkFuncs.back().push_back(groups[g][n]);
+			chunkOf[groups[g][n]] = asUINT(chunkFuncs.size() - 1);
+		}
+	}
+
+	// The direct entries only called in their file are static
+	std::vector<bool> local(funcs.size(), true);
+	for( asUINT n = 0; n < funcs.size(); n++ )
+		for( std::set<std::string>::const_iterator it = calls[n].begin(); it != calls[n].end(); ++it )
+			if( chunkOf[index[*it]] != chunkOf[n] )
+				local[index[*it]] = false;
 
 	bool ok = true;
 	asUINT chunks = 0;
-	for( asUINT n = 0; n < funcs.size(); n += JIT_AOT_CHUNK_SIZE, chunks++ )
+	for( ; chunks < chunkFuncs.size(); chunks++ )
 	{
+		const std::vector<asUINT> &members = chunkFuncs[chunks];
 		std::string content = header;
 		content += check;
-		content += "BEGIN_AS_NAMESPACE\n";
-		for( asUINT f = n; f < funcs.size() && f < n + JIT_AOT_CHUNK_SIZE; f++ )
+		content += "BEGIN_AS_NAMESPACE\n\n";
+
+		std::set<std::string> referenced;
+		for( asUINT m = 0; m < members.size(); m++ )
+			referenced.insert(calls[members[m]].begin(), calls[members[m]].end());
+		for( std::set<std::string>::const_iterator it = referenced.begin(); it != referenced.end(); ++it )
 		{
+			content += "int " + *it + "(asSVMRegisters *, asPWORD, asUINT, asDWORD *);\n";
+			content += local[index[*it]] ? "static int " : "int ";
+			content += *it + "_d(asCContext *, asCScriptFunction *, asDWORD *, asUINT);\n";
+		}
+
+		for( asUINT m = 0; m < members.size(); m++ )
+		{
+			asUINT f = members[m];
 			content += "\n// ";
 			content += funcs[f]->second.decl;
 			content += "\n";
-			content += funcs[f]->second.text;
+			if( called[f] )
+			{
+				if( local[f] )
+					content += "static ";
+				content += directs[f];
+			}
+			content += texts[f];
 		}
 		content += "\nEND_AS_NAMESPACE\n";
 		ok = WriteIfChanged(ChunkPath(m_dir, chunks), content) && ok;

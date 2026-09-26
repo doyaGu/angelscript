@@ -3,6 +3,8 @@
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
 #include "as_scriptfunction.h"
+#include "as_scriptengine.h"
+#include "as_objecttype.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -47,7 +49,8 @@ static std::string IntLiteral(int value)
 	return Format("%d", value);
 }
 
-CJITCppGen::CJITCppGen(const CJITByteCode &code) : m_code(code), m_pos(0), m_failed(false)
+CJITCppGen::CJITCppGen(const CJITByteCode &code, TargetCallback target, void *targetParam) :
+	m_code(code), m_target(target), m_targetParam(targetParam), m_direct(false), m_failed(false), m_pos(0), m_frame(false)
 {
 	// The variables that the analysis keeps in registers, in the order of their bits
 	const std::vector<SJITSlot> &slots = code.GetSlots();
@@ -100,19 +103,21 @@ void CJITCppGen::Put(const std::string &line)
 	m_out += '\n';
 }
 
-bool CJITCppGen::Generate(const char *name, std::string &out)
+bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 {
 	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
 	const std::vector<asUINT> &entries = m_code.GetEntries();
 	m_out.clear();
 	m_failed = false;
+	m_direct = direct;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 		m_locals[n].used = m_locals[n].read = false;
 
-	// Only the instructions that are jumped to get labels, as unused labels give warnings
+	// Only the instructions that are jumped to get labels, as unused labels give
+	// warnings. The VM doesn't enter the direct entry
 	bool calls = false;
 	m_labels.assign(instrs.size(), false);
-	for( asUINT n = 0; n < entries.size(); n++ )
+	for( asUINT n = 0; n < entries.size() && !direct; n++ )
 		m_labels[entries[n]] = true;
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
@@ -148,12 +153,26 @@ bool CJITCppGen::Generate(const char *name, std::string &out)
 	if( m_failed )
 		return false;
 
-	std::string text = Format("int %s(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer)\n{\n", name);
-	text += "\tasCContext *ctx = (asCContext*)regs->ctx;\n";
-	text += "\tasDWORD *bc, *fp, *sp;\n";
-	text += "\tUJITAOTValue vr;\n";
+	// The function being executed, self, is the current function of the context
+	// when the function is entered, unless it is entered directly
+	std::string text;
+	if( direct )
+	{
+		text = Format("int %s_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp, asUINT callLimit)\n{\n", name);
+		text += "\tasSVMRegisters *regs = &ctx->m_regs;\n";
+		text += "\tasDWORD *bc, *sp;\n";
+		text += "\tasQWORD vr = 0;\n";
+	}
+	else
+	{
+		text = Format("int %s(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer)\n{\n", name);
+		text += "\tasCContext *ctx = (asCContext*)regs->ctx;\n";
+		text += "\tasCScriptFunction *self = ctx->m_currentFunction;\n";
+		text += "\tasDWORD *bc, *fp, *sp;\n";
+		text += "\tasQWORD vr;\n";
+		text += "\t(void)stackPointer;\n";
+	}
 	text += "\t(void)callLimit;\n";
-	text += "\t(void)stackPointer;\n";
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 	{
 		const SLocal &local = m_locals[n];
@@ -174,12 +193,39 @@ bool CJITCppGen::Generate(const char *name, std::string &out)
 // Native callers enter at the start, and the frame is set up like
 // asCContext::PrepareScriptFunction does when the stack block has room and the VM
 // has nothing to do, otherwise by JIT_PrepareFrame. The variables kept in local
-// variables are loaded from the frame then, see CJITByteCode::GetEntryMask
+// variables are loaded from the frame then, see CJITByteCode::GetEntryMask. The
+// frame is left to the first place where it may be seen, see JIT_FRAME_BIT
 void CJITCppGen::EmitEntry(bool calls)
 {
 	const std::vector<SJITInstr> &instrs = m_code.GetInstructions();
 	const std::vector<asUINT> &entries = m_code.GetEntries();
 	asCScriptFunction *func = m_code.GetFunction();
+	std::vector<int> heap;
+	GetHeapVariables(func, heap);
+
+	if( m_direct )
+	{
+		Emit("bc = self->scriptData->byteCode.AddressOf();");
+		Emit("if( fp - (%u + RESERVE_STACK) < ctx->m_stackBlocks[ctx->m_stackIndex] || regs->doProcessSuspend )", func->scriptData->stackNeeded);
+		Emit("{");
+		Emit("\tctx->m_currentFunction = self;");
+		Emit("\tregs->stackPointer = fp;");
+		Emit("\tregs->programPointer = bc;");
+		Emit("\tif( JIT_PrepareFrame(regs) )");
+		Emit("\t\treturn 1;");
+		Emit("\tfp = regs->stackFramePointer;");
+		Emit("\tsp = regs->stackPointer;");
+		Emit("}");
+		Emit("else");
+		Emit("{");
+		for( asUINT n = 0; n < heap.size(); n++ )
+			Emit("\tAOT_V(pw, %d) = 0;", heap[n]);
+		Emit("\tsp = fp - %u;", func->scriptData->variableSpace);
+		Emit("}");
+		if( !instrs.empty() )
+			Put(Loads(m_code.GetEntryMask(0)));
+		return;
+	}
 
 	Emit("if( jitArg != 0 )");
 	Emit("{");
@@ -194,7 +240,7 @@ void CJITCppGen::EmitEntry(bool calls)
 	}
 	Emit("\tfp = regs->stackFramePointer;");
 	Emit("\tsp = regs->stackPointer;");
-	Emit("\tvr.q = regs->valueRegister;");
+	Emit("\tvr = regs->valueRegister;");
 	if( calls )
 		Emit("\tcallLimit = AOT_CallLimit(ctx);");
 	Emit("\tswitch( jitArg & ~JIT_GUARDED_ENTRY )");
@@ -209,9 +255,7 @@ void CJITCppGen::EmitEntry(bool calls)
 	Emit("\treturn 1;");
 	Emit("}");
 
-	std::vector<int> heap;
-	GetHeapVariables(func, heap);
-	Emit("bc = ctx->m_currentFunction->scriptData->byteCode.AddressOf();");
+	Emit("bc = self->scriptData->byteCode.AddressOf();");
 #if AS_PTR_SIZE == 1
 	Emit("fp = regs->stackPointer;");
 #else
@@ -230,10 +274,9 @@ void CJITCppGen::EmitEntry(bool calls)
 	Emit("{");
 	for( asUINT n = 0; n < heap.size(); n++ )
 		Emit("\tAOT_V(pw, %d) = 0;", heap[n]);
-	Emit("\tregs->stackFramePointer = fp;");
 	Emit("\tsp = fp - %u;", func->scriptData->variableSpace);
 	Emit("}");
-	Emit("vr.q = regs->valueRegister;");
+	Emit("vr = regs->valueRegister;");
 	if( !instrs.empty() )
 		Put(Loads(m_code.GetEntryMask(0)));
 }
@@ -369,7 +412,8 @@ std::string CJITCppGen::VarAddr(int offset)
 }
 
 // The statements that store the local variables in the mask to the frame, or load
-// them from it. The masks are those of the analysis, see CJITByteCode::GetDirtyMask
+// them from it, and store the frame for JIT_FRAME_BIT. The masks are those of the
+// analysis, see CJITByteCode::GetDirtyMask
 std::string CJITCppGen::Stores(asUINT mask)
 {
 	std::string text;
@@ -383,6 +427,8 @@ std::string CJITCppGen::Stores(asUINT mask)
 			text += ' ';
 		text += Format("AOT_V(%s, %d) = %s;", FrameType(local.kind), local.offset, local.name.c_str());
 	}
+	if( mask & JIT_FRAME_BIT )
+		text += text.empty() ? "AOT_FRAME();" : " AOT_FRAME();";
 	return text;
 }
 
@@ -405,21 +451,138 @@ std::string CJITCppGen::Loads(asUINT mask)
 // The statement that returns to the VM at the instruction, which raises the exception
 std::string CJITCppGen::Bail() const
 {
-	if( m_sync.empty() )
+	std::string sync = m_sync;
+	if( m_frame )
+		sync += sync.empty() ? "AOT_FRAME();" : " AOT_FRAME();";
+	if( sync.empty() )
 		return Format("AOT_BAIL(%u);", m_pos);
-	return Format("{ %s AOT_BAIL(%u); }", m_sync.c_str(), m_pos);
+	return Format("{ %s AOT_BAIL(%u); }", sync.c_str(), m_pos);
 }
 
 // Where the VM, the engine, or the application may see the frame, i.e. at the
 // calls, the helpers, and the returns to the VM, the local variables whose frame
-// variables are older are stored like the JIT does. The calls leave them in the
-// frame, which is loaded again where they are read later, and so do the
-// instructions where the frame may have been modified, see GetReloadMask
+// variables are older are stored like the JIT does, and so is the frame if it
+// hasn't been. The calls leave them in the frame, which is loaded again where they
+// are read later, and so do the instructions where the frame may have been
+// modified, see GetReloadMask
 void CJITCppGen::EmitSync(const char *indent)
 {
 	if( !m_sync.empty() )
 		Emit("%s%s", indent, m_sync.c_str());
+	if( m_frame )
+		Emit("%sAOT_FRAME();", indent);
 	Emit("%sAOT_SYNC(%u);", indent, m_pos);
+}
+
+// The function that a call is expected to call: the one of asBC_CALL, the method
+// of the class for the virtual methods, and the only method of the classes of the
+// modules implementing an interface method. Null if there is none
+asCScriptFunction *CJITCppGen::FindCallee(asCScriptFunction *func, bool virtualCall)
+{
+	if( func == 0 || !virtualCall )
+		return func;
+	if( func->funcType == asFUNC_VIRTUAL )
+	{
+		asCObjectType *type = func->objectType;
+		if( type == 0 || func->vfTableIdx < 0 || asUINT(func->vfTableIdx) >= type->virtualFunctionTable.GetLength() )
+			return 0;
+		return type->virtualFunctionTable[func->vfTableIdx];
+	}
+	if( func->funcType != asFUNC_INTERFACE || func->objectType == 0 )
+		return 0;
+
+	asCScriptFunction *found = 0;
+	asIScriptEngine *engine = func->GetEngine();
+	for( asUINT m = 0; m < engine->GetModuleCount(); m++ )
+	{
+		asIScriptModule *mod = engine->GetModuleByIndex(m);
+		for( asUINT t = 0; mod && t < mod->GetObjectTypeCount(); t++ )
+		{
+			// The interfaces list the interfaces they derive from, but have no methods
+			asCObjectType *type = CastToObjectType(static_cast<asCTypeInfo*>(mod->GetObjectTypeByIndex(t)));
+			if( type == 0 || type->IsInterface() )
+				continue;
+			for( asUINT n = 0; n < type->interfaces.GetLength() && n < type->interfaceVFTOffsets.GetLength(); n++ )
+			{
+				if( type->interfaces[n] != func->objectType )
+					continue;
+				asUINT idx = asUINT(func->vfTableIdx) + type->interfaceVFTOffsets[n];
+				asCScriptFunction *method = idx < type->virtualFunctionTable.GetLength() ? type->virtualFunctionTable[idx] : 0;
+				if( method == 0 || (found && found != method) )
+					return 0;
+				found = method;
+			}
+		}
+	}
+	return found;
+}
+
+// The function is called natively if it has been compiled and the call stack has
+// room, like JIT_CallScript does, which is left the rest. The code of the function
+// expected is called directly if the function has it, see AOT_PopCall. The call
+// state gets the frame, which is only stored for JIT_CallScript
+void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
+{
+	asUINT pos = m_pos;
+	bool virtualCall = instr.op == asBC_CALLINTF;
+	asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
+	int id = asBC_INTARG(instr.bc);
+	asCScriptFunction *callee = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	callee = FindCallee(callee, virtualCall);
+	std::string target;
+	if( m_target && callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData )
+		target = m_target(callee, m_targetParam);
+
+	Emit("{");
+	Put(m_sync.empty() ? "" : "\t" + m_sync);
+	if( virtualCall )
+	{
+		Emit("\tasCScriptObject *o_ = (asCScriptObject*)AOT_S(pw, 0);");
+		Emit("\tasCScriptFunction *f_ = o_ ? AOT_Virtual(o_, ctx->m_engine->scriptFunctions[AOT_INT(%u)]) : 0;", pos + 1);
+		Emit("\tJITFunction t_ = f_ ? (JITFunction)f_->scriptData->jitFunction : 0;");
+	}
+	else
+	{
+		Emit("\tasCScriptFunction *f_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
+		Emit("\tJITFunction t_ = (JITFunction)f_->scriptData->jitFunction;");
+	}
+	Emit("\tasUINT n_ = ctx->m_callStack.GetLength();");
+	if( !target.empty() )
+	{
+		// The function pops the arguments like asBC_RET does
+		int args = callee->GetSpaceNeededForArguments() + (callee->objectType ? AS_PTR_SIZE : 0) + (callee->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+		m_out += JIT_CPPGEN_REGION;
+		m_out += target;
+		m_out += '\n';
+		Emit("\tif( t_ == %s && n_ < callLimit )", target.c_str());
+		Emit("\t{");
+		Emit("\t\tAOT_PushCall(ctx, n_, self, fp, bc + %u, sp);", pos + 2);
+		Emit("\t\tif( %s_d(ctx, f_, sp, callLimit) )", target.c_str());
+		Emit("\t\t\treturn 1;");
+		Emit("\t\tsp += %d;", args);
+		Emit("\t\tvr = regs->valueRegister;");
+		Emit("\t}");
+		Emit("\telse");
+		m_out += JIT_CPPGEN_REGION_END;
+		m_out += '\n';
+	}
+	Emit("\tif( t_ && n_ < callLimit )");
+	Emit("\t{");
+	Emit("\t\tif( AOT_CallNative(regs, ctx, n_, self, f_, t_, fp, bc + %u, sp, callLimit) )", pos + 2);
+	Emit("\t\t\treturn 1;");
+	Emit("\t\tAOT_RELOAD();");
+	Emit("\t}");
+	Emit("\telse");
+	Emit("\t{");
+	if( m_frame )
+		Emit("\t\tAOT_FRAME();");
+	Emit("\t\tAOT_SYNC(%u);", pos);
+	Emit("\t\tif( JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit) )", virtualCall ? "JIT_CALL_INTERFACE" : "JIT_CALL_SCRIPT", pos + 1);
+	Emit("\t\t\treturn 1;");
+	Emit("\t\tAOT_RELOAD();");
+	Emit("\t}");
+	EmitReload("\t");
+	Emit("}");
 }
 
 void CJITCppGen::EmitReload(const char *indent)
@@ -441,6 +604,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	m_pos    = pos;
 	m_sync   = Stores(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
 	m_reload = Loads(m_code.GetReloadMask(idx));
+	m_frame  = (m_code.GetDirtyMask(idx) & JIT_FRAME_BIT) != 0;
 
 	// The operands, only valid for the instruction types that have them
 	#define SW0 int(asBC_SWORDARG0(b))
@@ -454,7 +618,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	// The operations on two variables that write the result to the first one
 	#define BINARY(T, OP) Put(SetVar(T, SW0, Var(T, SW1) + " " OP " " + Var(T, SW2)))
 	#define SHIFT(T, S, BITS) Put(SetVar(T, SW0, Var(T, SW1) + " " S " (" + Var("u32", SW2) + " & " BITS ")"))
-	#define COMPARE(C, T) Emit("vr.i32 = aot_cmp<" C ">(%s, %s);", Var(T, SW0).c_str(), Var(T, SW1).c_str())
+	#define COMPARE(C, T) Emit("AOT_SETVR(asDWORD, aot_cmp<" C ">(%s, %s));", Var(T, SW0).c_str(), Var(T, SW1).c_str())
 
 	m_out += Format("\t// %u %s\n", pos, asBCInfo[instr.op].name);
 
@@ -467,7 +631,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_PSF:      Emit("sp -= %d; AOT_S(pw, 0) = (asPWORD)%s;", P, VarAddr(SW0).c_str()); break;
 	case asBC_SwapPtr:  Emit("{ asPWORD t_ = AOT_S(pw, 0); AOT_S(pw, 0) = AOT_S(pw, %d); AOT_S(pw, %d) = t_; }", P, P); break;
 	case asBC_PshG4:    Emit("sp -= 1; AOT_S(u32, 0) = *(aot_u32*)AOT_PW(%u);", pos + 1); break;
-	case asBC_LdGRdR4:  Emit("vr.pw = AOT_PW(%u); %s", pos + 1, SetVar("u32", SW0, "AOT_R(u32)").c_str()); break;
+	case asBC_LdGRdR4:  Emit("AOT_SETVR(asPWORD, AOT_PW(%u)); %s", pos + 1, SetVar("u32", SW0, "AOT_R(u32)").c_str()); break;
 
 	case asBC_NOT:
 		{
@@ -485,35 +649,29 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_CALL:
-		// The function is called natively if it has been compiled and the call stack
-		// has room, like JIT_CallScript does, which is left the rest
-		Emit("{");
-		Put(m_sync.empty() ? "" : "\t" + m_sync);
-		Emit("\tasCScriptFunction *f_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
-		Emit("\tJITFunction t_ = (JITFunction)f_->scriptData->jitFunction;");
-		Emit("\tif( t_ && ctx->m_callStack.GetLength() < callLimit )");
-		Emit("\t{");
-		Emit("\t\tif( AOT_CallNative(regs, ctx, f_, t_, fp, bc + %u, sp, callLimit) )", pos + 2);
-		Emit("\t\t\treturn 1;");
-		Emit("\t}");
-		Emit("\telse");
-		Emit("\t{");
-		Emit("\t\tAOT_SYNC(%u);", pos);
-		Emit("\t\tif( JIT_CallScript(regs, JIT_CALL_SCRIPT, AOT_INT(%u), 0, callLimit) )", pos + 1);
-		Emit("\t\t\treturn 1;");
-		Emit("\t}");
-		Emit("\tAOT_RELOAD();");
-		EmitReload("\t");
-		Emit("}");
+	case asBC_CALLINTF:
+		EmitScriptCall(instr);
 		break;
 
 	case asBC_RET:
+		if( m_direct )
+		{
+			// The caller pops the arguments
+			Emit("AOT_PopCall(ctx);");
+			if( m_code.RetReadsVR() )
+				Emit("regs->valueRegister = vr;");
+			Emit("return 0;");
+			break;
+		}
+
 		// Like the VM, and asCContext::PopCallState, unless the function was the first
 		// one or a nested call, which finishes the execution
 		Emit("{");
 		Emit("\tasUINT l_ = ctx->m_callStack.GetLength();");
 		Emit("\tif( l_ == 0 || ctx->m_callStack.AddressOf()[l_ - CALLSTACK_FRAME_SIZE] == 0 )");
 		Emit("\t{");
+		if( m_frame )
+			Emit("\t\tAOT_FRAME();");
 		Emit("\t\tAOT_SYNC(%u);", pos);
 		Emit("\t\tctx->m_status = asEXECUTION_FINISHED;");
 		Emit("\t\treturn 1;");
@@ -525,27 +683,27 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		Emit("\tregs->stackPointer = (asDWORD*)s_[3] + %u;", W0);
 		Emit("\tctx->m_stackIndex = (int)s_[4];");
 		Emit("\tctx->m_callStack.SetLengthNoAllocate(l_ - CALLSTACK_FRAME_SIZE);");
-		Emit("\tregs->valueRegister = vr.q;");
+		Emit("\tregs->valueRegister = vr;");
 		Emit("\treturn 0;");
 		Emit("}");
 		break;
 
 	case asBC_JMP:    Emit("goto L_%d;", instr.target); break;
-	case asBC_JZ:     Emit("if( vr.i32 == 0 ) goto L_%d;", instr.target); break;
-	case asBC_JNZ:    Emit("if( vr.i32 != 0 ) goto L_%d;", instr.target); break;
-	case asBC_JS:     Emit("if( vr.i32 < 0 ) goto L_%d;", instr.target); break;
-	case asBC_JNS:    Emit("if( vr.i32 >= 0 ) goto L_%d;", instr.target); break;
-	case asBC_JP:     Emit("if( vr.i32 > 0 ) goto L_%d;", instr.target); break;
-	case asBC_JNP:    Emit("if( vr.i32 <= 0 ) goto L_%d;", instr.target); break;
-	case asBC_JLowZ:  Emit("if( vr.bytes[0] == 0 ) goto L_%d;", instr.target); break;
-	case asBC_JLowNZ: Emit("if( vr.bytes[0] != 0 ) goto L_%d;", instr.target); break;
+	case asBC_JZ:     Emit("if( (int)AOT_GETVR(asDWORD) == 0 ) goto L_%d;", instr.target); break;
+	case asBC_JNZ:    Emit("if( (int)AOT_GETVR(asDWORD) != 0 ) goto L_%d;", instr.target); break;
+	case asBC_JS:     Emit("if( (int)AOT_GETVR(asDWORD) < 0 ) goto L_%d;", instr.target); break;
+	case asBC_JNS:    Emit("if( (int)AOT_GETVR(asDWORD) >= 0 ) goto L_%d;", instr.target); break;
+	case asBC_JP:     Emit("if( (int)AOT_GETVR(asDWORD) > 0 ) goto L_%d;", instr.target); break;
+	case asBC_JNP:    Emit("if( (int)AOT_GETVR(asDWORD) <= 0 ) goto L_%d;", instr.target); break;
+	case asBC_JLowZ:  Emit("if( AOT_GETVR(asBYTE) == 0 ) goto L_%d;", instr.target); break;
+	case asBC_JLowNZ: Emit("if( AOT_GETVR(asBYTE) != 0 ) goto L_%d;", instr.target); break;
 
-	case asBC_TZ:     Emit("AOT_TEST(vr.i32 == 0);"); break;
-	case asBC_TNZ:    Emit("AOT_TEST(vr.i32 != 0);"); break;
-	case asBC_TS:     Emit("AOT_TEST(vr.i32 < 0);"); break;
-	case asBC_TNS:    Emit("AOT_TEST(vr.i32 >= 0);"); break;
-	case asBC_TP:     Emit("AOT_TEST(vr.i32 > 0);"); break;
-	case asBC_TNP:    Emit("AOT_TEST(vr.i32 <= 0);"); break;
+	case asBC_TZ:     Emit("AOT_TEST((int)AOT_GETVR(asDWORD) == 0);"); break;
+	case asBC_TNZ:    Emit("AOT_TEST((int)AOT_GETVR(asDWORD) != 0);"); break;
+	case asBC_TS:     Emit("AOT_TEST((int)AOT_GETVR(asDWORD) < 0);"); break;
+	case asBC_TNS:    Emit("AOT_TEST((int)AOT_GETVR(asDWORD) >= 0);"); break;
+	case asBC_TP:     Emit("AOT_TEST((int)AOT_GETVR(asDWORD) > 0);"); break;
+	case asBC_TNP:    Emit("AOT_TEST((int)AOT_GETVR(asDWORD) <= 0);"); break;
 
 	case asBC_NEGi:   Put(SetVar("u32", SW0, "0u - " + Var("u32", SW0))); break;
 	case asBC_NEGf:   Put(SetVar("f32", SW0, "-" + Var("f32", SW0))); break;
@@ -663,9 +821,9 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_CMPi64: COMPARE("asINT64", "i64"); break;
 	case asBC_CMPu64: COMPARE("asQWORD", "u64"); break;
 	case asBC_CmpPtr: COMPARE("asPWORD", "pw"); break;
-	case asBC_CMPIi:  Emit("vr.i32 = aot_cmp<int>(%s, %s);", Var("i32", SW0).c_str(), IntLiteral(int(DW1)).c_str()); break;
-	case asBC_CMPIf:  Emit("vr.i32 = aot_cmp<float>(%s, aot_f32bits(0x%08xu));", Var("f32", SW0).c_str(), DW1); break;
-	case asBC_CMPIu:  Emit("vr.i32 = aot_cmp<asDWORD>(%s, %uu);", Var("u32", SW0).c_str(), DW1); break;
+	case asBC_CMPIi:  Emit("AOT_SETVR(asDWORD, aot_cmp<int>(%s, %s));", Var("i32", SW0).c_str(), IntLiteral(int(DW1)).c_str()); break;
+	case asBC_CMPIf:  Emit("AOT_SETVR(asDWORD, aot_cmp<float>(%s, aot_f32bits(0x%08xu)));", Var("f32", SW0).c_str(), DW1); break;
+	case asBC_CMPIu:  Emit("AOT_SETVR(asDWORD, aot_cmp<asDWORD>(%s, %uu));", Var("u32", SW0).c_str(), DW1); break;
 
 	case asBC_JMPP:
 		{
@@ -680,8 +838,8 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		}
 		break;
 
-	case asBC_PopRPtr: Emit("vr.pw = AOT_S(pw, 0); sp += %d;", P); break;
-	case asBC_PshRPtr: Emit("sp -= %d; AOT_S(pw, 0) = vr.pw;", P); break;
+	case asBC_PopRPtr: Emit("AOT_SETVR(asPWORD, AOT_S(pw, 0)); sp += %d;", P); break;
+	case asBC_PshRPtr: Emit("sp -= %d; AOT_S(pw, 0) = AOT_GETVR(asPWORD);", P); break;
 	case asBC_STR:     Put(Bail()); break;
 
 	case asBC_CALLSYS:
@@ -693,9 +851,8 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_CALLBND:
-	case asBC_CALLINTF:
 		EmitSync();
-		Emit("if( JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit) )", instr.op == asBC_CALLBND ? "JIT_CALL_BOUND" : "JIT_CALL_INTERFACE", pos + 1);
+		Emit("if( JIT_CallScript(regs, JIT_CALL_BOUND, AOT_INT(%u), 0, callLimit) )", pos + 1);
 		Emit("\treturn 1;");
 		Emit("AOT_RELOAD();");
 		EmitReload();
@@ -788,11 +945,11 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 
 	case asBC_CpyVtoV4: Put(SetVar("u32", SW0, Var("u32", SW1))); break;
 	case asBC_CpyVtoV8: Put(SetVar("u64", SW0, Var("u64", SW1))); break;
-	case asBC_CpyVtoR4: Emit("vr.u32 = %s;", Var("u32", SW0).c_str()); break;
-	case asBC_CpyVtoR8: Emit("vr.q = %s;", Var("u64", SW0).c_str()); break;
+	case asBC_CpyVtoR4: Emit("AOT_SETVR(asDWORD, %s);", Var("u32", SW0).c_str()); break;
+	case asBC_CpyVtoR8: Emit("vr = %s;", Var("u64", SW0).c_str()); break;
 	case asBC_CpyVtoG4: Emit("*(aot_u32*)AOT_PW(%u) = %s;", pos + 1, Var("u32", SW0).c_str()); break;
-	case asBC_CpyRtoV4: Put(SetVar("u32", SW0, "vr.u32")); break;
-	case asBC_CpyRtoV8: Put(SetVar("u64", SW0, "vr.q")); break;
+	case asBC_CpyRtoV4: Put(SetVar("u32", SW0, "AOT_GETVR(asDWORD)")); break;
+	case asBC_CpyRtoV8: Put(SetVar("u64", SW0, "vr")); break;
 	case asBC_CpyGtoV4: Put(SetVar("u32", SW0, Format("*(aot_u32*)AOT_PW(%u)", pos + 1))); break;
 
 	case asBC_WRTV1:    Emit("AOT_R(u8) = %s;", Var("u8", SW0).c_str()); break;
@@ -803,8 +960,8 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_RDR2:     Put(SetVarLow("u16", SW0, "AOT_R(u16)")); break;
 	case asBC_RDR4:     Put(SetVar("u32", SW0, "AOT_R(u32)")); break;
 	case asBC_RDR8:     Put(SetVar("u64", SW0, "AOT_R(u64)")); break;
-	case asBC_LDG:      Emit("vr.pw = AOT_PW(%u);", pos + 1); break;
-	case asBC_LDV:      Emit("vr.p = %s;", VarAddr(SW0).c_str()); break;
+	case asBC_LDG:      Emit("AOT_SETVR(asPWORD, AOT_PW(%u));", pos + 1); break;
+	case asBC_LDV:      Emit("AOT_SETVR(asPWORD, (asPWORD)%s);", VarAddr(SW0).c_str()); break;
 
 	// Conversions, like the VM
 	case asBC_iTOf:   Put(SetVar("f32", SW0, "(float)" + Var("i32", SW0))); break;
@@ -842,9 +999,9 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_ClrHi:    Emit("AOT_CLRHI();"); break;
 	case asBC_JitEntry: break;
 
-	case asBC_LoadThisR: Emit("{ asPWORD t_ = %s; if( t_ == 0 ) %s vr.pw = t_ + (asPWORD)(ptrdiff_t)%d; }", Var("pw", 0).c_str(), Bail().c_str(), SW0); break;
-	case asBC_LoadRObjR: Emit("{ asPWORD t_ = %s; if( t_ == 0 ) %s vr.pw = t_ + (asPWORD)(ptrdiff_t)%d; }", Var("pw", SW0).c_str(), Bail().c_str(), SW1); break;
-	case asBC_LoadVObjR: Emit("vr.pw = (asPWORD)%s + (asPWORD)(ptrdiff_t)%d;", VarAddr(SW0).c_str(), SW1); break;
+	case asBC_LoadThisR: Emit("{ asPWORD t_ = %s; if( t_ == 0 ) %s AOT_SETVR(asPWORD, t_ + (asPWORD)(ptrdiff_t)%d); }", Var("pw", 0).c_str(), Bail().c_str(), SW0); break;
+	case asBC_LoadRObjR: Emit("{ asPWORD t_ = %s; if( t_ == 0 ) %s AOT_SETVR(asPWORD, t_ + (asPWORD)(ptrdiff_t)%d); }", Var("pw", SW0).c_str(), Bail().c_str(), SW1); break;
+	case asBC_LoadVObjR: Emit("AOT_SETVR(asPWORD, (asPWORD)%s + (asPWORD)(ptrdiff_t)%d);", VarAddr(SW0).c_str(), SW1); break;
 
 	case asBC_AllocMem:    Put(SetVar("pw", SW0, Format("(asPWORD)JIT_AllocMem(%uu)", DW1))); break;
 	case asBC_SetListSize: Emit("*(aot_u32*)((asBYTE*)%s + %u) = %uu;", Var("pw", SW0).c_str(), DW1, DW2); break;
