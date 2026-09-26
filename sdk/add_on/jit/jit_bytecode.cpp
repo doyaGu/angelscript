@@ -194,10 +194,10 @@ int CJITByteCode::Decode(asCScriptFunction *func)
 		SJITInstr &instr = m_instrs[n];
 
 		// The compiler removes the SUSPEND for the first line of a function as the
-		// line callback is already invoked when the function is entered. With JIT
-		// instructions enabled a JitEntry in between stops it from doing so when
-		// the line has more than one statement, which would invoke the callback
-		// twice for the same line. Such leading SUSPENDs are skipped here
+		// line callback is already invoked when the function is entered. Older
+		// versions of the engine kept it after the JitEntry at the start of the
+		// function, e.g. in the bytecode saved by them, which would invoke the
+		// callback twice for the same line. Such leading SUSPENDs are skipped here
 		if( instr.op == asBC_SUSPEND && leading && (func->GetLineNumber(int(instr.pos), 0) & 0xFFFFF) == entryLine )
 			instr.flags |= JIT_INSTR_SKIP;
 		else if( instr.op != asBC_JitEntry )

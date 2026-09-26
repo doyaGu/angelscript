@@ -1502,9 +1502,11 @@ void asCByteCode::ExtractLineNumbers()
 			lineNumbers.PushLast(*(int*)ARG_DW(curr->arg));
 			sectionIdxs.PushLast(*((int*)ARG_DW(curr->arg)+1));
 
-			// Check if this is the first instruction in the function
+			// Check if this is the first instruction in the function. The JitEntry at the
+			// start of the function doesn't count either, or the line callback would be
+			// called twice for the first line when the JIT instructions are included
 			asCByteInstruction* c = curr->prev;
-			while (c && (c->op == asBC_VarDecl || c->op == asBC_ObjInfo))
+			while (c && (c->op == asBC_VarDecl || c->op == asBC_ObjInfo || c->op == asBC_JitEntry))
 				c = c->prev;
 
 			if (c == 0)
