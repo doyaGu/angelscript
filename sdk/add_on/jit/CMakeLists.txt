@@ -7,6 +7,7 @@ set(AS_JIT_ASMJIT_DIR "" CACHE PATH "Path to a local AsmJit source tree (leave e
 set(AS_JIT_ASMJIT_REPOSITORY "https://github.com/asmjit/asmjit.git" CACHE STRING "AsmJit git repository")
 set(AS_JIT_ASMJIT_TAG "dffd8b164f228abbc47246c9881f107d656952b2" CACHE STRING "AsmJit git revision")
 option(AS_JIT_LOGGING "Include support for logging the generated code (increases binary size)" ON)
+set(AS_JIT_AOT_DIR "" CACHE PATH "Directory with the C++ code generated ahead of time by CJITCompiler::WriteAOTOutput to build into the library")
 
 if(NOT TARGET asmjit::asmjit)
     set(ASMJIT_STATIC ON CACHE BOOL "" FORCE)
@@ -61,8 +62,21 @@ add_library(angelscript_jit STATIC
 target_compile_features(angelscript_jit PUBLIC cxx_std_20)
 target_include_directories(angelscript_jit
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/../../angelscript/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../angelscript/source)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../angelscript/source ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(angelscript_jit PUBLIC ${ANGELSCRIPT_LIBRARY_NAME} PRIVATE asmjit::asmjit)
+
+# The generated code includes jit_aot_runtime.h, and the application gets its table
+# for CJITCompiler::AddAOTFunctions with AS_JIT_AOT_TABLE
+if(AS_JIT_AOT_DIR)
+    file(GLOB AS_JIT_AOT_SOURCES CONFIGURE_DEPENDS ${AS_JIT_AOT_DIR}/*.cpp)
+    target_sources(angelscript_jit PRIVATE ${AS_JIT_AOT_SOURCES})
+    if(MSVC)
+        set_source_files_properties(${AS_JIT_AOT_SOURCES} PROPERTIES COMPILE_OPTIONS /bigobj)
+    endif()
+    if(EXISTS ${AS_JIT_AOT_DIR}/jit_aot_functions.cpp)
+        target_compile_definitions(angelscript_jit PUBLIC AS_JIT_AOT_TABLE)
+    endif()
+endif()
 if(AS_NO_EXCEPTIONS)
     target_compile_definitions(angelscript_jit PRIVATE AS_NO_EXCEPTIONS)
 endif()
