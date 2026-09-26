@@ -170,37 +170,38 @@ Measured on an Intel Core i9-14900K with the 64bit release build from Visual
 Studio 2022. With the JIT compiler the tests Call and Call2 call the script
 functions through \ref CJITCompiler::Prepare and \ref CJITCompiler::Execute. Calls
 between script functions are made natively, which is what speeds up Fib, and the
-methods that Intf and Mthd call are compiled in place. RetObj.1, RetObj.2, and
-Array.1 spend much of their time allocating the objects they create, which the
-pooled memory functions speed up.
+methods that Intf and Mthd call are compiled in place. The function that RetObj.3
+calls is compiled in place too, and borrows the reference of the handle that it
+gets. RetObj.1, RetObj.2, and Array.1 spend much of their time allocating the
+objects they create, which the pooled memory functions speed up.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool
 Basic          0.252    0.085      0.027    0.027
 Basic2         0.092    0.005      0.005    0.005
-Call           0.278    0.120      0.123    0.115
-Call2          0.368    0.194      0.195    0.182
-Fib            0.370    0.087      0.085    0.084
-Int            0.055    0.021      0.006    0.006
+Call           0.278    0.125      0.124    0.127
+Call2          0.368    0.185      0.184    0.195
+Fib            0.370    0.086      0.084    0.087
+Int            0.055    0.020      0.006    0.006
 Intf           0.124    0.006      0.006    0.006
-Mthd           0.123    0.006      0.006    0.006
-String         0.229    0.212      0.131    0.121
-String2        0.152    0.120      0.065    0.063
-StringPooled   0.155    0.126      0.044    0.042
+Mthd           0.123    0.006      0.006    0.005
+String         0.229    0.202      0.126    0.127
+String2        0.152    0.103      0.058    0.058
+StringPooled   0.155    0.119      0.043    0.042
 ThisProp       0.214    0.017      0.017    0.017
-Vector3        0.089    0.075      0.013    0.013
+Vector3        0.089    0.072      0.013    0.012
 Assign.1       0.114    0.008      0.008    0.008
 Assign.2       0.241    0.008      0.008    0.008
-Assign.3       0.170    0.011      0.010    0.011
-Assign.4       0.207    0.016      0.016    0.015
-Assign.5       0.208    0.016      0.016    0.015
-Array.1        0.310    0.182      0.148    0.095
-Array.2        0.148    0.070      0.032    0.031
-GlobalVar      0.089    0.034      0.016    0.015
-ClassProp      0.140    0.039      0.018    0.018
-RetObj.1       0.328    0.222      0.230    0.135
-RetObj.2       0.204    0.142      0.144    0.094
-RetObj.3       0.078    0.032      0.032    0.029
+Assign.3       0.170    0.011      0.011    0.011
+Assign.4       0.207    0.016      0.016    0.016
+Assign.5       0.208    0.016      0.016    0.016
+Array.1        0.310    0.189      0.145    0.099
+Array.2        0.148    0.076      0.032    0.032
+GlobalVar      0.089    0.036      0.016    0.016
+ClassProp      0.140    0.041      0.018    0.018
+RetObj.1       0.328    0.228      0.225    0.136
+RetObj.2       0.204    0.111      0.111    0.068
+RetObj.3       0.078    0.004      0.003    0.004
 </pre>
 
 The 32bit x86 build gains as much or more, as the interpreter is slower there.
@@ -273,7 +274,11 @@ when it calls registered functions, releases objects, or calls the script
 functions that aren't compiled in place, the call states of the inlined functions
 are created and the VM and the called functions see the same call stack as
 without the inlining. The registered function calls and releases that follow each
-other share the call states.
+other share the call states. The functions compiled in place that only read or
+release the handles passed to them borrow the references of the caller on 64bit
+hosts, where the variable passed holds a reference that nothing changes until the
+function returns, instead of adding and releasing references of their own. They
+only get references of their own where the VM takes over their call states.
 \ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
 compiled in place.
 

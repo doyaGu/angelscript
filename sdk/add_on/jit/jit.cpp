@@ -29,6 +29,10 @@
 //    unwind information on the platforms besides 64bit Windows and Linux (jit_unwind.h).
 //  - Inline reference counting for script objects in REFCPY/FREE, instead of calling their
 //    AddRef and Release behaviours (jit_codegen_call.cpp, EmitObjectOp).
+//  - Borrow the references of the handle arguments on 32bit hosts, whose call states have
+//    no room to note the borrowed parameters, and for the calls that aren't inlined, which
+//    would need entry points of the callees that don't release the parameters
+//    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots).
 //  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer
