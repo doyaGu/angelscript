@@ -1188,6 +1188,16 @@ void asCByteCode::Optimize()
 					// Delete the first instruction
 					instr = GoBack(DeleteInstruction(curr));
 				}
+				// LINE, JitEntry, VarDecl, LINE -> VarDecl, LINE
+				// LINE, JitEntry, Block, LINE -> Block, LINE
+				// As without the JIT instructions, or the line callback would be called for both lines
+				else if( instrOp == asBC_JitEntry && instr->next && (instr->next->op == asBC_VarDecl || instr->next->op == asBC_Block) &&
+				         instr->next->next && instr->next->next->op == asBC_LINE )
+				{
+					// Delete the two first instructions
+					DeleteInstruction(instr);
+					instr = GoBack(DeleteInstruction(curr));
+				}
 				// LINE, LINE -> LINE
 				else if( instrOp == asBC_LINE )
 				{
