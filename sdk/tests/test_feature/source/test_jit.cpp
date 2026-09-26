@@ -1833,8 +1833,12 @@ namespace Inlining
 			TEST_FAILED;
 		}
 
+		// The thread may have asked for one more suspension after the last execution
+		// returned, which suspends the next one right away
 		*stop = true;
 		r = ctx->Execute();
+		if( r == asEXECUTION_SUSPENDED )
+			r = ctx->Execute();
 		int expected = 0;
 		for( int n = 0; n < *iters; n++ )
 			expected = (expected * 31 + Work(n, 64)) & 0xFFFFFF;
