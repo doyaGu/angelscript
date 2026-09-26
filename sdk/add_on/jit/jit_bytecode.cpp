@@ -19,6 +19,7 @@ CJITByteCode::CJITByteCode()
 	m_tempMask   = 0;
 	m_staticStack = false;
 	m_inlinedLength = 0;
+	m_bail = 0;
 	m_hasSyncPoints = false;
 }
 
@@ -260,19 +261,26 @@ int CJITByteCode::Decode(asCScriptFunction *func)
 	if( m_entries.empty() )
 		return asNOT_SUPPORTED;
 
-	MarkUnreachable();
+	MarkUnreachable(false);
 
 	return asSUCCESS;
 }
 
-// Marks the instructions that can never be executed, e.g. the jump tables of
-// switch statements that are only reached through JMPP, so that no code is
-// generated for them
-void CJITByteCode::MarkUnreachable()
+// Marks the instructions that can never be executed natively, e.g. the jump tables
+// of switch statements that are only reached through JMPP, so that no code is
+// generated for them. Neither is anything that only follows the instructions that
+// always return to the VM, which executes it until it enters the function again at
+// one of the entry points. Nothing enters the inlined functions but at their start
+void CJITByteCode::MarkUnreachable(bool inlined)
 {
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+		m_instrs[n].flags &= ~JIT_INSTR_DEAD;
+
 	// Native callers enter at the start of the function, see CJITCodeGen::EmitDirectEntry
 	std::vector<bool> reached(m_instrs.size(), false);
-	std::vector<asUINT> work(m_entries.begin(), m_entries.end());
+	std::vector<asUINT> work;
+	if( !inlined )
+		work.assign(m_entries.begin(), m_entries.end());
 	work.push_back(0);
 
 	while( !work.empty() )
@@ -284,6 +292,8 @@ void CJITByteCode::MarkUnreachable()
 		reached[n] = true;
 
 		const SJITInstr &instr = m_instrs[n];
+		if( instr.flags & JIT_INSTR_BAIL )
+			continue;
 		if( instr.op == asBC_JMPP )
 		{
 			const std::vector<int> &targets = GetSwitchTargets(n);
@@ -321,11 +331,10 @@ const std::vector<int> &CJITByteCode::GetSwitchTargets(asUINT instrIdx) const
 
 void CJITByteCode::SetBailInstructions(const bool bail[asBC_MAXBYTECODE])
 {
+	m_bail = bail;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 		if( bail[m_instrs[n].op] )
 			m_instrs[n].flags |= JIT_INSTR_BAIL;
-	for( std::map<asUINT, std::shared_ptr<CJITByteCode> >::iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
-		it->second->SetBailInstructions(bail);
 }
 
 const CJITByteCode *CJITByteCode::GetInlinee(asUINT instrIdx) const
@@ -616,6 +625,9 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 					callee.reset();
 				else
 				{
+					if( m_bail )
+						callee->SetBailInstructions(m_bail);
+					callee->MarkUnreachable(true);
 					callee->AnalyseStackDepth();
 					if( !callee->HasStaticStack() )
 						callee.reset();
@@ -646,6 +658,8 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 
 void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining)
 {
+	// The instructions returning to the VM may have been set since the decoding
+	MarkUnreachable(false);
 	AnalyseStackDepth();
 	m_inlinees.clear();
 	m_inlineObjTypes.clear();

@@ -298,8 +298,8 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	inlining.maxSize     = (m_impl->flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : m_impl->maxInlineSize;
 	inlining.filter      = m_impl->filter;
 	inlining.filterParam = m_impl->filterParam;
-	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots, &inlining);
 	code.SetBailInstructions(m_impl->bailOps);
+	code.Analyse((m_impl->flags & JIT_NO_REGISTER_CACHE) == 0, maxCachedSlots, &inlining);
 
 	bool log = (m_impl->flags & JIT_LOG) && m_impl->logFile &&
 	           (m_impl->logFilter.empty() || strstr(func->GetDeclaration(true, true), m_impl->logFilter.c_str()) != 0);

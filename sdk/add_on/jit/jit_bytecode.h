@@ -196,7 +196,8 @@ public:
 	// inline it are handed to the VM, see CJITCodeGen::EmitMaterialize
 	bool   HasSyncPoints() const { return m_hasSyncPoints; }
 
-	// Marks instructions that must return to the VM, also in the inlined functions
+	// Marks instructions that must return to the VM. Must be called before Analyse,
+	// which marks them in the inlined functions too
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
 
 	// Classification of the instructions
@@ -206,7 +207,7 @@ public:
 	static bool WritesVR(asEBCInstr op);
 
 protected:
-	void MarkUnreachable();
+	void MarkUnreachable(bool inlined);
 	void BuildBlocks();
 	void AnalyseVRLiveness();
 	void AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots);
@@ -246,6 +247,7 @@ protected:
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
+	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;
 	bool                    m_retReadsVR;
 	bool                    m_hasSyncPoints;

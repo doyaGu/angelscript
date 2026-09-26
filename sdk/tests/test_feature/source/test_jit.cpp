@@ -1946,6 +1946,8 @@ static bool TestInlining()
 	// that the compiled code skips
 	static const asEBCInstr bailAdd[] = { asBC_ADDi };
 	static const asEBCInstr bailRet[] = { asBC_RET };
+	static const asEBCInstr bailCopy[] = { asBC_RefCpyV };
+	static const asEBCInstr bailFree[] = { asBC_FREE };
 	struct SVariant { const char *name; asDWORD flags; asUINT maxInlineSize; const asEBCInstr *bails; asUINT bailCount; };
 	static const SVariant variants[] =
 	{
@@ -1954,6 +1956,8 @@ static bool TestInlining()
 		{ "small inlined functions",  0,                           16, 0,       0 },
 		{ "bail at ADDi",             0,                           64, bailAdd, 1 },
 		{ "bail at RET",              0,                           64, bailRet, 1 },
+		{ "bail at RefCpyV",          0,                           64, bailCopy, 1 },
+		{ "bail at FREE",             0,                           64, bailFree, 1 },
 	};
 
 	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
