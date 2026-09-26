@@ -5,12 +5,53 @@
 #include "as_scriptfunction.h"
 #include "as_scriptengine.h"
 #include "as_objecttype.h"
+#include "as_callfunc.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 BEGIN_AS_NAMESPACE
+
+// The ABIs whose calls the generated code makes directly, see GetSystemCall, like
+// CJITCodeGen::EmitDirectSystemCall. The class methods are called like functions
+// with the object pointer first, which excludes the thiscall convention of 32bit
+// x86. The hidden pointer for a value returned in memory is passed like the first
+// argument, except after the object pointer of class methods with MSVC. The other
+// compilers for 32bit x86 let the called function pop it, which the calls can't
+// express. AArch64 passes it in a register that isn't used for arguments, and the
+// small classes returned in registers in ways that depend on their members, so the
+// values of registered types aren't returned directly there. The arguments of the
+// calls are all passed in registers there too, as the ABIs of the platforms lay out
+// the ones on the stack differently
+#if defined(AS_MAX_PORTABILITY) || defined(AS_BIG_ENDIAN)
+#elif defined(AS_X64_MSVC)
+#define JIT_AOT_ABI "defined(AS_X64_MSVC)"
+#elif defined(AS_X64_MINGW)
+#define JIT_AOT_ABI "defined(AS_X64_MINGW) && !defined(_MSC_VER)"
+#elif defined(AS_X64_GCC)
+#define JIT_AOT_ABI "defined(AS_X64_GCC) && !defined(_MSC_VER)"
+#elif defined(AS_ARM64)
+#define JIT_AOT_ABI "defined(AS_ARM64)"
+#define JIT_AOT_REGISTER_ARGS 8
+#elif defined(AS_X86) && defined(_MSC_VER)
+#define JIT_AOT_ABI "defined(AS_X86) && defined(_MSC_VER)"
+#elif defined(AS_X86) && defined(THISCALL_PASS_OBJECT_POINTER_ON_THE_STACK)
+#define JIT_AOT_ABI "defined(AS_X86) && !defined(_MSC_VER) && defined(THISCALL_PASS_OBJECT_POINTER_ON_THE_STACK)"
+#elif defined(AS_X86)
+#define JIT_AOT_ABI "defined(AS_X86) && !defined(_MSC_VER) && !defined(THISCALL_PASS_OBJECT_POINTER_ON_THE_STACK)"
+#endif
+
+#if defined(AS_X64_MSVC) || defined(AS_X64_MINGW) || defined(AS_X64_GCC) || defined(AS_ARM64) || \
+	(defined(AS_X86) && defined(THISCALL_PASS_OBJECT_POINTER_ON_THE_STACK) && !defined(_MSC_VER))
+#define JIT_AOT_THISCALL
+#endif
+#if defined(AS_X64_MSVC) || defined(AS_X64_MINGW) || defined(AS_X64_GCC) || (defined(AS_X86) && defined(_MSC_VER))
+#define JIT_AOT_RETURN_IN_MEMORY
+#if defined(_MSC_VER)
+#define JIT_AOT_RETURN_AFTER_THIS
+#endif
+#endif
 
 static std::string FormatV(const char *format, va_list args)
 {
@@ -84,6 +125,147 @@ bool CJITCppGen::CallsScript(asEBCInstr op)
 	return op == asBC_CALL || op == asBC_CALLINTF || op == asBC_CALLBND || op == asBC_CallPtr || op == asBC_ALLOC;
 }
 
+const char *CJITCppGen::GetABI()
+{
+#ifdef JIT_AOT_ABI
+	return JIT_AOT_ABI;
+#else
+	return 0;
+#endif
+}
+
+// With the same restrictions as CJITCodeGen::EmitDirectSystemCall, and those of the
+// ABI, see JIT_AOT_ABI. The arguments are passed as the types of their size, like
+// the engine does, and so are the values returned
+bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCall &call)
+{
+#ifndef JIT_AOT_ABI
+	UNUSED_VAR(engine);
+	UNUSED_VAR(funcId);
+	UNUSED_VAR(call);
+	return false;
+#else
+	if( funcId < 0 || asUINT(funcId) >= engine->scriptFunctions.GetLength() )
+		return false;
+	asCScriptFunction *descr = engine->scriptFunctions[funcId];
+	if( descr == 0 || descr->funcType != asFUNC_SYSTEM || descr->sysFuncIntf == 0 )
+		return false;
+	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+
+	call.obj = SJITSystemCall::OBJ_NONE;
+	switch( sysFunc->callConv )
+	{
+	case ICC_CDECL:
+		break;
+#if AS_PTR_SIZE == 2
+	case ICC_STDCALL:
+		break;
+#endif
+#ifdef JIT_AOT_THISCALL
+	case ICC_THISCALL:
+#endif
+	case ICC_CDECL_OBJFIRST:
+		call.obj = SJITSystemCall::OBJ_FIRST;
+		break;
+	case ICC_CDECL_OBJLAST:
+		call.obj = SJITSystemCall::OBJ_LAST;
+		break;
+	default:
+		return false;
+	}
+
+	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() || sysFunc->auxiliary ||
+		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+		return false;
+	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
+		if( sysFunc->paramAutoHandles[n] )
+			return false;
+
+	// The value returned. A value type returned by value is stored where the caller
+	// pushed the location, by the function itself through the hidden pointer or from
+	// the registers it is returned in
+	const asCDataType &rt = descr->returnType;
+	call.retOnStack  = descr->DoesReturnOnStack();
+	call.retInMemory = call.retOnStack && sysFunc->hostReturnInMemory;
+	call.retAfterObj = false;
+	int retSize;
+	if( call.retInMemory )
+	{
+#ifdef JIT_AOT_RETURN_IN_MEMORY
+#ifdef JIT_AOT_RETURN_AFTER_THIS
+		call.retAfterObj = sysFunc->callConv == ICC_THISCALL;
+#endif
+		call.ret = SJITSystemCall::VALUE_VOID;
+		retSize = AS_PTR_SIZE;
+#else
+		return false;
+#endif
+	}
+#ifdef AS_ARM64
+	else if( call.retOnStack )
+		return false;
+#endif
+	else if( call.retOnStack )
+	{
+		if( sysFunc->hostReturnSize == 1 )
+			call.ret = sysFunc->hostReturnFloat ? SJITSystemCall::VALUE_F32 : SJITSystemCall::VALUE_I32;
+		else if( sysFunc->hostReturnSize == 2 )
+			call.ret = sysFunc->hostReturnFloat ? SJITSystemCall::VALUE_F64 : SJITSystemCall::VALUE_I64;
+		else
+			return false;
+		retSize = sysFunc->hostReturnSize;
+	}
+	else if( rt.GetTokenType() == ttVoid && !rt.IsReference() ) { call.ret = SJITSystemCall::VALUE_VOID;   retSize = 0; }
+	else if( rt.IsReference() )                                 { call.ret = SJITSystemCall::VALUE_PTR;    retSize = AS_PTR_SIZE; }
+	else if( rt.IsObjectHandle() )                              { call.ret = SJITSystemCall::VALUE_HANDLE; retSize = AS_PTR_SIZE; }
+	else if( rt.IsObject() || rt.IsFuncdef() )                  return false;
+	else if( rt.IsFloatType() )                                 { call.ret = SJITSystemCall::VALUE_F32;    retSize = 1; }
+	else if( rt.IsDoubleType() )                                { call.ret = SJITSystemCall::VALUE_F64;    retSize = 2; }
+	else if( rt.GetSizeOnStackDWords() == 2 )                   { call.ret = SJITSystemCall::VALUE_I64;    retSize = 2; }
+	else                                                        { call.ret = SJITSystemCall::VALUE_I32;    retSize = 1; }
+	bool retFloat = call.ret == SJITSystemCall::VALUE_F32 || call.ret == SJITSystemCall::VALUE_F64;
+	if( sysFunc->hostReturnSize != retSize || sysFunc->hostReturnFloat != retFloat )
+		return false;
+
+	// The arguments, as laid out on the stack
+	call.args.clear();
+	int size = 0, intArgs = 0, floatArgs = 0;
+	for( asUINT n = 0; n < descr->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &pt = descr->parameterTypes[n];
+		if( pt.GetTokenType() == ttQuestion )
+			return false;
+		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { call.args.push_back(SJITSystemCall::VALUE_PTR); size += AS_PTR_SIZE; intArgs++; }
+		else if( pt.IsFloatType() )               { call.args.push_back(SJITSystemCall::VALUE_F32); size += 1; floatArgs++; }
+		else if( pt.IsDoubleType() )              { call.args.push_back(SJITSystemCall::VALUE_F64); size += 2; floatArgs++; }
+		else if( pt.GetSizeOnStackDWords() == 2 ) { call.args.push_back(SJITSystemCall::VALUE_I64); size += 2; intArgs++; }
+		else                                      { call.args.push_back(SJITSystemCall::VALUE_I32); size += 1; intArgs++; }
+	}
+	if( size != sysFunc->paramSize )
+		return false;
+#ifdef JIT_AOT_REGISTER_ARGS
+	intArgs += (call.obj != SJITSystemCall::OBJ_NONE ? 1 : 0) + (call.retInMemory ? 1 : 0);
+	if( intArgs > JIT_AOT_REGISTER_ARGS || floatArgs > JIT_AOT_REGISTER_ARGS )
+		return false;
+#else
+	UNUSED_VAR(intArgs);
+	UNUSED_VAR(floatArgs);
+#endif
+	call.popSize = size + (call.obj != SJITSystemCall::OBJ_NONE ? AS_PTR_SIZE : 0) + (call.retOnStack ? AS_PTR_SIZE : 0);
+	return true;
+#endif
+}
+
+// asBC_Thiscall1 calls a method with an int, which returns a reference
+bool CJITCppGen::GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const
+{
+	asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
+	if( !GetSystemCall(engine, asBC_INTARG(instr.bc), call) )
+		return false;
+	return instr.op != asBC_Thiscall1 || (call.obj != SJITSystemCall::OBJ_NONE && !call.retOnStack && call.ret == SJITSystemCall::VALUE_PTR &&
+		call.args.size() == 1 && call.args[0] == SJITSystemCall::VALUE_I32);
+}
+
 void CJITCppGen::Emit(const char *format, ...)
 {
 	va_list args;
@@ -115,7 +297,7 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 
 	// Only the instructions that are jumped to get labels, as unused labels give
 	// warnings. The VM doesn't enter the direct entry
-	bool calls = false;
+	bool calls = false, systemCalls = false;
 	m_labels.assign(instrs.size(), false);
 	for( asUINT n = 0; n < entries.size() && !direct; n++ )
 		m_labels[entries[n]] = true;
@@ -133,6 +315,9 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		}
 		if( CallsScript(instrs[n].op) )
 			calls = true;
+		SJITSystemCall call;
+		if( (instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1) && GetSystemCall(instrs[n], call) )
+			systemCalls = true;
 	}
 
 	EmitEntry(calls);
@@ -183,10 +368,11 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 			text += Format("\t(void)%s;\n", local.name.c_str());
 	}
 
-	// The C++ exceptions of the registered functions that the functions called
-	// natively call directly are caught where the code is entered, like
-	// CallSystemFunction does. The direct entries are called by that code only
-	if( calls && !direct )
+	// The C++ exceptions of the registered functions called directly are caught
+	// where the code is entered, like CallSystemFunction does, which may be in the
+	// functions called directly by the code too. The direct entries are called by
+	// that code only
+	if( (calls || systemCalls) && !direct )
 	{
 		text += "#ifndef AS_NO_EXCEPTIONS\n\ttry\n#endif\n\t{\n";
 		for( size_t pos = 0; pos < m_out.size(); )
@@ -602,6 +788,97 @@ void CJITCppGen::EmitReload(const char *indent)
 		Emit("%s%s", indent, m_reload.c_str());
 }
 
+// Calls the registered function like CallSystemFunction does, see GetSystemCall,
+// with the function pointer cast to the types of the values. A null object pointer is
+// an exception raised by the VM. The VM registers are stored like for the calls
+// through the engine, as the function may raise script exceptions or inspect the
+// context, except the value register, which JIT_AfterDirectCall gets like the VM
+// would, and the variables are loaded again only after it, like the JIT does
+void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
+{
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE };
+	asUINT pos = m_pos;
+	bool obj = call.obj != SJITSystemCall::OBJ_NONE;
+	int retOff = obj ? AS_PTR_SIZE : 0;
+	int off = retOff + (call.retOnStack ? AS_PTR_SIZE : 0);
+
+	std::vector<std::string> params, args;
+	if( call.retInMemory && !call.retAfterObj ) { params.push_back("void*"); args.push_back("r_"); }
+	if( call.obj == SJITSystemCall::OBJ_FIRST ) { params.push_back("void*"); args.push_back("o_"); }
+	if( call.retAfterObj )                      { params.push_back("void*"); args.push_back("r_"); }
+	for( asUINT n = 0; n < call.args.size(); n++ )
+	{
+		int kind = call.args[n];
+		params.push_back(types[kind]);
+		args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
+		off += sizes[kind];
+	}
+	if( call.obj == SJITSystemCall::OBJ_LAST )  { params.push_back("void*"); args.push_back("o_"); }
+	std::string paramList, argList;
+	for( asUINT n = 0; n < params.size(); n++ )
+	{
+		paramList += (n ? ", " : "") + params[n];
+		argList += (n ? ", " : "") + args[n];
+	}
+
+	Emit("{");
+	Emit("\tasCScriptFunction *d_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
+	if( obj )
+	{
+		Emit("\tvoid *o_ = (void*)AOT_S(pw, 0);");
+		Emit("\tif( o_ == 0 )");
+		Emit("\t\t%s", Bail().c_str());
+	}
+	if( call.retOnStack )
+		Emit("\tvoid *r_ = (void*)AOT_S(pw, %d);", retOff);
+	Put(m_sync.empty() ? "" : "\t" + m_sync);
+	if( m_frame )
+		Emit("\tAOT_FRAME();");
+	Emit("\tregs->programPointer = bc + %u;", pos);
+	Emit("\tregs->stackPointer = sp;");
+	Emit("\tctx->m_callingSystemFunction = d_;");
+	std::string func = Format("((%s (AOT_CDECL*)(%s))d_->sysFuncIntf->func)(%s)", types[call.ret], paramList.c_str(), argList.c_str());
+	if( call.ret == SJITSystemCall::VALUE_VOID )
+		Emit("\t%s;", func.c_str());
+	else
+		Emit("\t%s x_ = %s;", types[call.ret], func.c_str());
+	Emit("\tctx->m_callingSystemFunction = 0;");
+	Emit("\tsp += %d;", call.popSize);
+
+	// The value is stored like the VM does, but the value register only if it is read
+	bool vrLive = m_code.IsVRLiveAfter(idx);
+	if( call.retOnStack && call.ret != SJITSystemCall::VALUE_VOID )
+		Emit("\t*(aot_%s*)r_ = x_;", stack[call.ret]);
+	else if( call.ret == SJITSystemCall::VALUE_HANDLE )
+	{
+		Emit("\tregs->objectRegister = x_;");
+		Emit("\tregs->objectType = d_->returnType.GetTypeInfo();");
+	}
+	else if( vrLive ) switch( call.ret )
+	{
+	case SJITSystemCall::VALUE_I32: Emit("\tAOT_SETVR(asDWORD, x_);"); break;
+	case SJITSystemCall::VALUE_I64: Emit("\tvr = x_;"); break;
+	case SJITSystemCall::VALUE_F32: Emit("\tAOT_SETVR(asDWORD, aot_bits32(x_));"); break;
+	case SJITSystemCall::VALUE_F64: Emit("\tvr = aot_bits64(x_);"); break;
+	case SJITSystemCall::VALUE_PTR: Emit("\tAOT_SETVR(asPWORD, (asPWORD)x_);"); break;
+	default: break;
+	}
+
+	// Exceptions, suspend requests, and line callbacks
+	Emit("\tif( AOT_SUSPENDING() )");
+	Emit("\t{");
+	Emit("\t\tregs->stackPointer = sp;");
+	if( vrLive )
+		Emit("\t\tregs->valueRegister = vr;");
+	Emit("\t\tif( JIT_AfterDirectCall(regs, AOT_INT(%u), %s) )", pos + 1, call.retOnStack ? "r_" : "0");
+	Emit("\t\t\treturn 1;");
+	EmitReload("\t\t");
+	Emit("\t}");
+	Emit("}");
+}
+
 bool CJITCppGen::EmitInstr(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -854,6 +1131,14 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_STR:     Put(Bail()); break;
 
 	case asBC_CALLSYS:
+		{
+			SJITSystemCall call;
+			if( GetSystemCall(instr, call) )
+			{
+				EmitSystemCall(idx, call);
+				break;
+			}
+		}
 		EmitSync();
 		Emit("if( JIT_CallSystem(regs, AOT_INT(%u)) )", pos + 1);
 		Emit("\treturn 1;");
@@ -1044,6 +1329,14 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_Thiscall1:
+		{
+			SJITSystemCall call;
+			if( GetSystemCall(instr, call) )
+			{
+				EmitSystemCall(idx, call);
+				break;
+			}
+		}
 		Emit("if( AOT_S(pw, 0) == 0 )");
 		Emit("\t%s", Bail().c_str());
 		EmitSync();

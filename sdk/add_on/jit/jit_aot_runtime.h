@@ -13,6 +13,7 @@
 #include "as_scriptfunction.h"
 #include "as_objecttype.h"
 #include "as_scriptobject.h"
+#include "as_callfunc.h"
 #include "jit.h"
 #include "jit_runtime.h"
 
@@ -86,6 +87,16 @@ typedef asPWORD     aot_pw;
 
 // The registers after a call, which the called function or the helper has updated
 #define AOT_RELOAD() (sp = regs->stackPointer, vr = regs->valueRegister)
+
+// The calling convention of the registered functions that the code calls directly,
+// see CJITCppGen::GetSystemCall, in case the default is another one
+#if defined(AS_X86) && defined(_MSC_VER)
+#define AOT_CDECL __cdecl
+#elif defined(AS_X86) && defined(__GNUC__)
+#define AOT_CDECL __attribute__((cdecl))
+#else
+#define AOT_CDECL
+#endif
 
 // Booleans. The VM writes the byte of a boolean and clears the rest of the dword,
 // or of the value register for the tests

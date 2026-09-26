@@ -8,6 +8,8 @@
 
 BEGIN_AS_NAMESPACE
 
+class asCScriptEngine;
+
 // Translates the decoded bytecode of one function to a C++ function with the
 // signature JITFunction, which the AOT output compiles into the application, see
 // CJITCompiler::SetAOTOutput. The code executes each instruction like the VM does,
@@ -37,6 +39,22 @@ BEGIN_AS_NAMESPACE
 const char JIT_CPPGEN_REGION     = '\x01';
 const char JIT_CPPGEN_REGION_END = '\x02';
 
+// A call of a registered function that the generated code makes directly, instead of
+// through the engine, see CJITCppGen::GetSystemCall
+struct SJITSystemCall
+{
+	enum { OBJ_NONE, OBJ_FIRST, OBJ_LAST };
+	enum { VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE };
+
+	int              obj;         // where the object pointer is passed
+	bool             retOnStack;  // the value is returned to the location on the stack
+	bool             retInMemory; // through the hidden pointer, which is passed first,
+	bool             retAfterObj; // or after the object pointer
+	int              ret;         // the kind of the value returned, VALUE_VOID for retInMemory
+	std::vector<int> args;        // the kinds of the arguments, not VALUE_VOID or VALUE_HANDLE
+	int              popSize;     // dwords popped off the stack
+};
+
 class CJITCppGen
 {
 public:
@@ -58,6 +76,15 @@ public:
 	// execute natively
 	static bool CallsScript(asEBCInstr op);
 
+	// Returns true if the code calls the registered function directly, for
+	// asBC_CALLSYS and asBC_Thiscall1, and how. The code must be compiled for the ABI of
+	// the host, see GetABI
+	static bool GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCall &call);
+
+	// The condition on the macros of as_config.h that the code checks, which gives the
+	// ABI of the direct calls, or null if the code makes none
+	static const char *GetABI();
+
 protected:
 	// A variable kept in a local variable
 	struct SLocal
@@ -77,6 +104,8 @@ protected:
 	void EmitSync(const char *indent = "");
 	void EmitReload(const char *indent = "");
 	void EmitScriptCall(const SJITInstr &instr);
+	void EmitSystemCall(asUINT idx, const SJITSystemCall &call);
+	bool GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const;
 
 	static asCScriptFunction *FindCallee(asCScriptFunction *func, bool virtualCall);
 
