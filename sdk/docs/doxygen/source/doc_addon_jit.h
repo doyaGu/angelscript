@@ -109,7 +109,10 @@ the calling convention at runtime. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.
 The handles copied from the temporary variables that are released right after,
 for example the result of p.next in @p = p.next, are moved instead, so no
-reference is added and released for them. A C++ exception thrown by a function called
+reference is added and released for them. On x86 the generated code counts the
+references of the script classes itself, the same way as the engine does, and
+only calls their AddRef and Release when an object loses its last reference or
+is resurrected while it is being destroyed. A C++ exception thrown by a function called
 this way is still caught and turned into a script exception like with the VM. For
 that the exception must be able to pass through the generated code, which needs
 unwind information for it. The add-on registers the unwind information on 64bit
