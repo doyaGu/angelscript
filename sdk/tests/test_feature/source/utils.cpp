@@ -533,6 +533,17 @@ asIScriptEngine *CreateEngineWithJit(asDWORD version)
 		if( filter )
 			g_jit->SetLogFile(stdout, filter);
 
+		// AS_JIT_THRESHOLDS=calls[,iterations] compiles the functions when they have been
+		// called that many times, or when a loop has run that many iterations
+		const char *thresholds = getenv("AS_JIT_THRESHOLDS");
+		if( thresholds )
+		{
+			char *end;
+			asUINT calls = asUINT(strtoul(thresholds, &end, 0));
+			asUINT iterations = *end == ',' ? asUINT(strtoul(end + 1, 0, 0)) : 0;
+			g_jit->SetCompileThresholds(calls, iterations);
+		}
+
 		// AS_JIT_AOT_OUTPUT names a directory for the C++ code of the compiled functions,
 		// which the build with the CMake option AS_JIT_AOT_DIR set to it uses. The flag
 		// 0x100 in AS_JIT_FLAGS then leaves the other functions to the VM
@@ -586,8 +597,8 @@ void ReleaseJitCompiler()
 	if( g_jit )
 	{
 		SJITStatistics stats = g_jit->GetStatistics();
-		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined, %d ahead of time\n",
-			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined, stats.functionsAOT);
+		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined, %d ahead of time, %d deferred\n",
+			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined, stats.functionsAOT, stats.functionsDeferred);
 		if( getenv("AS_JIT_AOT_OUTPUT") && g_jit->WriteAOTOutput() < 0 )
 			PRINTF("JIT: the code generated ahead of time could not be written\n");
 		delete g_jit;
