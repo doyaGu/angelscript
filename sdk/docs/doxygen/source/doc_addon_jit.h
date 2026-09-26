@@ -121,15 +121,17 @@ references of the script classes itself, the same way as the engine does, and
 only calls their AddRef and Release when an object loses its last reference or
 is resurrected while it is being destroyed. The initialization lists that hold only
 primitives, enums, or value types without a destructor are freed without going
-through their elements. A C++ exception thrown by a function called this way is still caught and turned into a script exception like with the VM. For
-that the exception must be able to pass through the generated code, which needs
-unwind information for it. The add-on registers the unwind information on 64bit
-Windows and 64bit Linux, and 32bit Windows with MSVC doesn't need any. On other
-platforms the direct calls are only made when the library is compiled with
+through their elements. A C++ exception thrown by a function called this way is
+still caught and turned into a script exception like with the VM. For that the
+exception must be able to pass through the generated code, which needs unwind
+information for it. The add-on registers the unwind information on 64bit Windows
+and 64bit Linux, and 32bit Windows with MSVC doesn't need any. On other platforms
+the direct calls are only made when the library is compiled with
 AS_NO_EXCEPTIONS, or when the \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is
 set, in which case a C++ exception thrown by a registered function that was
 called directly terminates the application.
-\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off.
+\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off. Neither
+flag applies to the code generated ahead of time, see \ref doc_addon_jit_aot.
 
 The application can call the script functions through \ref CJITCompiler::Prepare
 and \ref CJITCompiler::Execute instead of the methods of the context with the same
@@ -221,19 +223,35 @@ code of two different functions get the same key, which is very unlikely with 12
 bits, neither is written and a warning is sent to the message callback.
 
 The generated functions call each other and the JIT compiled functions natively,
-and are called natively by them. Exceptions, suspension, line callbacks, and the
-rest work the same way as with the JIT compiled functions. Like the add-on, the
-generated code includes the internal headers of the library, so it must be compiled
-with the same options as the library.
+and are called natively by them. Like the JIT compiled functions they call the
+registered functions directly, count the references of the script classes
+themselves, move the handles out of the temporary variables, free the plain
+initialization lists without going through their elements, and create the
+objects of the script classes without the VM. They make the direct calls on every
+platform whose calling convention they know, regardless of the flags for the
+direct system calls, as the C++ compiler provides the unwind information for them
+and they catch the C++ exceptions themselves where they are entered from the VM or
+the application. Exceptions, suspension, line callbacks, and the rest work the
+same way as with the JIT compiled functions. Like the add-on, the generated code
+includes the internal headers of the library, so it must be compiled with the
+same options as the library.
+
+As the direct calls depend on the calling convention, the code must be generated
+by a build of the application for the same pointer size and calling convention
+as the build it is compiled into, e.g. by any 64bit ARM build for iOS. Each file
+checks the macros of as_config.h for this, and doesn't compile otherwise. The
+direct calls are made on x86-64, 64bit ARM, and 32bit x86. On the other CPUs, on
+big endian ones, and with AS_MAX_PORTABILITY the generated code makes none.
 
 \section doc_addon_jit_perf Performance
 
 The table shows the time in seconds for the tests in the test_performance project
 when run with the interpreter, with the JIT compiler without direct system calls
 (\ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS), with the JIT compiler with the
-default settings, and with the JIT compiler and the pooled memory functions.
-Measured on an Intel Core i9-14900K with the 64bit release build from Visual
-Studio 2022. With the JIT compiler the tests Call and Call2 call the script
+default settings, with the JIT compiler and the pooled memory functions, and with
+the code generated ahead of time without them. Measured on an Intel Core i9-14900K
+with the 64bit release build from Visual Studio 2022, as the median of three runs.
+With the JIT compiler and ahead of time the tests Call and Call2 call the script
 functions through \ref CJITCompiler::Prepare and \ref CJITCompiler::Execute. Calls
 between script functions are made natively, which is what speeds up Fib, and the
 methods that Intf and Mthd call are compiled in place. The function that RetObj.3
@@ -242,33 +260,43 @@ gets. RetObj.1, RetObj.2, and Array.1 spend much of their time allocating the
 objects they create, which the pooled memory functions speed up.
 
 <pre>
-Test           VM       No direct  JIT      JIT+pool
-Basic          0.252    0.085      0.027    0.027
-Basic2         0.092    0.005      0.005    0.005
-Call           0.278    0.125      0.124    0.127
-Call2          0.368    0.185      0.184    0.195
-Fib            0.370    0.086      0.084    0.087
-Int            0.055    0.020      0.006    0.006
-Intf           0.124    0.006      0.006    0.006
-Mthd           0.123    0.006      0.006    0.005
-String         0.229    0.202      0.126    0.127
-String2        0.152    0.103      0.058    0.058
-StringPooled   0.155    0.119      0.043    0.042
-ThisProp       0.214    0.017      0.017    0.017
-Vector3        0.089    0.072      0.013    0.012
-Assign.1       0.114    0.008      0.008    0.008
-Assign.2       0.241    0.008      0.008    0.008
-Assign.3       0.170    0.011      0.011    0.011
-Assign.4       0.207    0.016      0.016    0.016
-Assign.5       0.208    0.016      0.016    0.016
-Array.1        0.310    0.147      0.104    0.066
-Array.2        0.148    0.076      0.032    0.032
-GlobalVar      0.089    0.036      0.016    0.016
-ClassProp      0.140    0.041      0.018    0.018
-RetObj.1       0.328    0.228      0.225    0.136
-RetObj.2       0.204    0.111      0.111    0.068
-RetObj.3       0.078    0.004      0.003    0.004
+Test           VM       No direct  JIT      JIT+pool  AOT
+Basic          0.246    0.080      0.025    0.025     0.045
+Basic2         0.085    0.005      0.005    0.005     0.009
+Call           0.272    0.125      0.122    0.122     0.117
+Call2          0.378    0.179      0.178    0.177     0.176
+Fib            0.349    0.086      0.085    0.083     0.095
+Int            0.053    0.019      0.006    0.006     0.009
+Intf           0.126    0.005      0.005    0.006     0.028
+Mthd           0.124    0.005      0.005    0.005     0.022
+String         0.231    0.196      0.120    0.120     0.137
+String2        0.154    0.099      0.055    0.054     0.075
+StringPooled   0.152    0.115      0.039    0.039     0.052
+ThisProp       0.191    0.016      0.016    0.016     0.022
+Vector3        0.090    0.067      0.012    0.012     0.013
+Assign.1       0.111    0.008      0.008    0.008     0.009
+Assign.2       0.199    0.008      0.008    0.008     0.012
+Assign.3       0.164    0.010      0.010    0.010     0.014
+Assign.4       0.264    0.015      0.015    0.015     0.019
+Assign.5       0.281    0.015      0.015    0.015     0.019
+Array.1        0.468    0.142      0.102    0.065     0.119
+Array.2        0.182    0.077      0.034    0.034     0.049
+GlobalVar      0.109    0.036      0.015    0.015     0.017
+ClassProp      0.172    0.043      0.019    0.019     0.026
+RetObj.1       0.606    0.218      0.218    0.133     0.242
+RetObj.2       0.365    0.107      0.107    0.064     0.146
+RetObj.3       0.106    0.003      0.003    0.003     0.027
 </pre>
+
+By the geometric mean of the speedups over the interpreter, the tests are 8.0
+times as fast with the JIT compiler, 8.4 times with the pooled memory functions
+too, and 5.2 times with the code generated ahead of time. About half of the
+difference between the JIT compiled code and the generated code is in Intf, Mthd,
+and RetObj.3, whose calls the JIT compiler compiles in place. The time the
+interpreter takes depends on where its code ends up in the executable, which is
+why it was measured with the build of the test without the generated code. In the
+build with the generated code the interpreter took 6.5 instead of 5.5 seconds for
+all the tests.
 
 The 32bit x86 build gains as much or more, as the interpreter is slower there.
 RetObj.1 for example takes 0.704 seconds with the interpreter, and 0.160 seconds
@@ -285,6 +313,10 @@ are done by helper functions on 32bit hosts.
    exception that passes through the generated code terminates the application,
    which is why direct system calls are opt-in there unless the library is built
    with AS_NO_EXCEPTIONS.
+ - The code generated ahead of time compiles no calls in place and borrows no
+   references, which makes the calls of short script functions slower than with
+   the JIT compiler. It creates the objects of the registered types through a
+   helper function, and keeps the variables in memory on big endian CPUs.
  - Direct system calls are only made for functions with primitive, reference,
    and handle parameters, and primitive, reference, handle, and value type return
    values. Everything else, including asCALL_GENERIC, goes through the same code
