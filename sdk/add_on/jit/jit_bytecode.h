@@ -129,8 +129,8 @@ public:
 
 	// Performs the analysis. Must be called after Decode. The small functions called
 	// with asBC_CALL are analysed too, so that their code can be emitted in place, and
-	// so are the methods called with asBC_CALLINTF if only one class can implement
-	// them, see FindInlinees
+	// so are the methods called with asBC_CALLINTF if all the classes that can
+	// implement them have the same implementation, see FindInlinees
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	// Performs the analysis for the code generated ahead of time, which must depend
@@ -222,7 +222,9 @@ public:
 	const CJITByteCode *GetInlinee(asUINT instrIdx) const;
 
 	// Returns the class that the object must be of for an inlined asBC_CALLINTF to
-	// call the inlined method, or null for asBC_CALL
+	// call the inlined method, or null for asBC_CALL, and for the virtual methods that
+	// several classes inherit, for which the class of the object must have the inlined
+	// method in its table
 	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
 
 	// Returns true if the function or one inlined into it calls something that may

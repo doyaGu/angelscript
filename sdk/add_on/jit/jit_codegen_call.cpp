@@ -241,7 +241,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 // to do. The function is called otherwise. Where it must return to the VM, the exit
 // of its frame pushes the call state, see EmitInlineExit, and where it calls
 // functions, its frame is materialized, see EmitMaterialize. A method called through
-// asBC_CALLINTF is inlined for objects of one class, the others call the method.
+// asBC_CALLINTF is inlined for objects of one class, or of the classes that inherit
+// the method, and the others call the method.
 // The calls in the inlined functions only check the class, as the outermost call
 // has checked the room for them, and that the VM has nothing to do if the functions
 // called before may have given it something. The VM makes the call otherwise
@@ -249,6 +250,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
 	const CJITByteCode *code = m_code->GetInlinee(idx);
 	asCScriptFunction *func = code->GetFunction();
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	bool virtualCall = instr.op == asBC_CALLINTF;
 	asCObjectType *objType = m_code->GetInlineObjectType(idx);
 	int base = -StackOffset(idx) / 4;
 	int caller = m_frame;
@@ -258,21 +261,32 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	Label call;
 	if( caller == 0 )
 		call = m_uc.new_label();
-	else if( objType || checkVM )
+	else if( virtualCall || checkVM )
 		call = BailLabel(idx);
 
 	// The function called instead gets its own references for the arguments that
 	// borrow them, see CJITByteCode::AnalyseBorrows
 	bool ownArgs = borrowed && call.is_valid();
 	Label own = ownArgs ? m_uc.new_label() : call;
-	if( objType )
+	if( virtualCall )
 	{
 		// The call raises the exception for a null object
+		const SJITObjectLayout &layout = JIT_GetObjectLayout();
 		Gp type = m_uc.new_gp_ptr();
 		m_uc.load(type, Stack(0));
 		m_uc.j(own, test_z(type));
-		m_uc.load(type, mem_ptr(type, JIT_GetObjectLayout().objectType));
-		m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(objType))));
+		m_uc.load(type, mem_ptr(type, layout.objectType));
+		if( objType )
+			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(objType))));
+		else
+		{
+			// The classes that inherit the method have it in the same place of their
+			// tables as the class declaring it
+			asCScriptFunction *method = func->engine->scriptFunctions[asBC_INTARG(instr.bc)];
+			m_uc.load(type, mem_ptr(type, layout.virtualFunctionTable));
+			m_uc.load(type, mem_ptr(type, method->vfTableIdx * PTR_BYTES));
+			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(func))));
+		}
 	}
 	if( checkVM )
 	{
@@ -348,8 +362,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		Label cont = m_uc.new_label();
 		BaseNode *cold = BeginCold(call);
 		m_spOffset = StackOffset(idx);
-		if( objType )
-			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(m_code->GetInstructions()[idx].bc), 0, 0);
+		if( virtualCall )
+			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0, 0);
 		else
 			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
 		EndCold(cold, cont);

@@ -545,18 +545,39 @@ bool CJITByteCode::CanBeInlined() const
 	return true;
 }
 
-// Returns the implementation of a virtual or interface method in the only class of
-// the module of the caller that objects calling it can be of, or null if there are
-// more classes. The classes of other modules may derive from the shared classes and
-// implement the shared interfaces, so the class of the object must still be checked
-static asCScriptFunction *FindOnlyImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *&objType)
+// Returns the implementation of a virtual or interface method in a class, like
+// asCContext::CallInterfaceMethod, or null if the class doesn't implement it
+static asCScriptFunction *GetImplementation(asCObjectType *cls, asCScriptFunction *method)
+{
+	asUINT index = asUINT(method->vfTableIdx);
+	if( method->funcType == asFUNC_INTERFACE )
+	{
+		asUINT n = 0;
+		while( n < cls->interfaces.GetLength() && cls->interfaces[n] != method->objectType )
+			n++;
+		if( n == cls->interfaces.GetLength() )
+			return 0;
+		index += cls->interfaceVFTOffsets[n];
+	}
+	return index < cls->virtualFunctionTable.GetLength() ? cls->virtualFunctionTable[index] : 0;
+}
+
+// Returns the implementation of a virtual or interface method in the classes of the
+// module of the caller that objects calling it can be of, or null if they implement
+// it differently. If only one class can, it is returned in objType, and the class of
+// the object is checked. Otherwise the method must be virtual, whose implementation
+// is checked in the table of the class of the object. The classes of other modules
+// may derive from the shared classes and implement the shared interfaces, so the
+// object must still be checked
+static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *&objType)
 {
 	objType = 0;
 	asCObjectType *type = method->objectType;
 	if( caller->module == 0 || type == 0 || method->vfTableIdx < 0 )
 		return 0;
 
-	asCObjectType *found = 0;
+	asCScriptFunction *found = 0;
+	asUINT count = 0;
 	const asCArray<asCObjectType*> &classes = caller->module->m_classTypes;
 	for( asUINT n = 0; n < classes.GetLength(); n++ )
 	{
@@ -565,28 +586,13 @@ static asCScriptFunction *FindOnlyImplementation(asCScriptFunction *caller, asCS
 			continue;
 		if( method->funcType == asFUNC_INTERFACE ? !cls->Implements(type) : !cls->DerivesFrom(type) )
 			continue;
-		if( found )
+		asCScriptFunction *impl = GetImplementation(cls, method);
+		if( impl == 0 || (count > 0 && (impl != found || method->funcType == asFUNC_INTERFACE)) )
 			return 0;
-		found = cls;
+		found = impl;
+		objType = count++ == 0 ? cls : 0;
 	}
-	if( found == 0 )
-		return 0;
-
-	// Like asCContext::CallInterfaceMethod
-	asUINT index = asUINT(method->vfTableIdx);
-	if( method->funcType == asFUNC_INTERFACE )
-	{
-		asUINT n = 0;
-		while( n < found->interfaces.GetLength() && found->interfaces[n] != type )
-			n++;
-		if( n == found->interfaces.GetLength() )
-			return 0;
-		index += found->interfaceVFTOffsets[n];
-	}
-	if( index >= found->virtualFunctionTable.GetLength() )
-		return 0;
-	objType = found;
-	return found->virtualFunctionTable[index];
+	return found;
 }
 
 // The search for the functions to inline into a function and into those
@@ -605,8 +611,9 @@ struct CJITByteCode::SInlineSearch
 // its code in turn, down to the levels left. The code inlined into a function is
 // limited by the budget, so that the functions calling many don't grow without
 // bounds. Recursion and functions with catch blocks are left to the calls. The
-// virtual and interface methods are inlined for the only class that can implement
-// them, which the object is checked for
+// virtual and interface methods are inlined if the classes that can implement them
+// all have the same implementation, which the object is checked for, see
+// FindImplementation
 void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
@@ -631,7 +638,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 		if( func && instr.op == asBC_CALLINTF )
 		{
 			if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
-				func = FindOnlyImplementation(m_func, func, objType);
+				func = FindImplementation(m_func, func, objType);
 			else
 				func = 0;
 		}
