@@ -95,9 +95,11 @@ delete jit;
 Nothing else changes for the application. Exceptions, line callbacks, suspension,
 debugging with \ref asIScriptContext::GetAddressOfVar "GetAddressOfVar", saving
 and loading of bytecode, etc all work the same way as with the interpreter. The
-only observable difference is that the bytecode contains the JIT instructions, so
+observable differences are that the bytecode contains the JIT instructions, so
 for example the positions reported by \ref asIScriptFunction::GetLineEntry
-"GetLineEntry" are not the same as without them.
+"GetLineEntry" are not the same as without them, and that the AddRef and Release
+behaviours are called less often, as the references that the VM adds and
+releases again right after are left out.
 
 The generated code calls registered functions directly with their native calling
 convention whenever the signature allows it (primitives, references, and handles
@@ -105,7 +107,9 @@ as arguments; primitives, references, handles, or value types as return value),
 instead of going through the code the VM uses, which marshals the arguments for
 the calling convention at runtime. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.
-A C++ exception thrown by a function called
+The handles copied from the temporary variables that are released right after,
+for example the result of p.next in @p = p.next, are moved instead, so no
+reference is added and released for them. A C++ exception thrown by a function called
 this way is still caught and turned into a script exception like with the VM. For
 that the exception must be able to pass through the generated code, which needs
 unwind information for it. The add-on registers the unwind information on 64bit
