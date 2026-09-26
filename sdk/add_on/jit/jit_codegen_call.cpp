@@ -176,7 +176,13 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 			method = *extra;
 		}
 		if( target.is_valid() )
+		{
 			m_uc.j(slow, test_z(target));
+			// The code of the functions whose compilation is deferred finds them as the
+			// current function, which the helper sets
+			if( m_options.tieredEntry && !m_options.interop )
+				m_uc.j(slow, cmp_eq(target, PtrConst(asPWORD(m_options.tieredEntry))));
+		}
 		if( m_options.interop && !method.is_valid() )
 			method = PtrConst(asPWORD(callee));
 

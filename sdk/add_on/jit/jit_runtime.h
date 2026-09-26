@@ -50,7 +50,9 @@ class asCScriptFunction;
 // and doesn't shrink, or less to allow no more than the maximum number of nested
 // native calls. The return value is 0 if the function returned to its caller, and
 // non-zero if the VM must take over, in which case the VM registers describe where
-// to continue.
+// to continue. While the compilation of a function is deferred its code is
+// CJITCompiler::TieredEntry, which needs the current function also when it is called
+// natively, see SJITCodeGenOptions::tieredEntry.
 typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 
 // Maximum depth of nested native calls when the VM enters one of the functions
@@ -125,6 +127,16 @@ int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) n
 
 // Set in jitArg when the generated code is entered through JIT_GuardedEntry
 const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
+
+// The arguments of the JitEntry instructions have the index of the entry point in
+// the lower bits. While the compilation of a function is deferred, the instructions
+// where CJITCompiler::TieredEntry counts the calls or the iterations of a loop have
+// the count in the upper bits, below JIT_GUARDED_ENTRY, and the others 0. The VM may
+// have read the argument with the count just before the function is compiled, which
+// the generated code masks off then
+const asPWORD JIT_ENTRY_INDEX_MASK  = 0xFFFF;
+const int     JIT_ENTRY_COUNT_SHIFT = 16;
+const asUINT  JIT_ENTRY_MAX_COUNT   = 0x3FFF;
 
 // Catches the C++ exceptions thrown by registered functions that the generated
 // code calls directly, and turns them into script exceptions like CallSystemFunction

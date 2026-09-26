@@ -104,6 +104,9 @@ bool CJITCodeGen::Generate()
 	Label direct = m_uc.new_label();
 	m_uc.j(direct, test_z(m_arg));
 
+	// The VM may pass the count of a deferred compilation along with the index, see
+	// JIT_ENTRY_COUNT_SHIFT. The dispatch ignores the argument of a single entry
+	bool masked = m_options.tieredEntry && entries.size() > 1 && entries.size() <= JIT_ENTRY_INDEX_MASK;
 	if( m_guarded )
 	{
 		// Enter again through the helper that catches the C++ exceptions of the direct calls
@@ -116,8 +119,11 @@ bool CJITCodeGen::Generate()
 		call->set_ret(0, r);
 		m_uc.ret(r);
 		m_uc.bind(guarded);
-		m_uc.and_(m_arg, m_arg, Imm(~JIT_GUARDED_ENTRY));
+		if( !masked )
+			m_uc.and_(m_arg, m_arg, Imm(~JIT_GUARDED_ENTRY));
 	}
+	if( masked )
+		m_uc.and_(m_arg, m_arg, Imm(JIT_ENTRY_INDEX_MASK));
 
 	// Entered by the VM, which has set up the frame. Jump to the requested entry point
 	const SJITContextLayout &layout = JIT_GetContextLayout();

@@ -24,6 +24,7 @@ struct SJITCodeGenOptions
 	bool guardedEntry;      // enter through JIT_GuardedEntry when called by the VM
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 	bool interop;           // set the current function for the native calls and don't mark their call states, for the functions generated ahead of time, see JITFunction
+	const void *tieredEntry; // the code of the functions whose compilation is deferred, whose calls are left to the helpers unless interop is set, or null
 };
 
 // Translates the analysed bytecode of one function to machine code through

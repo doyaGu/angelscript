@@ -21,6 +21,7 @@ struct SJITStatistics
 	asUINT callsInlined;         // script calls whose function was compiled in place, see SetMaxInlineSize
 	size_t codeSize;             // total size of the native code currently held
 	asUINT functionsAOT;         // script functions that use the code generated ahead of time, see AddAOTFunctions
+	asUINT functionsDeferred;    // script functions whose compilation was deferred, see SetCompileThresholds
 };
 
 // Callback used to decide if a function should be JIT compiled
@@ -125,6 +126,17 @@ public:
 	// own for the other calls. Default is 64, 0 disables inlining like JIT_NO_INLINE
 	void SetMaxInlineSize(asUINT sizeInDWords);
 
+	// Tiered compilation. With a call threshold the functions aren't compiled when the
+	// module is built, but when they have been called that many times, or when one of
+	// their loops has run that many iterations, in which case the compiled code goes on
+	// with the loop. The VM executes the functions until then. This saves the time and
+	// the memory for compiling the functions that are rarely executed. 0 calls compiles
+	// all functions when the module is built, which is the default, and 0 iterations
+	// doesn't count the loops. The thresholds are limited to 16383. The engine must use
+	// this compiler itself, not one that forwards to it. Must be called before any
+	// function is compiled. Returns a negative value on failure
+	int SetCompileThresholds(asUINT calls, asUINT iterations);
+
 	// Ahead-of-time compilation. With an output directory the compiler generates C++
 	// code for every function it is given, which WriteAOTOutput writes to the directory:
 	// jit_aot_NNN.cpp with the functions, and jit_aot_functions.cpp with their table,
@@ -170,6 +182,8 @@ public:
 protected:
 	struct SImpl;
 	SImpl *m_impl;
+
+	static int TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 };
 
 END_AS_NAMESPACE
