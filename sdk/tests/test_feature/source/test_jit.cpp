@@ -1390,6 +1390,20 @@ namespace Inlining
 		"class Derived : Base { int f(int a) override { return a * 2 + k; } }              \n"
 		"abstract class Shape { int w = 3; int area(int h) { return w * h; } }             \n"
 		"class Rect : Shape {}                                                             \n"
+		// The method that several classes inherit is inlined for the objects whose class
+		// has it, and the objects of the class of the other module overriding it call theirs
+		"shared class SBase { int k = 2; int g(int a) { return a * k; } }                  \n"
+		"class SKid : SBase {}                                                             \n"
+		"import SBase@ makeOver() from \"other\";                                          \n"
+		"int inherited(int n) {                                                            \n"
+		"  SBase@ kid = SKid();                                                            \n"
+		"  SBase@ base = SBase();                                                          \n"
+		"  SBase@ over = makeOver();                                                       \n"
+		"  int r = 0, i = 0;                                                               \n"
+		"  while( i < n )                                                                  \n"
+		"    r += kid.g(i) + (i % 3 == 0 ? over : base).g(i++);                            \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
 		"int methods(int n) {                                                              \n"
 		"  Acc@ acc = Acc();                                                               \n"
 		"  IVal@ own = acc;                                                                \n"
@@ -1686,7 +1700,10 @@ namespace Inlining
 	static const char *otherScript =
 		"shared interface IVal { int get(int a); }                                         \n"
 		"class Other : IVal { int get(int a) { return a * 100; } }                         \n"
-		"IVal@ makeOther() { return Other(); }                                             \n";
+		"IVal@ makeOther() { return Other(); }                                             \n"
+		"shared class SBase { int k = 2; int g(int a) { return a * k; } }                  \n"
+		"class Over : SBase { int g(int a) override { return a * 1000 + k; } }             \n"
+		"SBase@ makeOver() { return Over(); }                                              \n";
 
 	enum EMode { PLAIN, COUNT_LINES, SUSPEND_IN_ADD, POKE_IN_ADD };
 	struct SCase { const char *decl; int arg; EMode mode; };
@@ -1706,6 +1723,8 @@ namespace Inlining
 		{ "int methods(int)",   100, PLAIN },
 		{ "int methods(int)",    10, COUNT_LINES },
 		{ "int methods(int)",    10, SUSPEND_IN_ADD },
+		{ "int inherited(int)",  20, PLAIN },
+		{ "int inherited(int)",   5, COUNT_LINES },
 		{ "int nullCall(int)",    1, PLAIN },
 		{ "int nullCall(int)",    5, PLAIN },
 		{ "int ratioLoop(int)",   5, PLAIN },
@@ -1985,7 +2004,8 @@ namespace Inlining
 	}
 
 	// The calls that are inlined in all the compiled functions. The methods are those
-	// that only one class of the module can implement. The call of an overridden
+	// that only one class of the module can implement, and the virtual methods that
+	// all the classes that can implement them inherit. The call of an overridden
 	// method calls the method of the base class even through the handle of the derived
 	// class, and a method called through a global variable has a reference held for the
 	// call, which the function releases. The functions calling others are inlined with
@@ -2006,6 +2026,12 @@ namespace Inlining
 			{ "abstract class B { int f() { return 1; } } class D : B {} int t(B@ b) { return b.f(); }", 1 },
 			{ "interface I { int f(); } abstract class B : I { int f() { return 1; } } class D : B {} "
 			  "int t(I@ i, B@ b) { return i.f() + b.f(); }", 2 },
+			{ "class B { int f() { return 1; } } class D : B {} class E : D {} "
+			  "int t(B@ b, D@ d) { return b.f() + d.f(); }", 2 },
+			{ "class B { int f() { return 1; } } class D : B { int f() override { return 2; } } class E : D {} "
+			  "int t(B@ b, E@ e) { return b.f() + e.f(); }", 0 },
+			{ "interface I { int f(); } class A : I { int f() { return 1; } } class B : A {} "
+			  "int t(I@ i) { return i.f(); }", 0 },
 			{ "int f2(int a) { return a + 1; } int f1(int a) { return f2(a) * 2; } "
 			  "int t(int a) { return f1(a) + f1(a + 1); }", 5 },
 			{ "class A { int v = 1; int f2() { return v; } int f1() { return f2() + 1; } } "
