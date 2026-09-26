@@ -228,6 +228,8 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 }
 #endif
 
+asUINT JIT_nativeCallDepth = 256;
+
 int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 {
 	asCContext *ctx = GetContext(regs);

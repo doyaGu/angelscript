@@ -47,6 +47,11 @@ class asCScriptFunction;
 // to continue.
 typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 
+// Maximum depth of nested native calls when the VM enters one of the functions
+// generated ahead of time, see CJITCompiler::SetNativeCallDepth. It is shared by all
+// compilers, like the functions
+extern asUINT JIT_nativeCallDepth;
+
 // Layout of the context members that the generated code accesses directly. The
 // offsets are relative to the VM registers, which are embedded in the context
 struct SJITContextLayout
