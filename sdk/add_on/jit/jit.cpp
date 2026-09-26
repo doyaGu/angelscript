@@ -247,6 +247,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			fprintf(file, "   ; moved");
 		if( instr.flags & JIT_INSTR_REFCOUNT )
 			fprintf(file, "   ; counted in place");
+		if( instr.flags & JIT_INSTR_FREE_LIST )
+			fprintf(file, "   ; memory freed");
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )

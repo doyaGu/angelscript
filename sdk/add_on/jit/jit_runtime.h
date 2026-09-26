@@ -182,6 +182,9 @@ void   JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept;
 // asBC_AllocMem
 void  *JIT_AllocMem(asUINT size) noexcept;
 
+// asBC_FREE of the initialization lists with nothing to destroy
+void   JIT_FreeMem(void *mem) noexcept;
+
 // asBC_COPY
 void   JIT_MemCpy(void *dst, const void *src, asUINT sizeInBytes) noexcept;
 

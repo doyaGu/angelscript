@@ -636,6 +636,16 @@ void *JIT_AllocMem(asUINT size) noexcept
 	return mem;
 }
 
+// Like asCScriptEngine::CallFree
+void JIT_FreeMem(void *mem) noexcept
+{
+#ifndef WIP_16BYTE_ALIGN
+	userFree(mem);
+#else
+	userFreeAligned(mem);
+#endif
+}
+
 void JIT_MemCpy(void *dst, const void *src, asUINT sizeInBytes) noexcept
 {
 	memcpy(dst, src, sizeInBytes);

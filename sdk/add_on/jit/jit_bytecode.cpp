@@ -773,7 +773,7 @@ static bool IsCountedRef(asCTypeInfo *type)
 void CJITByteCode::AnalyseBorrows()
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
-		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT);
+		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST);
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_borrowedArgs.clear();
@@ -787,6 +787,7 @@ void CJITByteCode::AnalyseBorrows()
 #endif
 	FindMovedRefs();
 	FindInPlaceRefCounts();
+	FindListFrees();
 }
 
 // The handles copied from variables that are released right after the copy, e.g.
@@ -851,6 +852,46 @@ void CJITByteCode::FindInPlaceRefCounts()
 			instr.flags |= JIT_INSTR_REFCOUNT;
 	}
 #endif
+}
+
+// The initialization lists whose elements are primitives, enums, or value types
+// without a destructor have nothing to destroy. Their memory is freed right away
+// then, instead of asCScriptEngine::DestroyList going through the list pattern for
+// each element, and as nothing is executed the VM registers aren't synced for it
+void CJITByteCode::FindListFrees()
+{
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		if( instr.op != asBC_FREE || (instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) )
+			continue;
+		asCObjectType *listType = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
+		if( !listType || !(listType->flags & asOBJ_LIST_PATTERN) || listType->beh.destruct || listType->templateSubTypes.GetLength() == 0 )
+			continue;
+		asCObjectType *type = CastToObjectType(listType->templateSubTypes[0].GetTypeInfo());
+		int factory = type ? type->beh.listFactory : 0;
+		if( factory <= 0 || asUINT(factory) >= engine->scriptFunctions.GetLength() || !engine->scriptFunctions[factory] )
+			continue;
+
+		bool plain = true;
+		for( asSListPatternNode *node = engine->scriptFunctions[factory]->listPattern; node && plain; node = node->next )
+		{
+			if( node->type != asLPT_TYPE )
+				continue;
+			const asCDataType &dt = static_cast<asSListPatternDataTypeNode*>(node)->dataType;
+			asCTypeInfo *ti = dt.GetTypeInfo();
+			if( dt.GetTokenType() == ttQuestion )
+				plain = false;
+			else if( ti && !(ti->flags & asOBJ_ENUM) )
+			{
+				asCObjectType *ot = CastToObjectType(ti);
+				plain = ot && (ot->flags & asOBJ_VALUE) && !ot->beh.destruct;
+			}
+		}
+		if( plain )
+			instr.flags |= JIT_INSTR_FREE_LIST;
+	}
 }
 
 // The handle parameters that the function doesn't store or hand over anywhere, but
@@ -1163,7 +1204,7 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 			continue;
 		if( instr.flags & JIT_INSTR_INLINE )
 			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints(GetBorrowedArgs(n));
-		else if( instr.flags & JIT_INSTR_MOVED )
+		else if( instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_FREE_LIST) )
 			continue;
 		else if( instr.op == asBC_FREE )
 		{

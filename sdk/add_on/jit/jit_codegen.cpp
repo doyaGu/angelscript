@@ -279,7 +279,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 				continue;
 			if( isTarget[n] )
 				last = -1;
-			if( IsBorrowed(n) || (instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT)) )
+			if( IsBorrowed(n) || (instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST)) )
 				continue;
 			if( SharesMaterialization(instr.op) )
 			{
@@ -388,7 +388,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 		}
 
 		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] && !IsBorrowed(idx) &&
-		    !(instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT)) )
+		    !(instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST)) )
 		{
 			m_shareMaterial = false;
 			EmitDematerialize();

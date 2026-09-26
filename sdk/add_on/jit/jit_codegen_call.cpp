@@ -1448,6 +1448,18 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			m_uc.store_zero_reg(Var(a0));
 			break;
 		}
+		if( instr.flags & JIT_INSTR_FREE_LIST )
+		{
+			// Nothing in the list is destroyed, see CJITByteCode::FindListFrees
+			Gp mem = LoadPtr(a0);
+			Label skip = m_uc.new_label();
+			m_uc.j(skip, test_z(mem));
+			InvokeNode *call = Invoke((const void*)JIT_FreeMem, FuncSignature::build<void, void*>());
+			call->set_arg(0, mem);
+			m_uc.store_zero_reg(Var(a0));
+			m_uc.bind(skip);
+			break;
+		}
 		if( instr.flags & JIT_INSTR_REFCOUNT )
 		{
 			// Like the VM the variable is cleared after the release

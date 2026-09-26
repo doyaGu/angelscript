@@ -27,7 +27,8 @@ enum EJITInstrFlags
 	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
-	JIT_INSTR_REFCOUNT    = 0x400  // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
+	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
+	JIT_INSTR_FREE_LIST   = 0x800  // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
 };
 
 // One decoded bytecode instruction
@@ -257,6 +258,7 @@ protected:
 	void FindBorrowedArgs();
 	void FindMovedRefs();
 	void FindInPlaceRefCounts();
+	void FindListFrees();
 	int  FindVarConsumer(asUINT idx) const;
 	int  FindPush(asUINT idx, int top) const;
 	bool HoldsReference(int var) const;

@@ -2855,6 +2855,201 @@ static bool TestScriptRefCounts()
 	return fail;
 }
 
+// The initialization lists with nothing to destroy in them are freed without going
+// through the list, see CJITByteCode::FindListFrees. Nothing may be leaked, and the
+// values in the other lists must still be destroyed
+namespace ListFrees
+{
+	struct SVec2 { float x, y; };
+	static void Vec2Construct(SVec2 *v) { v->x = 0; v->y = 0; }
+	static void Vec2Init(float x, float y, SVec2 *v) { v->x = x; v->y = y; }
+	static void Vec2List(float *list, SVec2 *v) { v->x = list[0]; v->y = list[1]; }
+
+	// The engine only destroys the values in the lists whose bytes aren't all zero
+	static int g_live = 0;
+	struct STracked { int v, mark; };
+	static void TrackedConstruct(STracked *t) { t->v = 0; t->mark = 1; g_live++; }
+	static void TrackedInit(int v, STracked *t) { t->v = v; t->mark = 1; g_live++; }
+	static void TrackedDestruct(STracked *t) { t->mark = 0; g_live--; }
+	static STracked &TrackedAssign(const STracked &o, STracked *t) { t->v = o.v; return *t; }
+
+	static const char *script =
+		"enum Color { Red, Green, Blue }                                          \n"
+		"int ints(int n)                                                          \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<int> a = {1, 2, 3, i};                                         \n"
+		"    s += a[3] + int(a.length());                                         \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int colors(int n)                                                        \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<Color> a = {Red, Blue, Color(i % 3)};                          \n"
+		"    s += int(a[1]) + int(a[2]);                                          \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int vecs(int n)                                                          \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<Vec2> a = {Vec2(1, 2), Vec2(i, 3)};                            \n"
+		"    Vec2 v = {float(i), 4.0f};                                           \n"
+		"    s += int(a[1].x + a[0].y + v.x + v.y);                               \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int pair(int i) { array<int> a = {i, 1}; return a[0] + a[1]; }           \n"
+		"int inlined(int n)                                                       \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"    s += pair(i);                                                        \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int nested(int n)                                                        \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<array<int>> a = {{1, 2}, {i}};                                 \n"
+		"    s += a[1][0] + int(a[0].length());                                   \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int strings(int n)                                                       \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<string> a = {\"a\", \"bc\"};                                   \n"
+		"    s += int(a[1].length()) + i;                                         \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int tracked(int n)                                                       \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    array<Tracked> a = {Tracked(i), Tracked(2)};                         \n"
+		"    s += a[0].v + a[1].v;                                                \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int divide(int d)                                                        \n"
+		"{                                                                        \n"
+		"  array<int> a = {1, 2, 10 / d};                                         \n"
+		"  array<Tracked> b = {Tracked(3), Tracked(20 / d)};                      \n"
+		"  return a[2] + b[1].v;                                                  \n"
+		"}                                                                        \n";
+
+	static const char *tests[] = { "ints", "colors", "vecs", "inlined", "nested", "strings", "tracked", "divide" };
+
+	// Returns the results and the memory that the second round of calls leaves allocated
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterStdString(engine);
+		RegisterScriptArray(engine, false);
+		int r;
+		r = engine->RegisterObjectType("Vec2", sizeof(SVec2), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Vec2", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(Vec2Construct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Vec2", asBEHAVE_CONSTRUCT, "void f(float, float)", asFUNCTION(Vec2Init), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Vec2", asBEHAVE_LIST_CONSTRUCT, "void f(int &in) {float, float}", asFUNCTION(Vec2List), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("Vec2", "float x", asOFFSET(SVec2, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("Vec2", "float y", asOFFSET(SVec2, y)); assert( r >= 0 );
+		r = engine->RegisterObjectType("Tracked", sizeof(STracked), asOBJ_VALUE | asOBJ_APP_CLASS_CDAK); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Tracked", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(TrackedConstruct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Tracked", asBEHAVE_CONSTRUCT, "void f(int)", asFUNCTION(TrackedInit), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectBehaviour("Tracked", asBEHAVE_DESTRUCT, "void f()", asFUNCTION(TrackedDestruct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("Tracked", "Tracked &opAssign(const Tracked &in)", asFUNCTION(TrackedAssign), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("Tracked", "int v", asOFFSET(STracked, v)); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		// The first round allocates what the context keeps for the later executions
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(tests) / sizeof(tests[0]); n++ )
+		{
+			asIScriptFunction *func = mod->GetFunctionByName(tests[n]);
+			int results[2] = { 0, 0 };
+			int mem = 0;
+			for( int round = 0; round < 2; round++ )
+			{
+				mem = GetAllocedMem();
+				for( int k = 0; k < 2; k++ )
+				{
+					ctx->Prepare(func);
+					ctx->SetArgDWord(0, k == 0 ? 100 : 0);
+					r = ctx->Execute();
+					results[k] = r == asEXECUTION_FINISHED ? int(ctx->GetReturnDWord()) : -r;
+				}
+			}
+			int leaked = GetAllocedMem() - mem;
+			s << tests[n] << " " << results[0] << " " << results[1] << " leaked " << leaked << " live " << g_live << "\n";
+			if( leaked != 0 || g_live != 0 )
+				TEST_FAILED;
+		}
+
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestListFrees()
+{
+	using namespace ListFrees;
+	bool fail = false;
+
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+
+	// The JIT compiler must outlive the engine
+	CJITCompiler jit(envFlags);
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("list frees: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("list frees:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+
+	return fail;
+}
+
 // The calls from the application through CJITCompiler::Prepare and Execute, which
 // enter the compiled code directly. Everything that the application can observe
 // must be the same as with the methods of the context
@@ -3450,6 +3645,7 @@ bool Test()
 	fail = TestCppExceptions() || fail;
 	fail = TestRefCounting() || fail;
 	fail = TestScriptRefCounts() || fail;
+	fail = TestListFrees() || fail;
 	fail = TestHostCalls() || fail;
 	fail = TestMemoryFunctions() || fail;
 
