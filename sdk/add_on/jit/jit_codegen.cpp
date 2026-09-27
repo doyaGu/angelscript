@@ -26,6 +26,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	frame.callIdx  = 0;
 	frame.exitUsed = false;
 	frame.borrowed = 0;
+	frame.retChecked = true;
 	m_frames.push_back(frame);
 	m_frame      = 0;
 	m_frameBase  = 0;
@@ -41,6 +42,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_callsInlined = 0;
 	m_callsProfiled = 0;
 	m_inlineCalls  = false;
+	m_suspendChecked = true;
 	m_materialized = false;
 	m_materialDepth = 0;
 	m_shareMaterial = false;
@@ -104,6 +106,19 @@ bool CJITCodeGen::Generate()
 
 	Label direct = m_uc.new_label();
 	m_uc.j(direct, test_z(m_arg));
+
+	// While a line callback is set or a suspension is requested the function goes on
+	// in its code compiled with the checks at every statement, or in the VM after the
+	// JitEntry, see SJITCodeGenOptions::exactEntry, so that it starts where the checks
+	// have been made
+	Label handOver;
+	if( m_options.elideSuspend )
+	{
+		handOver = m_uc.new_label();
+		Gp flag = m_uc.new_gp32();
+		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+		m_uc.j(handOver, test_nz(flag));
+	}
 
 	// The VM may pass the count of a deferred compilation along with the index, see
 	// JIT_ENTRY_COUNT_SHIFT. The dispatch ignores the argument of a single entry
@@ -198,6 +213,18 @@ bool CJITCodeGen::Generate()
 
 	EmitEntryStubs();
 	EmitBailStubs();
+
+	if( handOver.is_valid() )
+	{
+		m_uc.bind(handOver);
+		InvokeNode *call = Invoke(m_options.exactEntry, FuncSignature::build<int, void*, asSVMRegisters*, asPWORD>());
+		Gp r = m_uc.new_gp32();
+		call->set_arg(0, Imm(int64_t(asPWORD(m_options.exactParam))));
+		call->set_arg(1, m_regs);
+		call->set_arg(2, m_arg);
+		call->set_ret(0, r);
+		m_uc.ret(r);
+	}
 
 	if( m_leaveBorrowedUsed )
 	{
@@ -300,6 +327,42 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 		}
 	}
 
+	// The suspend requests and line callbacks, i.e. the flag doProcessSuspend of the
+	// VM, are only checked by the SUSPENDs that don't follow a check along all paths
+	// with nothing in between that may have set the flag, see asBC_SUSPEND. The
+	// flag is set by the functions called, other than by the suspend requests of
+	// other threads, which are answered once in each iteration of a loop, as the
+	// loop heads count as not checked. The entry of the function checks it too, see
+	// Generate and EmitDirectEntry, and so do the inlined calls, see EmitInlineCall.
+	// The VM goes on where the flag is found set, which calls the line callbacks for
+	// every statement, until it enters the function again, which goes on in code
+	// compiled with all checks then, see SJITCodeGenOptions::exactEntry. The forward
+	// branches note what they have checked for their targets, before these are
+	// emitted
+	bool elide = m_options.elideSuspend;
+	std::vector<char> checkedIn;
+	if( elide )
+	{
+		checkedIn.assign(instrs.size(), 1);
+		for( asUINT n = 0; n < instrs.size(); n++ )
+		{
+			if( instrs[n].flags & JIT_INSTR_DEAD )
+				continue;
+			if( instrs[n].target >= 0 && asUINT(instrs[n].target) <= n )
+				checkedIn[instrs[n].target] = 0;
+			if( instrs[n].op == asBC_JMPP )
+			{
+				const std::vector<int> &targets = m_code->GetSwitchTargets(n);
+				for( asUINT t = 0; t < targets.size(); t++ )
+					if( asUINT(targets[t]) <= n )
+						checkedIn[targets[t]] = 0;
+			}
+		}
+	}
+
+	// The function starts where the flag is checked, and an inlined one where the
+	// call is, see m_suspendChecked
+	bool fallsIn = true;
 	asUINT idx = 0;
 	while( idx < instrs.size() && !m_failed )
 	{
@@ -307,8 +370,11 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 		if( instrs[idx].flags & JIT_INSTR_DEAD )
 		{
 			idx++;
+			fallsIn = false;
 			continue;
 		}
+		if( elide )
+			m_suspendChecked = (m_suspendChecked || !fallsIn) && checkedIn[idx];
 
 		if( alignHead[idx] )
 			m_uc.cc->align(AlignMode::kCode, 64);
@@ -392,6 +458,35 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			else if( instr.op != asBC_SUSPEND && instr.op != asBC_RET && !(instr.flags & JIT_INSTR_REFCOUNT) )
 				for( BaseNode *node = start->next(); node && !calls[idx]; node = node->next() )
 					calls[idx] = node->is_invoke();
+
+			// Any function called, also on the rare paths, may have set the flag, except
+			// for those of the inlined calls, which note what they have checked
+			if( elide && !(instr.flags & JIT_INSTR_INLINE) )
+				for( BaseNode *node = start->next(); node && m_suspendChecked; node = node->next() )
+					m_suspendChecked = !node->is_invoke();
+		}
+
+		if( elide )
+		{
+			const SJITInstr &last = instrs[idx + consumed - 1];
+			if( instr.flags & JIT_INSTR_BAIL )
+				fallsIn = false;
+			else
+			{
+				for( asUINT n = idx; n < idx + consumed; n++ )
+				{
+					if( instrs[n].target > int(n) )
+						checkedIn[instrs[n].target] &= char(m_suspendChecked);
+					if( instrs[n].op == asBC_JMPP )
+					{
+						const std::vector<int> &targets = m_code->GetSwitchTargets(n);
+						for( asUINT t = 0; t < targets.size(); t++ )
+							if( asUINT(targets[t]) > n )
+								checkedIn[targets[t]] &= char(m_suspendChecked);
+					}
+				}
+				fallsIn = last.op != asBC_JMP && last.op != asBC_JMPP && last.op != asBC_RET;
+			}
 		}
 
 		if( m_shareMaterial && SharesMaterialization(instr.op) && !shareNext[idx] && !IsBorrowed(idx) &&
@@ -2373,7 +2468,18 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 		break;
 
 	case asBC_SUSPEND:
-		if( !m_options.noSuspend && !(instr.flags & JIT_INSTR_SKIP) )
+		if( m_options.elideSuspend )
+		{
+			// The VM executes the instruction if it has anything to do, see EmitBody
+			if( !m_suspendChecked && !(instr.flags & JIT_INSTR_SKIP) )
+			{
+				Gp t = m_uc.new_gp32();
+				m_uc.load_u8(t, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+				m_uc.j(BailLabel(idx), test_nz(t));
+				m_suspendChecked = true;
+			}
+		}
+		else if( !m_options.noSuspend && !(instr.flags & JIT_INSTR_SKIP) )
 		{
 			// Only when the VM asks for it, i.e. a line callback is set or a
 			// suspension was requested, is the helper called

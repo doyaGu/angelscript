@@ -18,6 +18,7 @@ BEGIN_AS_NAMESPACE
 struct SJITCodeGenOptions
 {
 	bool noSuspend;         // don't emit the suspend checks
+	bool elideSuspend;      // leave out the suspend checks that follow others, see CJITCodeGen::EmitBody
 	bool noScriptCalls;     // return to the VM for script-to-script calls
 	bool syncEveryInstr;    // update the VM registers after every instruction
 	bool directSystemCalls; // call registered functions with their native calling convention
@@ -27,6 +28,8 @@ struct SJITCodeGenOptions
 	const void *tieredEntry; // the code of the functions whose compilation is deferred, whose calls are left to the helpers unless interop is set, or null
 	SJITProfile *profile;    // where the calls marked with JIT_INSTR_PROFILE note their classes, or null
 	const void *recompile;   // int (*)(SJITProfile*), called when the profile has counted down the calls, returns non-zero if the function has new code, which the VM goes on in after the call
+	const void *exactEntry;  // int (*)(void *exactParam, asSVMRegisters*, asPWORD jitArg), called in place of the code when the VM enters it while a line callback is set or a suspension is requested, if elideSuspend is set, see CJITCodeGen::Generate
+	void       *exactParam;
 };
 
 // Translates the analysed bytecode of one function to machine code through
@@ -95,6 +98,7 @@ protected:
 		Label                     exit;     // hands the function to the VM, see EmitInlineExit
 		bool                      exitUsed;
 		asUINT                    borrowed; // the parameters that borrow the references of the caller, see CJITByteCode::AnalyseBorrows
+		bool                      retChecked; // the suspend requests are checked before all returns, see EmitBody
 	};
 
 	// A bail stub to emit after the body
@@ -338,6 +342,7 @@ protected:
 	asUINT m_callsInlined;
 	asUINT m_callsProfiled;
 	bool   m_inlineCalls;  // the last inlined function calls functions, see EmitBody
+	bool   m_suspendChecked; // the suspend requests are checked before the instruction, see EmitBody
 	bool   m_materialized; // the frames of the inlined calls are on the call stack, see EmitMaterialize
 	int    m_materialDepth; // the number of call states pushed for them
 	bool   m_materialBorrowed; // some of them have borrowed parameters

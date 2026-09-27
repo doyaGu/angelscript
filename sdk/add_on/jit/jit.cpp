@@ -596,6 +596,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 
 	SJITCodeGenOptions options;
 	options.noSuspend      = (flags & JIT_NO_SUSPEND) != 0;
+	options.elideSuspend   = false;
 	options.noScriptCalls  = (flags & JIT_NO_SCRIPT_CALLS) != 0;
 	options.syncEveryInstr = (flags & JIT_SYNC_EVERY_INSTR) != 0;
 	options.maxNativeCallDepth = maxNativeCallDepth;

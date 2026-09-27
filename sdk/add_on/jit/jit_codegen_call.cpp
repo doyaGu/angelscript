@@ -258,6 +258,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	int caller = m_frame;
 	asUINT borrowed = m_code->GetBorrowedArgs(idx);
 	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
+	if( m_options.elideSuspend && m_suspendChecked )
+		checkVM = false;
 
 	Label call;
 	if( caller == 0 )
@@ -350,6 +352,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	frame.exit     = m_uc.new_label();
 	frame.exitUsed = false;
 	frame.borrowed = borrowed;
+	frame.retChecked = true;
 	m_frames.push_back(frame);
 	int inlined = int(m_frames.size()) - 1;
 	SwitchFrame(inlined);
@@ -363,10 +366,15 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
 	ReloadSlots(code->GetLiveInMask(0));
 
+	// The function starts where the suspend requests are checked, if they may have
+	// been made, see EmitBody
+	if( checkVM )
+		m_suspendChecked = true;
 	std::vector<bool> calls(code->GetInstructions().size());
 	EmitBody(calls);
 	m_uc.bind(m_frames[inlined].ret);
 	SwitchFrame(caller);
+	bool retChecked = m_frames[inlined].retChecked;
 	m_inlineCalls = false;
 	for( asUINT n = 0; n < calls.size(); n++ )
 		m_inlineCalls = m_inlineCalls || calls[n];
@@ -381,9 +389,19 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0, 0);
 		else
 			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
+
+		// The VM goes on after the call if the function has set a line callback, so
+		// that both paths continue where the suspend requests are checked
+		if( m_options.elideSuspend )
+		{
+			Gp flag = m_uc.new_gp32();
+			m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+			m_uc.j(BailLabel(idx + 1), test_nz(flag));
+		}
 		EndCold(cold, cont);
 		m_uc.bind(cont);
 	}
+	m_suspendChecked = retChecked;
 	m_spOffset = StackOffset(idx + 1);
 }
 
@@ -803,6 +821,14 @@ void CJITCodeGen::EmitDirectEntry()
 	call->set_arg(0, m_regs);
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
+
+	// The VM enters the function again while a line callback is set or a suspension
+	// is requested, see Generate
+	if( m_options.elideSuspend )
+	{
+		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+		EmitLeaveIf(flag);
+	}
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
 	ReloadStack();
 	m_uc.j(ready);
@@ -909,6 +935,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 				last = (instrs[n].flags & JIT_INSTR_DEAD) != 0;
 			if( !last )
 				m_uc.j(m_frames[m_frame].ret);
+			m_frames[m_frame].retChecked = m_frames[m_frame].retChecked && m_suspendChecked;
 		}
 		else
 		{
