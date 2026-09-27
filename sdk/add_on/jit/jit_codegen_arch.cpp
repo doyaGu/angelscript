@@ -86,6 +86,14 @@ void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 	m_uc.lea(dst, src);
 }
 
+// AsmJit calls the functions out of the reach of a relative call through its address table
+InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	m_uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
+	return node;
+}
+
 // The sign bit of a 64bit register isn't an immediate that OR can take
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
@@ -283,6 +291,15 @@ void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 		m_uc.add(dst, src.base_reg().as<Gp>(), Imm(src.offset_lo32()));
 }
 
+// bl only reaches 128MB, and the code is usually further away from the functions it
+// calls, so they are called through a register
+InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	m_uc.cc->invoke(Out(node), PtrConst(asPWORD(fn)), sig);
+	return node;
+}
+
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
 	m_uc.cc->orr(r, r, Imm(uint64_t(1) << (r.size() * 8 - 1)));
@@ -362,6 +379,13 @@ Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
 void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 {
 	m_uc.lea(dst, src);
+}
+
+InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	m_uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
+	return node;
 }
 
 void CJITCodeGen::SetSignBit(const Gp &)

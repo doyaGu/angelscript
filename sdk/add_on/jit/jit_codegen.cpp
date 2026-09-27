@@ -1175,13 +1175,6 @@ Gp CJITCodeGen::PtrConst(asPWORD value)
 	return t;
 }
 
-InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
-{
-	InvokeNode *node = 0;
-	m_uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
-	return node;
-}
-
 //------------------------------------------------------------------------
 // Variable access
 

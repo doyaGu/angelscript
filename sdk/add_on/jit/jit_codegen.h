@@ -205,6 +205,9 @@ protected:
 	void EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
 	void EmitRefCountInc(const Gp &obj);
 
+	// Calls a C function. Arguments and return value are set on the returned node
+	asmjit::InvokeNode *Invoke(const void *fn, const asmjit::FuncSignature &sig);
+
 	// Access to the VM registers
 	Mem  RegsField(size_t offset);
 	Mem  ContextField(int offset);  // offset from SJITContextLayout
@@ -294,9 +297,6 @@ protected:
 	asmjit::BaseNode *BeginCold(const Label &label);
 	void  EndCold(asmjit::BaseNode *start, const Label &cont);
 	void  EmitColdCode();
-
-	// Calls a C function. Arguments and return value are set on the returned node
-	asmjit::InvokeNode *Invoke(const void *fn, const asmjit::FuncSignature &sig);
 
 	// Materializes a pointer/word constant
 	Gp   PtrConst(asPWORD value);
