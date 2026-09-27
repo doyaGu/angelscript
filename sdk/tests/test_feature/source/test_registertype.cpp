@@ -1967,8 +1967,10 @@ struct CTypeInfo
 	{
 	    // Unknown type
 #ifdef _MSC_VER
-        // GNUC won't let us compile at all if this is here
-	    int ERROR_UnknownType[-1];
+        // GNUC won't let us compile at all if this is here. The size depends on
+        // T so that clang-cl, which parses the templates at once in C++20, only
+        // fails for the unknown types too
+	    int ERROR_UnknownType[sizeof(T) > 0 ? -1 : 1];
 #endif
 	    return 0;
     };
