@@ -23,6 +23,7 @@ struct SJITStatistics
 	asUINT functionsAOT;         // script functions that use the code generated ahead of time, see AddAOTFunctions
 	asUINT functionsDeferred;    // script functions whose compilation was deferred, see SetCompileThresholds
 	asUINT functionsRecompiled;  // compiled functions compiled again with the classes seen by their calls, see SetProfileThreshold
+	asUINT functionsForLineCallbacks; // compiled functions compiled again with the checks at every statement, see JIT_CHECK_EVERY_STATEMENT
 };
 
 // Callback used to decide if a function should be JIT compiled
@@ -82,7 +83,15 @@ public:
 
 		// Only use the functions generated ahead of time, see AddAOTFunctions, and
 		// leave the others to the VM
-		JIT_AOT_ONLY = 0x100
+		JIT_AOT_ONLY = 0x100,
+
+		// Check for suspension and line callbacks at every statement like the VM.
+		// Otherwise the code only checks for them where they may have been requested
+		// since the last check, i.e. on entry, after calls, and in loops, which is
+		// faster, and the functions executed while a line callback is set are compiled
+		// again with the checks at every statement. Set this if the line callbacks
+		// are always set, e.g. for timeouts, so that the functions are compiled once
+		JIT_CHECK_EVERY_STATEMENT = 0x200
 	};
 
 	CJITCompiler(asDWORD flags = 0);

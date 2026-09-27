@@ -97,8 +97,9 @@ struct CJITCompiler::SImpl
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
 	asUINT                 callThreshold; // see SetCompileThresholds
 	asUINT                 loopThreshold;
-	std::set<asCScriptFunction*> compiling; // the deferred functions being compiled
+	std::set<asCScriptFunction*> compiling; // the functions being compiled, see TierUp, Recompile and CompileExact
 	asUINT                 profileThreshold; // see SetProfileThreshold
+	std::set<asJITFunction> exactCode;   // the code that checks for line callbacks at every statement, see CompileExact
 
 	// The profile of the code of a function, which is passed to Recompile when the code
 	// has counted down the calls
@@ -109,6 +110,7 @@ struct CJITCompiler::SImpl
 		asJITFunction      code;       // the code noting the classes
 		asUINT             generation; // the times the function has been compiled again before
 		bool               recompiled; // Recompile has compiled the function again, or has begun to
+		bool               exact;      // the code checks at every statement, and so does the code compiled again
 		SJITProfile        compiledWith; // the classes that the code was compiled with
 	};
 
@@ -122,12 +124,22 @@ struct CJITCompiler::SImpl
 	};
 	std::map<asJITFunction, SHistory> histories; // by the current code of the functions
 
+	// What Compile compiles a function for, which the statistics count
+	enum ECompile
+	{
+		COMPILE_FIRST, // the first code of the function
+		COMPILE_AGAIN, // the classes in the profile of the source, see Recompile
+		COMPILE_EXACT  // the line callbacks, and the classes in the profile of the source if any, see CompileExact
+	};
+
 	bool IsLogged(asCScriptFunction *func) const;
-	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, const SProfile *source = 0);
-	JITFunction TierUp(asCScriptFunction *func);
+	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose = COMPILE_FIRST, const SProfile *source = 0, bool exact = false);
+	JITFunction TierUp(asCScriptFunction *func, bool exact);
+	JITFunction CompileExact(asCScriptFunction *func);
 	void Replace(asCScriptFunction *func, asJITFunction code);
 	void Release(asJITFunction code);
 	static int Recompile(SJITProfile *profile);
+	static int ExactEntry(void *impl, asSVMRegisters *regs, asPWORD jitArg);
 };
 
 // The times that a function is compiled again at most, see SetProfileThreshold
@@ -527,11 +539,15 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 
 // Analyses the decoded bytecode of the function and generates its code. The entry
 // points are set in the JitEntry instructions then. The code is compiled again with
-// the classes in the profile of the source, see Recompile
-int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, const SProfile *source)
+// the classes in the profile of the source, see Recompile. With exact the code checks
+// for suspension and line callbacks at every statement, and so does the code compiled
+// again with its profile
+int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose, const SProfile *source, bool exact)
 {
 	using namespace asmjit;
 	using namespace asmjit::ujit;
+
+	exact = exact || purpose == COMPILE_EXACT || (source && source->exact);
 
 	// The dirty masks hold one bit per cached slot, and the bit of the frame
 	asUINT cachedSlots = maxCachedSlots < 31 ? maxCachedSlots : 31;
@@ -559,6 +575,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 		profile->code       = 0;
 		profile->generation = generation;
 		profile->recompiled = false;
+		profile->exact      = exact;
 	}
 	inlining.classes     = profile ? &profile->compiledWith : source;
 	code.SetBailInstructions(bailOps);
@@ -567,8 +584,12 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	if( log )
 	{
 		fprintf(logFile, "\n; ---- %s ----\n", func->GetDeclaration(true, true));
-		if( source )
+		if( purpose == COMPILE_AGAIN )
 			fprintf(logFile, "; compiled again with the classes seen by the calls\n");
+		else if( purpose == COMPILE_EXACT )
+			fprintf(logFile, "; compiled again for the line callbacks\n");
+		else if( exact )
+			fprintf(logFile, "; compiled for the line callbacks\n");
 		DumpByteCode(logFile, code);
 	}
 
@@ -596,7 +617,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 
 	SJITCodeGenOptions options;
 	options.noSuspend      = (flags & JIT_NO_SUSPEND) != 0;
-	options.elideSuspend   = false;
+	options.elideSuspend   = !options.noSuspend && !exact && (flags & JIT_CHECK_EVERY_STATEMENT) == 0;
 	options.noScriptCalls  = (flags & JIT_NO_SCRIPT_CALLS) != 0;
 	options.syncEveryInstr = (flags & JIT_SYNC_EVERY_INSTR) != 0;
 	options.maxNativeCallDepth = maxNativeCallDepth;
@@ -604,6 +625,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	options.tieredEntry = callThreshold > 0 ? (const void*)TieredEntry : 0;
 	options.profile   = profile;
 	options.recompile = (const void*)Recompile;
+	options.exactEntry = (const void*)ExactEntry;
+	options.exactParam = this;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
@@ -654,10 +677,14 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 			unwindInfo[jitFunc] = unwindHandle;
 		if( ok )
 		{
-			if( source )
+			if( purpose == COMPILE_AGAIN )
 				stats.functionsRecompiled++;
+			else if( purpose == COMPILE_EXACT )
+				stats.functionsForLineCallbacks++;
 			else
 				stats.functionsCompiled++;
+			if( exact )
+				exactCode.insert(jitFunc);
 			if( profile )
 			{
 				profile->code = jitFunc;
@@ -693,8 +720,9 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 }
 
 // Compiles a deferred function, unless another thread does. Returns the code of the
-// function, or null if it isn't compiled
-JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func)
+// function, or null if it isn't compiled. With exact the code checks at every
+// statement, see CompileExact
+JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func, bool exact)
 {
 	asJITFunction stub = reinterpret_cast<asJITFunction>(TieredEntry);
 	{
@@ -707,7 +735,7 @@ JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func)
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc) >= 0;
+	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_FIRST, 0, exact) >= 0;
 
 	std::lock_guard<std::mutex> lock(mutex);
 	compiling.erase(func);
@@ -746,8 +774,9 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 			profile->countdown = JIT_PROFILE_DONE;
 			return profile->recompiled && !current;
 		}
-		// The code goes on noting the classes unless the new code would inline more
-		if( !profile->HasNewClass(profile->compiledWith) )
+		// The code goes on noting the classes unless the new code would inline more,
+		// and while another thread compiles the function for the line callbacks
+		if( !profile->HasNewClass(profile->compiledWith) || !impl->compiling.insert(func).second )
 		{
 			profile->countdown = int(impl->profileThreshold);
 			return 0;
@@ -758,17 +787,53 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	if( code.Decode(func) < 0 || impl->Compile(func, code, impl->IsLogged(func), &jitFunc, profile) < 0 )
-		return 0;
+	bool ok = code.Decode(func) >= 0 && impl->Compile(func, code, impl->IsLogged(func), &jitFunc, COMPILE_AGAIN, profile) >= 0;
 
 	std::lock_guard<std::mutex> lock(impl->mutex);
+	impl->compiling.erase(func);
+	if( !ok )
+		return 0;
 	impl->Replace(func, jitFunc);
 	return 1;
 }
 
+// Compiles the function again with the checks for suspension and line callbacks at
+// every statement, unless another thread does, and installs the new code, which the
+// function keeps. The code compiled again with the profile of the new code checks at
+// every statement too. Returns the code of the function, or null if the VM goes on
+JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
+{
+	const SProfile *source = 0;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		asJITFunction current = func->scriptData->jitFunction;
+		if( exactCode.count(current) )
+			return reinterpret_cast<JITFunction>(current);
+		if( !compiling.insert(func).second )
+			return 0;
+		// The new code inlines the methods for the classes that the calls have seen, and
+		// is compiled again like the code of the newest profile, see SHistory
+		std::map<asJITFunction, SHistory>::iterator it = histories.find(current);
+		if( it != histories.end() && !it->second.profiles.empty() )
+			source = it->second.profiles[0];
+	}
+
+	CJITByteCode code;
+	asJITFunction jitFunc = 0;
+	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_EXACT, source) >= 0;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	compiling.erase(func);
+	if( !ok )
+		return 0;
+	Replace(func, jitFunc);
+	return reinterpret_cast<JITFunction>(jitFunc);
+}
+
 // Installs the new code of a compiled function. The calls under way may still execute
 // the old code, which is released with the new one, along with the code that the
-// function had before and the profiles. Must be called with the lock held
+// function had before and the profiles. Must be called with the lock held by the
+// thread that is compiling the function, see compiling
 void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
 {
 	asJITFunction current = func->scriptData->jitFunction;
@@ -782,6 +847,24 @@ void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
 		histories.erase(old);
 	}
 	func->scriptData->jitFunction = code;
+}
+
+// Called by the code that checks for suspension and line callbacks only where they may
+// have been requested when the VM enters it while a line callback is set or a
+// suspension is requested, see SJITCodeGenOptions::exactEntry. The function goes on in
+// its code compiled again with the checks at every statement for the line callbacks,
+// and in the VM otherwise, after the JitEntry instruction
+int CJITCompiler::SImpl::ExactEntry(void *impl, asSVMRegisters *regs, asPWORD jitArg)
+{
+	asCContext *ctx = static_cast<asCContext*>(regs->ctx);
+	if( ctx->m_lineCallback )
+	{
+		JITFunction code = static_cast<SImpl*>(impl)->CompileExact(ctx->m_currentFunction);
+		if( code )
+			return code(regs, jitArg & JIT_ENTRY_INDEX_MASK, 0, 0);
+	}
+	regs->programPointer += 1 + AS_PTR_SIZE;
+	return 0;
 }
 
 // The code of the deferred functions, which counts down the argument of the JitEntry
@@ -813,9 +896,10 @@ int CJITCompiler::TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callL
 			arg = value - (asPWORD(1) << JIT_ENTRY_COUNT_SHIFT);
 		else if( count == 1 )
 		{
+			// The function executed with a line callback is compiled for it, see ExactEntry
 			arg = value & JIT_ENTRY_INDEX_MASK;
 			CJITCompiler *compiler = static_cast<CJITCompiler*>(static_cast<asIJITCompiler*>(ctx->m_engine->jitCompiler));
-			code = compiler->m_impl->TierUp(func);
+			code = compiler->m_impl->TierUp(func, ctx->m_lineCallback);
 		}
 	}
 
@@ -867,6 +951,7 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 // Frees the code and its unwind information. Must be called with the lock held
 void CJITCompiler::SImpl::Release(asJITFunction code)
 {
+	exactCode.erase(code);
 	std::map<asJITFunction, void*>::iterator it = unwindInfo.find(code);
 	if( it != unwindInfo.end() )
 	{
