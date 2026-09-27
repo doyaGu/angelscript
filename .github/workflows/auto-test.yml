@@ -193,10 +193,6 @@ jobs:
 
   Windows_x86_MSVC_JIT:
     runs-on: windows-latest
-    # The 32bit engine currently crashes in TestForEach even without the JIT
-    # (value type passed by value to a registered function), so a failure
-    # here doesn't block the workflow
-    continue-on-error: true
     steps:
     - uses: actions/checkout@v4
     - name: set up MSVC (x86)
