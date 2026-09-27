@@ -4326,6 +4326,233 @@ static bool TestProfiles()
 	return fail;
 }
 
+// The code only checks for suspension and line callbacks where they may have been
+// requested since the last check, and the functions executed while a line callback is
+// set are compiled again with the checks at every statement, see
+// JIT_CHECK_EVERY_STATEMENT. Everything that the application can observe must be the
+// same as with the VM
+namespace SuspendChecks
+{
+	static const char *script =
+		"interface Shape { int area(int k); }                                              \n"
+		"class Sq : Shape { int area(int k) { return k * k; } }                            \n"
+		"class Tri : Shape { int area(int k) { return k + 2; } }                           \n"
+		"int add(int a, int b) { return a + b; }                                           \n"
+		"int sum(int n) {                                                                  \n"
+		"  int s = 0;                                                                      \n"
+		"  for( int k = 0; k < n; k++ )                                                    \n"
+		"    s = add(s, k);                                                                \n"
+		"  return s;                                                                       \n"
+		"}                                                                                 \n"
+		// The call of the method notes the class of the object, see SetProfileThreshold
+		"int run(int n) {                                                                  \n"
+		"  Shape@ s = Sq();                                                                \n"
+		"  int r = 0;                                                                      \n"
+		"  for( int i = 0; i < n; i++ ) {                                                  \n"
+		"    r += sum(i % 7) + s.area(i);                                                  \n"
+		"    r += note(i);                                                                 \n"
+		"  }                                                                               \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n"
+		// Only called by the function that the VM goes on in after the line callback
+		// has been set in the call before
+		"int tail(int n) { return n * 3 + 1; }                                             \n"
+		"int other(int n) {                                                                \n"
+		"  int r = run(n);                                                                 \n"
+		"  r += tail(r);                                                                   \n"
+		"  for( int i = 0; i < 3; i++ )                                                    \n"
+		"    r += sum(i);                                                                  \n"
+		"  return r;                                                                       \n"
+		"}                                                                                 \n";
+
+	// Without a line callback, with one, with one set in the middle of the loop, with
+	// suspensions requested in the loop, and with both
+	enum EMode { PLAIN, LINES, START, PAUSE, BOTH };
+	static EMode g_mode  = PLAIN;
+	static int   g_lines = 0;
+
+	static void CountLines(asIScriptContext *, void *) { g_lines++; }
+
+	static int Note(int i)
+	{
+		if( g_mode == START && i == 5 )
+			asGetActiveContext()->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+		else if( (g_mode == PAUSE || g_mode == BOTH) && i % 4 == 1 )
+			asGetActiveContext()->Suspend();
+		return i & 3;
+	}
+
+	struct SConfig
+	{
+		const char *name;
+		asDWORD     flags;
+		asUINT      inlineSize;
+		asUINT      calls;
+		asUINT      iterations;
+	};
+	static const SConfig configs[] =
+	{
+		{ "inline",          0,                                       64, 0, 0 },
+		{ "no inline",       0,                                       0,  0, 0 },
+		{ "every statement", CJITCompiler::JIT_CHECK_EVERY_STATEMENT, 64, 0, 0 },
+		{ "2,3",             0,                                       64, 2, 3 },
+	};
+
+	// The number of functions that each step compiles for the line callbacks in each
+	// configuration. The first compiles run and the functions it calls, which the VM
+	// enters as it goes on in the functions compiled in place too, and they keep the
+	// code, also run when it is compiled again with the class seen by its call. When
+	// the line callback is set in the call of run the VM goes on in other, which is
+	// compiled for it then, and so is tail. The deferred functions are compiled for
+	// the line callbacks right away if one is set, which counts as compiled
+	struct SStep
+	{
+		const char *decl;
+		int         arg;
+		EMode       mode;
+		int         compiled[4];
+	};
+	static const SStep steps[] =
+	{
+		{ "int run(int)",   20, LINES, { 6, 6, 0, 0 } },
+		{ "int run(int)",   20, LINES, { 0, 0, 0, 0 } },
+		{ "int other(int)", 20, PLAIN, { 0, 0, 0, 0 } },
+		{ "int other(int)", 20, PAUSE, { 0, 0, 0, 0 } },
+		{ "int other(int)", 20, START, { 2, 2, 0, 1 } },
+		{ "int other(int)", 20, START, { 0, 0, 0, 0 } },
+		{ "int other(int)", 20, BOTH,  { 0, 0, 0, 0 } },
+		{ "int other(int)", 20, PLAIN, { 0, 0, 0, 0 } },
+		{ "int run(int)",   20, LINES, { 0, 0, 0, 0 } },
+	};
+
+	// Returns what was observed. The column of the configuration has the functions
+	// expected to be compiled for the line callbacks, or is -1 if it depends
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, const char *name, int column, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r = engine->RegisterGlobalFunction("int note(int)", asFUNCTION(Note), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(steps)/sizeof(steps[0]); n++ )
+		{
+			const SStep &step = steps[n];
+			asUINT compiled = jit ? jit->GetStatistics().functionsForLineCallbacks : 0;
+			s << step.decl << " " << step.arg << ":";
+
+			g_mode  = step.mode;
+			g_lines = 0;
+			if( step.mode == LINES || step.mode == BOTH )
+				ctx->SetLineCallback(asFUNCTION(CountLines), 0, asCALL_CDECL);
+			r = ctx->Prepare(mod->GetFunctionByDecl(step.decl));
+			if( r >= 0 )
+				ctx->SetArgDWord(0, step.arg);
+			while( r >= 0 )
+			{
+				r = ctx->Execute();
+				if( r != asEXECUTION_SUSPENDED )
+					break;
+				s << " suspended in " << ctx->GetFunction()->GetName() << ":" << ctx->GetLineNumber() << " after " << g_lines << " lines";
+			}
+			if( r == asEXECUTION_FINISHED )
+				s << " returned " << int(ctx->GetReturnDWord());
+			else
+				s << " failed with " << r;
+			s << ", " << g_lines << " lines\n";
+			ctx->ClearLineCallback();
+
+			if( jit )
+			{
+				compiled = jit->GetStatistics().functionsForLineCallbacks - compiled;
+				int expected = column >= 0 ? step.compiled[column] : -1;
+				if( expected >= 0 && compiled != asUINT(expected) )
+				{
+					PRINTF("suspend checks %s: step %u %s %d compiled %u functions for the line callbacks instead of %d\n", name, n, step.decl, step.arg, compiled, expected);
+					TEST_FAILED;
+				}
+			}
+		}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestSuspendChecks()
+{
+	using namespace SuspendChecks;
+	bool fail = false;
+
+	// The line callbacks must be called as by the VM. The functions compiled for them
+	// are only checked if the calls are made and compiled in place as usual, and the
+	// functions compiled again if the calls can be compiled in place
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG);
+	bool inlining = (envFlags & (CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_SYNC_EVERY_INSTR)) == 0;
+	bool calls    = (envFlags & CJITCompiler::JIT_NO_SCRIPT_CALLS) == 0;
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, "VM", -1, fail);
+	engine->ShutDownAndRelease();
+
+	for( asUINT c = 0; c < sizeof(configs)/sizeof(configs[0]); c++ )
+	{
+		int column = int(c);
+		if( (envFlags | configs[c].flags) & CJITCompiler::JIT_CHECK_EVERY_STATEMENT )
+			column = 2;
+		else if( !calls )
+			column = -1;
+		else if( !inlining )
+			column = configs[c].calls ? -1 : 1;
+
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(envFlags | configs[c].flags);
+		jit.SetMaxInlineSize(configs[c].inlineSize);
+		jit.SetProfileThreshold(5);
+		if( jit.SetCompileThresholds(configs[c].calls, configs[c].iterations) < 0 )
+			TEST_FAILED;
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, configs[c].name, column, fail);
+		engine->ShutDownAndRelease();
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+		{
+			PRINTF("suspend checks %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
+			TEST_FAILED;
+		}
+		asUINT recompiled = inlining && calls && configs[c].inlineSize > 0 ? 1 : 0;
+		if( stats.functionsRecompiled != recompiled )
+		{
+			PRINTF("suspend checks %s: %u functions compiled again instead of %u\n", configs[c].name, stats.functionsRecompiled, recompiled);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			std::stringstream e(expected), a(actual);
+			std::string el, al;
+			while( std::getline(e, el) && std::getline(a, al) )
+				if( el != al )
+					PRINTF("suspend checks %s:\n  VM:  %s\n  JIT: %s\n", configs[c].name, el.substr(0, 300).c_str(), al.substr(0, 300).c_str());
+			TEST_FAILED;
+		}
+	}
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -4398,6 +4625,7 @@ bool Test()
 	fail = TestMemoryFunctions() || fail;
 	fail = TestTiered() || fail;
 	fail = TestProfiles() || fail;
+	fail = TestSuspendChecks() || fail;
 
 	return fail;
 }
