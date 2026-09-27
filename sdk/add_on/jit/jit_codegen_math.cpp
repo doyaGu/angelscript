@@ -811,7 +811,9 @@ void CJITCodeGen::EmitFloatCompareResult(const Gp &dst, const Vec &a, const Vec 
 	m_uc.or_(dst, t1, t2);
 }
 
-// Boolean result of a test instruction applied to a floating point compare
+// Boolean result of a test instruction applied to a floating point compare. The
+// scalar not-equal compares of the UniCompiler emit an invalid mvn on AArch64, so
+// the equality is inverted instead
 void CJITCodeGen::EmitFloatTest(const Gp &dst, asEBCInstr test, const Vec &a, const Vec &b, bool isDouble)
 {
 	Vec m = isDouble ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
@@ -819,7 +821,7 @@ void CJITCodeGen::EmitFloatTest(const Gp &dst, asEBCInstr test, const Vec &a, co
 	switch( RelationOf(test) )
 	{
 	case REL_EQ: isDouble ? m_uc.s_cmp_eq_f64(m, a, b) : m_uc.s_cmp_eq_f32(m, a, b); break;
-	case REL_NE: isDouble ? m_uc.s_cmp_ne_f64(m, a, b) : m_uc.s_cmp_ne_f32(m, a, b); break;
+	case REL_NE: isDouble ? m_uc.s_cmp_eq_f64(m, a, b) : m_uc.s_cmp_eq_f32(m, a, b); invert = true; break;
 	case REL_LT: isDouble ? m_uc.s_cmp_lt_f64(m, a, b) : m_uc.s_cmp_lt_f32(m, a, b); break;
 	case REL_GE: isDouble ? m_uc.s_cmp_lt_f64(m, a, b) : m_uc.s_cmp_lt_f32(m, a, b); invert = true; break;
 	case REL_GT: isDouble ? m_uc.s_cmp_le_f64(m, a, b) : m_uc.s_cmp_le_f32(m, a, b); invert = true; break;
@@ -885,13 +887,13 @@ bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 			if( EmitFloatCompareBranch(a, b, isDouble, next->op, target) )
 				return true;
 
-			// Generic fallback using compare masks
+			// Generic fallback using compare masks, see EmitFloatTest
 			Vec m = isDouble ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
 			bool jumpIfSet = true;
 			switch( RelationOf(next->op) )
 			{
 			case REL_EQ: isDouble ? m_uc.s_cmp_eq_f64(m, a, b) : m_uc.s_cmp_eq_f32(m, a, b); break;
-			case REL_NE: isDouble ? m_uc.s_cmp_ne_f64(m, a, b) : m_uc.s_cmp_ne_f32(m, a, b); break;
+			case REL_NE: isDouble ? m_uc.s_cmp_eq_f64(m, a, b) : m_uc.s_cmp_eq_f32(m, a, b); jumpIfSet = false; break;
 			case REL_LT: isDouble ? m_uc.s_cmp_lt_f64(m, a, b) : m_uc.s_cmp_lt_f32(m, a, b); break;
 			case REL_GE: isDouble ? m_uc.s_cmp_lt_f64(m, a, b) : m_uc.s_cmp_lt_f32(m, a, b); jumpIfSet = false; break;
 			case REL_GT: isDouble ? m_uc.s_cmp_le_f64(m, a, b) : m_uc.s_cmp_le_f32(m, a, b); jumpIfSet = false; break;
