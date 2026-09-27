@@ -1835,8 +1835,8 @@ bool Test()
 		asIScriptFunction *func = mod->GetFunctionByName("main");
 		asBYTE expect[] = 
 			{
-				// TODO: runtime optimize: Repeated JitEntry, SUSPEND should be removed
-				asBC_JitEntry,asBC_SUSPEND,asBC_JitEntry,asBC_SUSPEND,asBC_JitEntry,asBC_PGA,asBC_SetV4,asBC_PshV4,asBC_PSF,asBC_CALLSYS,asBC_JitEntry,
+				// TODO: runtime optimize: Repeated JitEntry should be removed
+				asBC_JitEntry,asBC_JitEntry,asBC_JitEntry,asBC_PGA,asBC_SetV4,asBC_PshV4,asBC_PSF,asBC_CALLSYS,asBC_JitEntry,
 				asBC_SUSPEND,asBC_JitEntry,asBC_SetV4,asBC_PSF,asBC_CALLSYS,asBC_JitEntry,asBC_CpyVtoR4,asBC_JMP,asBC_RET
 			};
 		if( !ValidateByteCode(func, expect) )
