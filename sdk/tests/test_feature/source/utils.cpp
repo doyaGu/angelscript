@@ -603,8 +603,8 @@ void ReleaseJitCompiler()
 	if( g_jit )
 	{
 		SJITStatistics stats = g_jit->GetStatistics();
-		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined, %d ahead of time, %d deferred, %d recompiled\n",
-			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined, stats.functionsAOT, stats.functionsDeferred, stats.functionsRecompiled);
+		PRINTF("JIT: %d functions compiled, %d failed, %d released, %d instructions, %d bails, %d calls inlined, %d ahead of time, %d deferred, %d recompiled, %d for line callbacks\n",
+			stats.functionsCompiled, stats.functionsFailed, stats.functionsReleased, stats.instructionsCompiled, stats.instructionsBailed, stats.callsInlined, stats.functionsAOT, stats.functionsDeferred, stats.functionsRecompiled, stats.functionsForLineCallbacks);
 		if( getenv("AS_JIT_AOT_OUTPUT") && g_jit->WriteAOTOutput() < 0 )
 			PRINTF("JIT: the code generated ahead of time could not be written\n");
 		delete g_jit;
