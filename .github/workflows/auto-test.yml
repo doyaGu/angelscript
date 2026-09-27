@@ -209,6 +209,9 @@ jobs:
         cmake . -G Ninja -DCMAKE_BUILD_TYPE=Release -DAS_TEST_JIT=ON
         cmake --build . --config Release
     - name: run test_feature
+      # Unbuffered, so that the log shows where the tests stopped if they crash
+      env:
+        AS_TEST_JIT_UNBUFFERED: 1
       run: |
         cd ${{github.workspace}}/sdk/tests/test_feature/bin
         ./test_feature.exe
