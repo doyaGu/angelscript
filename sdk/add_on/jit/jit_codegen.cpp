@@ -1101,12 +1101,12 @@ void CJITCodeGen::EmitBailStubs()
 
 Mem CJITCodeGen::RegsField(size_t offset)
 {
-	return mem_ptr(m_regs, int32_t(offset));
+	return Addr(m_regs, int32_t(offset));
 }
 
 Mem CJITCodeGen::ContextField(int offset)
 {
-	return mem_ptr(m_regs, int32_t(offset));
+	return Addr(m_regs, int32_t(offset));
 }
 
 Mem CJITCodeGen::VRMem()
@@ -1116,14 +1116,20 @@ Mem CJITCodeGen::VRMem()
 
 Mem CJITCodeGen::Var(int offset, int byteDisp)
 {
-	return mem_ptr(m_fp, -(offset + m_frameBase) * 4 + byteDisp);
+	return Addr(m_fp, -(offset + m_frameBase) * 4 + byteDisp);
+}
+
+// The address of the variable
+void CJITCodeGen::LeaVar(const Gp &dst, int offset)
+{
+	Lea(dst, mem_ptr(m_fp, -(offset + m_frameBase) * 4));
 }
 
 Mem CJITCodeGen::Stack(int dwordOffset)
 {
 	if( m_staticStack )
-		return mem_ptr(m_fp, m_spOffset + dwordOffset * 4);
-	return mem_ptr(m_sp, dwordOffset * 4);
+		return Addr(m_fp, m_spOffset + dwordOffset * 4);
+	return Addr(m_sp, dwordOffset * 4);
 }
 
 int CJITCodeGen::StackOffset(asUINT idx) const
@@ -1152,7 +1158,7 @@ CJITCodeGen::Gp CJITCodeGen::StackPointer()
 	if( !m_staticStack )
 		return m_sp;
 	Gp t = m_uc.new_gp_ptr();
-	m_uc.lea(t, mem_ptr(m_fp, m_spOffset));
+	Lea(t, mem_ptr(m_fp, m_spOffset));
 	return t;
 }
 
@@ -1480,7 +1486,7 @@ void CJITCodeGen::SetVRAddr(asUINT idx, const Mem &addr)
 	}
 
 	Gp t = m_uc.new_gp_ptr();
-	m_uc.lea(t, addr);
+	Lea(t, addr);
 	StoreVRPtr(t);
 }
 
@@ -1843,7 +1849,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_PSF:
 		{
 			Gp t = m_uc.new_gp_ptr();
-			m_uc.lea(t, Var(a0));
+			LeaVar(t, a0);
 			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
 		}
@@ -2045,12 +2051,12 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 				asUINT off = 0;
 				while( bytes - off >= 8 && Is64Bit() )
 				{
-					Copy64(mem_ptr(d, off), mem_ptr(s, off));
+					Copy64(Addr(d, off), Addr(s, off));
 					off += 8;
 				}
 				while( off < bytes )
 				{
-					Copy32(mem_ptr(d, off), mem_ptr(s, off));
+					Copy32(Addr(d, off), Addr(s, off));
 					off += 4;
 				}
 			}
@@ -2329,7 +2335,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.load(t, Var(0));
 			m_uc.j(BailLabel(idx), test_z(t));
-			SetVRAddr(idx, mem_ptr(t, asBC_SWORDARG0(bc)));
+			SetVRAddr(idx, Addr(t, asBC_SWORDARG0(bc)));
 		}
 		break;
 
@@ -2337,7 +2343,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		{
 			Gp t = LoadPtr(a0);
 			m_uc.j(BailLabel(idx), test_z(t));
-			SetVRAddr(idx, mem_ptr(t, asBC_SWORDARG1(bc)));
+			SetVRAddr(idx, Addr(t, asBC_SWORDARG1(bc)));
 		}
 		break;
 
@@ -2361,7 +2367,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			Gp var = LoadPtr(a0);
 			Gp t = m_uc.new_gp32();
 			m_uc.mov(t, Imm(int(asBC_DWORDARG(bc + 1))));
-			m_uc.store_u32(mem_ptr(var, int(asBC_DWORDARG(bc))), t);
+			m_uc.store_u32(Addr(var, int(asBC_DWORDARG(bc))), t);
 		}
 		break;
 

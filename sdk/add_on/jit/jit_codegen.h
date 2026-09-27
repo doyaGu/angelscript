@@ -196,6 +196,8 @@ protected:
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 	Mem  PtrElement(const Gp &array, const Gp &index);
+	Mem  Addr(const Gp &base, int32_t disp);
+	void Lea(const Gp &dst, const Mem &src);
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void StoreImm32(const Mem &dst, int value);
@@ -208,6 +210,7 @@ protected:
 	Mem  ContextField(int offset);  // offset from SJITContextLayout
 	Mem  VRMem();
 	Mem  Var(int offset, int byteDisp = 0);
+	void LeaVar(const Gp &dst, int offset);
 	Mem  Stack(int dwordOffset);
 	Mem  Global(asPWORD address, Gp &tmp);
 

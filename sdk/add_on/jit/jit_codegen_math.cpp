@@ -224,7 +224,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			Gp a = Load32(a1);
 			Gp b = Load32(a2);
 			Gp dst = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
+			LeaVar(dst, a0);
 			SyncAll(idx);
 			InvokeNode *call = Invoke(instr.op == asBC_POWi ? (const void*)JIT_POWi : (const void*)JIT_POWu, FuncSignature::build<int, asSVMRegisters*, void*, asDWORD, asDWORD>());
 			Gp r = m_uc.new_gp32();
@@ -256,7 +256,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 		else
 		{
 			Gp dst = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
+			LeaVar(dst, a0);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
 			call->set_arg(0, Imm(int(instr.op)));
 			call->set_arg(1, dst);
@@ -332,9 +332,9 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			Gp dst = m_uc.new_gp_ptr();
 			Gp pa = m_uc.new_gp_ptr();
 			Gp pb = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(pa, Var(a1));
-			m_uc.lea(pb, Var(a2));
+			LeaVar(dst, a0);
+			LeaVar(pa, a1);
+			LeaVar(pb, a2);
 			// The operands are read from memory by the helper
 			SyncAll(idx);
 			InvokeNode *call = Invoke(instr.op == asBC_POWi64 ? (const void*)JIT_POWi64 : (const void*)JIT_POWu64, FuncSignature::build<int, asSVMRegisters*, void*, const void*, const void*>());
@@ -354,9 +354,9 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			Gp dst = m_uc.new_gp_ptr();
 			Gp pa = m_uc.new_gp_ptr();
 			Gp pb = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(pa, Var(a1));
-			m_uc.lea(pb, Var(a2));
+			LeaVar(dst, a0);
+			LeaVar(pa, a1);
+			LeaVar(pb, a2);
 			StoreCachedSlot(a1);
 			StoreCachedSlot(a2);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
@@ -613,7 +613,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			Vec a = LoadF32(a1);
 			Vec b = LoadF32(a2);
 			Gp dst = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
+			LeaVar(dst, a0);
 			SyncAll(idx);
 			InvokeNode *call = Invoke((const void*)JIT_POWf, FuncSignature::build<int, asSVMRegisters*, void*, float, float>());
 			Gp r = m_uc.new_gp32();
@@ -633,7 +633,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 		{
 			Vec a = LoadF64(a1);
 			Gp dst = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
+			LeaVar(dst, a0);
 			InvokeNode *call;
 			if( instr.op == asBC_POWd )
 			{
@@ -721,7 +721,7 @@ bool CJITCodeGen::EmitIncDec(const SJITInstr &instr)
 		else
 		{
 			Gp p = m_uc.new_gp_ptr();
-			m_uc.lea(p, m);
+			Lea(p, m);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
 			call->set_arg(0, Imm(int(instr.op)));
 			call->set_arg(1, p);
@@ -926,8 +926,8 @@ bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 		Gp pa = m_uc.new_gp_ptr();
 		Gp pb = m_uc.new_gp_ptr();
 		m_uc.lea(dst, tmp);
-		m_uc.lea(pa, Var(a0));
-		m_uc.lea(pb, Var(a1));
+		LeaVar(pa, a0);
+		LeaVar(pb, a1);
 		InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
 		call->set_arg(0, Imm(int(instr.op)));
 		call->set_arg(1, dst);
@@ -1231,8 +1231,8 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		{
 			Gp dst = m_uc.new_gp_ptr();
 			Gp src = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(src, Var(instr.op == asBC_fTOi64 ? a1 : a0));
+			LeaVar(dst, a0);
+			LeaVar(src, instr.op == asBC_fTOi64 ? a1 : a0);
 			StoreCachedSlot(a0);
 			StoreCachedSlot(a1);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
@@ -1269,8 +1269,8 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		{
 			Gp dst = m_uc.new_gp_ptr();
 			Gp src = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(src, Var(instr.op == asBC_fTOu64 ? a1 : a0));
+			LeaVar(dst, a0);
+			LeaVar(src, instr.op == asBC_fTOu64 ? a1 : a0);
 			StoreCachedSlot(a0);
 			StoreCachedSlot(a1);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
@@ -1305,8 +1305,8 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		{
 			Gp dst = m_uc.new_gp_ptr();
 			Gp src = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(src, Var(instr.op == asBC_i64TOf ? a1 : a0));
+			LeaVar(dst, a0);
+			LeaVar(src, instr.op == asBC_i64TOf ? a1 : a0);
 			StoreCachedSlot(a0);
 			StoreCachedSlot(a1);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
@@ -1345,8 +1345,8 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		{
 			Gp dst = m_uc.new_gp_ptr();
 			Gp src = m_uc.new_gp_ptr();
-			m_uc.lea(dst, Var(a0));
-			m_uc.lea(src, Var(instr.op == asBC_u64TOf ? a1 : a0));
+			LeaVar(dst, a0);
+			LeaVar(src, instr.op == asBC_u64TOf ? a1 : a0);
 			StoreCachedSlot(a0);
 			StoreCachedSlot(a1);
 			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());

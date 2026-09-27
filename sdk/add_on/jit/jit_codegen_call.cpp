@@ -160,19 +160,19 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		{
 			method = EmitFindMethod(callee, slow, (instr.flags & JIT_INSTR_INLINE) ? 0 : ProfileCell(idx));
 			target = m_uc.new_gp_ptr();
-			m_uc.load(target, mem_ptr(method, layout.scriptData));
-			m_uc.load(target, mem_ptr(target, layout.jitFunction));
+			m_uc.load(target, Addr(method, layout.scriptData));
+			m_uc.load(target, Addr(target, layout.jitFunction));
 		}
 		else if( kind == JIT_CALL_PTR )
 		{
 			// Everything but script functions is left to the helper
 			Gp type = m_uc.new_gp32();
 			m_uc.j(slow, test_z(*extra));
-			m_uc.load_u32(type, mem_ptr(*extra, layout.funcType));
+			m_uc.load_u32(type, Addr(*extra, layout.funcType));
 			m_uc.j(slow, cmp_ne(type, Imm(int(asFUNC_SCRIPT))));
 			target = m_uc.new_gp_ptr();
-			m_uc.load(target, mem_ptr(*extra, layout.scriptData));
-			m_uc.load(target, mem_ptr(target, layout.jitFunction));
+			m_uc.load(target, Addr(*extra, layout.scriptData));
+			m_uc.load(target, Addr(target, layout.jitFunction));
 			method = *extra;
 		}
 		if( target.is_valid() )
@@ -278,7 +278,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		Gp type = m_uc.new_gp_ptr();
 		m_uc.load(type, Stack(0));
 		m_uc.j(own, test_z(type));
-		m_uc.load(type, mem_ptr(type, layout.objectType));
+		m_uc.load(type, Addr(type, layout.objectType));
 		asCObjectType **seen = objType ? ProfileCell(idx) : 0;
 		if( seen )
 		{
@@ -300,8 +300,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			// The classes that inherit the method have it in the same place of their
 			// tables as the class declaring it
 			asCScriptFunction *method = func->engine->scriptFunctions[asBC_INTARG(instr.bc)];
-			m_uc.load(type, mem_ptr(type, layout.virtualFunctionTable));
-			m_uc.load(type, mem_ptr(type, method->vfTableIdx * PTR_BYTES));
+			m_uc.load(type, Addr(type, layout.virtualFunctionTable));
+			m_uc.load(type, Addr(type, method->vfTableIdx * PTR_BYTES));
 			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(func))));
 		}
 	}
@@ -433,7 +433,7 @@ void CJITCodeGen::EmitStackBlockCheck(int extent, const Label &none)
 	Gp limit  = m_uc.new_gp_ptr();
 	m_uc.load(blocks, ContextField(layout.stackBlocks));
 	m_uc.load_u32(index, ContextField(layout.stackIndex));
-	m_uc.lea(limit, mem_ptr(m_fp, -(extent + int(layout.reserveStack)) * 4));
+	Lea(limit, mem_ptr(m_fp, -(extent + int(layout.reserveStack)) * 4));
 	m_uc.j(none, ucmp_lt(limit, PtrElement(blocks, index)));
 }
 
@@ -486,7 +486,7 @@ void CJITCodeGen::EmitInlineExit(int frame)
 		const CJITByteCode *code = m_frames[callee.caller].code;
 		const SJITInstr &instr = code->GetInstructions()[callee.callIdx];
 		Gp fp = m_uc.new_gp_ptr();
-		m_uc.lea(fp, mem_ptr(m_fp, -callee.base * 4));
+		Lea(fp, mem_ptr(m_fp, -callee.base * 4));
 		InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*, asUINT>());
 		call->set_arg(0, m_regs);
 		call->set_arg(1, Imm(int64_t(asPWORD(callee.code->GetFunction()))));
@@ -583,7 +583,7 @@ CJITCodeGen::Gp CJITCodeGen::FramePointer(int base)
 	if( base == 0 )
 		return m_fp;
 	Gp fp = m_uc.new_gp_ptr();
-	m_uc.lea(fp, mem_ptr(m_fp, -base * 4));
+	Lea(fp, mem_ptr(m_fp, -base * 4));
 	return fp;
 }
 
@@ -598,7 +598,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	Gp type = m_uc.new_gp_ptr();
 	m_uc.load(type, Stack(0));
 	m_uc.j(slow, test_z(type));
-	m_uc.load(type, mem_ptr(type, layout.objectType));
+	m_uc.load(type, Addr(type, layout.objectType));
 	if( seen )
 	{
 		// The first class is noted, and JIT_PROFILE_MANY once another one comes.
@@ -622,11 +622,11 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 		m_uc.bind(cont);
 	}
 	Gp table = m_uc.new_gp_ptr();
-	m_uc.load(table, mem_ptr(type, layout.virtualFunctionTable));
+	m_uc.load(table, Addr(type, layout.virtualFunctionTable));
 	Gp found = m_uc.new_gp_ptr();
 	if( method->funcType == asFUNC_VIRTUAL )
 	{
-		m_uc.load(found, mem_ptr(table, method->vfTableIdx * PTR_BYTES));
+		m_uc.load(found, Addr(table, method->vfTableIdx * PTR_BYTES));
 		return found;
 	}
 
@@ -637,8 +637,8 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	Gp intf  = PtrConst(asPWORD(method->objectType));
 	Label loop  = m_uc.new_label();
 	Label match = m_uc.new_label();
-	m_uc.load(list, mem_ptr(type, layout.interfaces));
-	m_uc.load_u32(count, mem_ptr(type, layout.interfaceCount));
+	m_uc.load(list, Addr(type, layout.interfaces));
+	m_uc.load_u32(count, Addr(type, layout.interfaceCount));
 	m_uc.mov(n, Imm(0));
 	m_uc.bind(loop);
 	m_uc.j(slow, ucmp_ge(n, count));
@@ -647,7 +647,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	m_uc.add(n, n, Imm(1));
 	m_uc.j(loop);
 	m_uc.bind(match);
-	m_uc.load(list, mem_ptr(type, layout.interfaceVFTOffsets));
+	m_uc.load(list, Addr(type, layout.interfaceVFTOffsets));
 	m_uc.load_u32(n, mem_ptr(list, n, 2));
 	m_uc.add(n, n, Imm(method->vfTableIdx));
 	m_uc.load(found, mem_ptr(table, n, ptrShift));
@@ -1324,7 +1324,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			else
 			{
 				m_uc.store_u32(mem_ptr(retPtr), retGp);
-				m_uc.store_u32(mem_ptr(retPtr, 4), retGpHi);
+				m_uc.store_u32(Addr(retPtr, 4), retGpHi);
 			}
 			break;
 		case RET_F32:
@@ -1499,7 +1499,7 @@ void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
 	{
 		Gp target = m_uc.new_gp_ptr();
 		m_uc.load(target, mem_ptr(obj));
-		m_uc.load(target, mem_ptr(target, int32_t(asPWORD(beh.func) - 1)));
+		m_uc.load(target, Addr(target, int32_t(asPWORD(beh.func) - 1)));
 		m_uc.cc->invoke(Out(call), target, sig);
 	}
 	else
@@ -1635,7 +1635,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			else
 			{
 				Gp var = m_uc.new_gp_ptr();
-				m_uc.lea(var, Var(a0));
+				LeaVar(var, a0);
 				InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
 				call->set_arg(0, m_regs);
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
@@ -1735,7 +1735,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				PopStack(PTR_BYTES);
 			}
 			else
-				m_uc.lea(d, Var(a0));
+				LeaVar(d, a0);
 			m_uc.load(s, Stack(0));
 			// The release of the old object may execute a script destructor, see FREE
 			SyncForCall(idx);

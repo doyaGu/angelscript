@@ -75,6 +75,17 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	return mem_ptr(array, index, Is64Bit() ? 3 : 2);
 }
 
+// x86 takes any 32bit displacement
+Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
+{
+	return mem_ptr(base, disp);
+}
+
+void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
+{
+	m_uc.lea(dst, src);
+}
+
 // The sign bit of a 64bit register isn't an immediate that OR can take
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
@@ -251,6 +262,27 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	return mem_ptr(p);
 }
 
+// The loads and stores take the displacements from -256 to 255, and the multiples
+// of the size of the access up to 4095 times it, which the multiples of 8 below 4096
+// are for any size. The others are added to the base first
+Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
+{
+	if( (disp >= -256 && disp <= 255) || (disp >= 0 && disp < 4096 && (disp & 7) == 0) )
+		return mem_ptr(base, disp);
+	Gp p = m_uc.new_gp_ptr();
+	m_uc.add(p, base, Imm(disp));
+	return mem_ptr(p);
+}
+
+// The add of lea only takes 12bit unsigned immediates, unlike that of UniCompiler
+void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
+{
+	if( src.has_index() )
+		m_uc.lea(dst, src);
+	else
+		m_uc.add(dst, src.base_reg().as<Gp>(), Imm(src.offset_lo32()));
+}
+
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
 	m_uc.cc->orr(r, r, Imm(uint64_t(1) << (r.size() * 8 - 1)));
@@ -320,6 +352,16 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	Gp p = m_uc.new_gp_ptr();
 	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
 	return mem_ptr(p);
+}
+
+Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
+{
+	return mem_ptr(base, disp);
+}
+
+void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
+{
+	m_uc.lea(dst, src);
 }
 
 void CJITCodeGen::SetSignBit(const Gp &)
