@@ -2816,7 +2816,11 @@ namespace ScriptRefCounts
 		r = ctx->Execute();
 		s << "resurrect " << r << " " << g_trace.str() << msgs.buffer;
 
+		// The contexts run a step of the GC when they finish, which allocates and holds
+		// a reference of the shared object from one step to another, so the GC is
+		// left out while the threads spin
 		asIScriptObject *shared = *(asIScriptObject**)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("g_shared"));
+		engine->SetEngineProperty(asEP_AUTO_GARBAGE_COLLECT, false);
 		int before = shared->AddRef();
 		shared->Release();
 		std::atomic<int> ready(0);
@@ -2828,6 +2832,7 @@ namespace ScriptRefCounts
 			threads[n].join();
 		int after = shared->AddRef();
 		shared->Release();
+		engine->SetEngineProperty(asEP_AUTO_GARBAGE_COLLECT, true);
 		s << "spin";
 		for( int n = 0; n < SPIN_THREADS; n++ )
 		{
