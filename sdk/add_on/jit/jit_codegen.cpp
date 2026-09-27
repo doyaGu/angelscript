@@ -52,6 +52,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_bailMaterializedBorrowedUsed = false;
 	m_inlineExtent = 0;
 	m_failed     = false;
+	m_failedOp   = -1;
 }
 
 //------------------------------------------------------------------------
@@ -428,8 +429,11 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			}
 
 			if( !ok )
-			{
 				m_failed = true;
+			if( m_failed )
+			{
+				if( m_failedOp < 0 )
+					m_failedOp = instr.op;
 				break;
 			}
 

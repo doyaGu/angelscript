@@ -64,6 +64,9 @@ public:
 	asUINT GetInlinedCallCount() const { return m_callsInlined; }
 	asUINT GetProfiledCallCount() const { return m_callsProfiled; } // the calls that note their classes in the profile
 
+	// The name of the first instruction that no code could be generated for, or null
+	const char *GetFailedInstruction() const { return m_failedOp < 0 ? 0 : asBCInfo[m_failedOp].name; }
+
 protected:
 	typedef asmjit::ujit::Gp        Gp;
 	typedef asmjit::ujit::Vec       Vec;
@@ -349,6 +352,7 @@ protected:
 	bool   m_shareMaterial; // the next calls share the materialization, see EmitBody
 	int    m_inlineExtent; // the largest extent of the inlined calls, see GetInlineRoom
 	bool   m_failed;
+	int    m_failedOp; // the first instruction that failed, or -1
 };
 
 END_AS_NAMESPACE

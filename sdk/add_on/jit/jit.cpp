@@ -644,10 +644,14 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 
 	CJITCodeGen gen(uc, code, options);
 	bool ok = gen.Generate();
+	if( !ok && errorHandler.message.empty() && gen.GetFailedInstruction() )
+		errorHandler.message = std::string("no code for ") + gen.GetFailedInstruction();
 	if( ok )
 		ok = (cc.finalize() == Error::kOk);
 	if( ok )
 		ok = (errorHandler.error == Error::kOk);
+	if( !ok && errorHandler.message.empty() && errorHandler.error != Error::kOk )
+		errorHandler.message = stringify_error(errorHandler.error);
 
 	// The functions that C++ exceptions can pass through need unwind information
 	CJITUnwindInfo unwind;
@@ -668,7 +672,10 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	if( ok )
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		ok = (runtime.add(&jitFunc, &holder) == Error::kOk);
+		Error err = runtime.add(&jitFunc, &holder);
+		ok = (err == Error::kOk);
+		if( !ok )
+			errorHandler.message = std::string("the code could not be added: ") + stringify_error(err);
 		void *unwindHandle = 0;
 		if( ok && gen.IsGuarded() && !unwind.Register((void*)jitFunc, &unwindHandle) )
 		{
