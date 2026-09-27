@@ -1171,6 +1171,12 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 
 	case asBC_SUSPEND:
 		// The debugger may modify the variables in the line callback
+		//
+		// TODO: runtime optimize: Only check where a suspension or line callback may
+		// have been requested since the last check, like the JIT compiled code, see
+		// CJITCodeGen::EmitBody. The functions can't be compiled again for the line
+		// callbacks, so the VM would execute them while a line callback is set, or
+		// the code of each function would have a second variant with all the checks
 		Emit("if( AOT_SUSPENDING() )");
 		Emit("{");
 		EmitSync("\t");

@@ -41,7 +41,8 @@ public:
     JIT_DIRECT_SYSTEM_CALLS    = 0x20, // call registered functions directly on all platforms (see below)
     JIT_NO_DIRECT_SYSTEM_CALLS = 0x40, // never call registered functions directly
     JIT_NO_INLINE              = 0x80, // always call the script functions instead of compiling small ones in place
-    JIT_AOT_ONLY               = 0x100 // only use the code generated ahead of time, and leave the other functions to the VM
+    JIT_AOT_ONLY               = 0x100, // only use the code generated ahead of time, and leave the other functions to the VM
+    JIT_CHECK_EVERY_STATEMENT  = 0x200  // check for suspension/line callbacks at every statement like the VM
   };
 
   CJITCompiler(asDWORD flags = 0);
@@ -223,7 +224,7 @@ line callbacks, suspension, saving the bytecode, and the rest work as with the
 interpreter.
 
 With the thresholds 2,3 the feature tests of the library compile 636 of their
-8756 functions, 11712 instead of 146343 bytecode instructions. The tests of the
+8756 functions, 11788 instead of 146548 bytecode instructions. The tests of the
 test_performance project compile 590 of their 970 functions with the thresholds
 2,3, and 330 with 1000,1000. With the thresholds 2,3 the tests take as long as
 when all functions are compiled up front, as the functions that run long enough
@@ -274,6 +275,40 @@ The function is compiled 3 times in each, once more for the second loop. None of
 other tests of the test_performance project make such calls, so their times don't
 change, and with the threshold 2 the feature tests of the library compile 6 of their
 8756 functions again.
+
+\section doc_addon_jit_suspend Suspension and line callbacks
+
+The VM checks at every statement whether the execution is to be suspended or a
+line callback is to be called. The JIT compiled code only checks where such a request
+may have come since the last check: when the function is entered, after the calls of
+registered and script functions, which may call \ref asIScriptContext::Suspend "Suspend",
+\ref asIScriptContext::Abort "Abort", or \ref asIScriptContext::SetLineCallback "SetLineCallback",
+and once in each iteration of a loop. The code goes on in the VM where it finds a
+request, and the VM suspends the execution at the next statement or calls the line
+callback for it, so the requests of the functions called are answered at the same
+statement as with the VM. Those of other threads, e.g. of a watchdog that aborts the
+scripts that run too long, are answered by the next iteration of a loop, call, or
+return at the latest.
+
+While a line callback is set, the functions that the VM enters, including the one it
+goes on in when it reaches the next entry point of its compiled code, are compiled
+again with the checks at every statement, and keep that code, also when they are
+compiled again with the \ref doc_addon_jit_profiles "profiles". The deferred functions
+of the \ref doc_addon_jit_tiered "tiered compilation" that are compiled while a line
+callback is set are compiled with the checks right away. So once a debugger has set a
+line callback the functions it has seen check at every statement, and the others
+don't. Applications that always set a line callback, e.g. to time out the scripts,
+can set the flag \ref CJITCompiler::JIT_CHECK_EVERY_STATEMENT, with which all the
+functions check at every statement from the start, so that they are only compiled
+once. In the \ref SJITStatistics "statistics" functionsForLineCallbacks counts the
+functions compiled again for the line callbacks.
+
+Leaving out the other checks makes the tests of the test_performance project 1.13
+times as fast by the geometric mean as with the checks at every statement, which is
+nearly the 1.15 times that \ref CJITCompiler::JIT_NO_SUSPEND gains by leaving out
+all of them. Assign.1 for example takes 0.002 seconds instead of 0.007, and Call
+0.113 instead of 0.127. The feature tests of the library compile 52 of their 8756
+functions again for the line callbacks.
 
 \section doc_addon_jit_aot Ahead of time compilation
 
@@ -359,36 +394,36 @@ objects they create, which the pooled memory functions speed up.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
-Basic          0.246    0.080      0.025    0.025     0.045
+Basic          0.246    0.082      0.026    0.026     0.045
 Basic2         0.085    0.005      0.005    0.005     0.009
-Call           0.272    0.125      0.122    0.122     0.117
-Call2          0.378    0.179      0.178    0.177     0.176
-Fib            0.349    0.086      0.085    0.083     0.095
-Int            0.053    0.019      0.006    0.006     0.009
-Intf           0.126    0.005      0.005    0.006     0.028
+Call           0.272    0.114      0.113    0.116     0.117
+Call2          0.378    0.178      0.180    0.179     0.176
+Fib            0.349    0.086      0.085    0.088     0.095
+Int            0.053    0.018      0.006    0.006     0.009
+Intf           0.126    0.005      0.005    0.005     0.028
 Mthd           0.124    0.005      0.005    0.005     0.022
-String         0.231    0.196      0.120    0.120     0.137
-String2        0.154    0.099      0.055    0.054     0.075
-StringPooled   0.152    0.115      0.039    0.039     0.052
-ThisProp       0.191    0.016      0.016    0.016     0.022
-Vector3        0.090    0.067      0.012    0.012     0.013
-Assign.1       0.111    0.008      0.008    0.008     0.009
-Assign.2       0.199    0.008      0.008    0.008     0.012
-Assign.3       0.164    0.010      0.010    0.010     0.014
-Assign.4       0.264    0.015      0.015    0.015     0.019
-Assign.5       0.281    0.015      0.015    0.015     0.019
-Array.1        0.468    0.142      0.102    0.065     0.119
-Array.2        0.182    0.077      0.034    0.034     0.049
-GlobalVar      0.109    0.036      0.015    0.015     0.017
-ClassProp      0.172    0.043      0.019    0.019     0.026
-RetObj.1       0.606    0.218      0.218    0.133     0.242
-RetObj.2       0.365    0.107      0.107    0.064     0.146
-RetObj.3       0.106    0.003      0.003    0.003     0.027
+String         0.231    0.198      0.125    0.126     0.137
+String2        0.154    0.100      0.057    0.058     0.075
+StringPooled   0.152    0.115      0.040    0.040     0.052
+ThisProp       0.191    0.017      0.017    0.017     0.022
+Vector3        0.090    0.065      0.013    0.013     0.013
+Assign.1       0.111    0.002      0.002    0.002     0.009
+Assign.2       0.199    0.004      0.004    0.004     0.012
+Assign.3       0.164    0.008      0.008    0.008     0.014
+Assign.4       0.264    0.014      0.014    0.014     0.019
+Assign.5       0.281    0.014      0.014    0.014     0.019
+Array.1        0.468    0.149      0.106    0.068     0.119
+Array.2        0.182    0.077      0.036    0.036     0.049
+GlobalVar      0.109    0.034      0.016    0.016     0.017
+ClassProp      0.172    0.042      0.020    0.020     0.026
+RetObj.1       0.606    0.226      0.226    0.138     0.242
+RetObj.2       0.365    0.110      0.110    0.067     0.146
+RetObj.3       0.106    0.002      0.002    0.002     0.027
 </pre>
 
-By the geometric mean of the speedups over the interpreter, the tests are 8.0
-times as fast with the JIT compiler, 8.4 times with the pooled memory functions
-too, and 5.2 times with the code generated ahead of time. About half of the
+By the geometric mean of the speedups over the interpreter, the tests are 8.8
+times as fast with the JIT compiler, 9.2 times with the pooled memory functions
+too, and 5.2 times with the code generated ahead of time. Nearly half of the
 difference between the JIT compiled code and the generated code is in Intf, Mthd,
 and RetObj.3, whose calls the JIT compiler compiles in place. The time the
 interpreter takes depends on where its code ends up in the executable, which is
@@ -414,7 +449,8 @@ are done by helper functions on 32bit hosts.
  - The code generated ahead of time compiles no calls in place and borrows no
    references, which makes the calls of short script functions slower than with
    the JIT compiler. It creates the objects of the registered types through a
-   helper function, and keeps the variables in memory on big endian CPUs.
+   helper function, keeps the variables in memory on big endian CPUs, and checks
+   for suspension and line callbacks at every statement.
  - Direct system calls are only made for functions with primitive, reference,
    and handle parameters, and primitive, reference, handle, and value type return
    values. Everything else, including asCALL_GENERIC, goes through the same code
