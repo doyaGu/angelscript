@@ -601,7 +601,8 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	m_uc.load(type, mem_ptr(type, layout.objectType));
 	if( seen )
 	{
-		// The first class is noted, and JIT_PROFILE_MANY once another one comes
+		// The first class is noted, and JIT_PROFILE_MANY once another one comes.
+		// Another thread may have noted the same class since the compare
 		Gp cell = PtrConst(asPWORD(seen));
 		Gp noted = m_uc.new_gp_ptr();
 		Label other = m_uc.new_label();
@@ -611,6 +612,7 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 		BaseNode *cold = BeginCold(other);
 		m_uc.load(noted, mem_ptr(cell));
 		m_uc.j(first, test_z(noted));
+		m_uc.j(cont, cmp_eq(noted, type));
 		m_uc.mov(noted, Imm(int64_t(asPWORD(JIT_PROFILE_MANY))));
 		m_uc.store(mem_ptr(cell), noted);
 		m_uc.j(cont);
