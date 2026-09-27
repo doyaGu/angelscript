@@ -2825,9 +2825,11 @@ namespace ScriptRefCounts
 		shared->Release();
 		std::atomic<int> ready(0);
 		int results[SPIN_THREADS];
+		// Looking up the function allocates, so it is done before the threads start
+		asIScriptFunction *spin = mod->GetFunctionByDecl("int spin(int)");
 		std::vector<std::thread> threads;
 		for( int n = 0; n < SPIN_THREADS; n++ )
-			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+			threads.push_back(std::thread(Spin, engine, spin, &ready, &results[n]));
 		for( int n = 0; n < SPIN_THREADS; n++ )
 			threads[n].join();
 		int after = shared->AddRef();
@@ -3913,9 +3915,12 @@ namespace Tiered
 
 		std::atomic<int> ready(0);
 		int results[THREADS];
+		// Looking up the functions allocates, so it is done before the threads start
+		asIScriptFunction *warm = mod->GetFunctionByDecl("int warm()");
+		asIScriptFunction *spin = mod->GetFunctionByDecl("int spin(int)");
 		std::vector<std::thread> threads;
 		for( int n = 0; n < THREADS; n++ )
-			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int warm()"), mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+			threads.push_back(std::thread(Spin, engine, warm, spin, &ready, &results[n]));
 		for( int n = 0; n < THREADS; n++ )
 			threads[n].join();
 		s << "spin";
@@ -4253,9 +4258,12 @@ namespace Profiles
 		asUINT recompiled = jit ? jit->GetStatistics().functionsRecompiled : 0;
 		std::atomic<int> ready(0);
 		int results[THREADS];
+		// Looking up the functions allocates, so it is done before the threads start
+		asIScriptFunction *warm = mod->GetFunctionByDecl("int warm()");
+		asIScriptFunction *spin = mod->GetFunctionByDecl("int spin(int)");
 		std::vector<std::thread> threads;
 		for( int n = 0; n < THREADS; n++ )
-			threads.push_back(std::thread(Spin, engine, mod->GetFunctionByDecl("int warm()"), mod->GetFunctionByDecl("int spin(int)"), &ready, &results[n]));
+			threads.push_back(std::thread(Spin, engine, warm, spin, &ready, &results[n]));
 		for( int n = 0; n < THREADS; n++ )
 			threads[n].join();
 		s << "spin";
