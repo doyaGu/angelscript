@@ -125,6 +125,7 @@ struct CJITCompiler::SImpl
 	bool IsLogged(asCScriptFunction *func) const;
 	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, const SProfile *source = 0);
 	JITFunction TierUp(asCScriptFunction *func);
+	void Replace(asCScriptFunction *func, asJITFunction code);
 	void Release(asJITFunction code);
 	static int Recompile(SJITProfile *profile);
 };
@@ -760,17 +761,26 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 		return 0;
 
 	std::lock_guard<std::mutex> lock(impl->mutex);
-	std::map<asJITFunction, SHistory>::iterator old = impl->histories.find(profile->code);
-	SHistory &history = impl->histories[jitFunc];
-	history.retired.push_back(profile->code);
-	if( old != impl->histories.end() )
+	impl->Replace(func, jitFunc);
+	return 1;
+}
+
+// Installs the new code of a compiled function. The calls under way may still execute
+// the old code, which is released with the new one, along with the code that the
+// function had before and the profiles. Must be called with the lock held
+void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
+{
+	asJITFunction current = func->scriptData->jitFunction;
+	std::map<asJITFunction, SHistory>::iterator old = histories.find(current);
+	SHistory &history = histories[code];
+	history.retired.push_back(current);
+	if( old != histories.end() )
 	{
 		history.retired.insert(history.retired.end(), old->second.retired.begin(), old->second.retired.end());
 		history.profiles.insert(history.profiles.end(), old->second.profiles.begin(), old->second.profiles.end());
-		impl->histories.erase(old);
+		histories.erase(old);
 	}
-	func->scriptData->jitFunction = jitFunc;
-	return 1;
+	func->scriptData->jitFunction = code;
 }
 
 // The code of the deferred functions, which counts down the argument of the JitEntry
