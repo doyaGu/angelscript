@@ -1852,13 +1852,15 @@ namespace Inlining
 	}
 
 	// The inlined function runs a loop that another thread suspends. It is called
-	// directly or through another inlined function
+	// directly or through another inlined function. The loop is long enough to take
+	// most of the time also when the calls aren't inlined, whose call states cost
+	// more than a loop of 64 iterations
 	static const char *spinScript =
 		"bool stop = false;                                                                \n"
 		"int iters = 0;                                                                    \n"
 		"int work(int a) {                                                                 \n"
 		"  int s = 0;                                                                      \n"
-		"  for( int k = 0; k < 64; k++ )                                                   \n"
+		"  for( int k = 0; k < 1024; k++ )                                                 \n"
 		"    s += (k ^ a) & 7;                                                             \n"
 		"  return s;                                                                       \n"
 		"}                                                                                 \n"
@@ -1945,7 +1947,7 @@ namespace Inlining
 				int *stepA = throughStep ? FindVar(ctx, 1, "a") : a;
 				if( depth != (throughStep ? 3u : 2u) || std::string(ctx->GetFunction(1)->GetName()) != (throughStep ? "step" : "spin") ||
 				    a == 0 || *a != *iters || stepA == 0 || *stepA != *iters ||
-				    (s && k && (*k < 0 || *k > 64 || (*s != Work(*a, *k) && *s != Work(*a, *k + 1)))) )
+				    (s && k && (*k < 0 || *k > 1024 || (*s != Work(*a, *k) && *s != Work(*a, *k + 1)))) )
 				{
 					PRINTF("suspend from thread: wrong state in work, depth %u, a %d, iters %d, s %d, k %d\n",
 					       depth, a ? *a : -1, *iters, s ? *s : -1, k ? *k : -1);
@@ -1977,7 +1979,7 @@ namespace Inlining
 			r = ctx->Execute();
 		int expected = 0;
 		for( int n = 0; n < *iters; n++ )
-			expected = (expected * 31 + Work(n, 64)) & 0xFFFFFF;
+			expected = (expected * 31 + Work(n, 1024)) & 0xFFFFFF;
 		if( r != asEXECUTION_FINISHED || int(ctx->GetReturnDWord()) != expected )
 		{
 			PRINTF("suspend from thread: execution returned %d, %d instead of %d\n", r, int(ctx->GetReturnDWord()), expected);
