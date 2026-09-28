@@ -1024,6 +1024,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // of through the generic CallSystemFunction of the engine. This is only done for
 // simple signatures: primitives and pointers as arguments, a primitive, pointer,
 // handle, or value type as return value, and nothing to clean up after the call.
+// On AArch64 the value types of only floats returned in registers are left out too.
 // Everything else, e.g. objects passed by value, returns false and is called
 // through the engine.
 //
@@ -1096,6 +1097,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	int expectedRetSize;
 #ifndef JIT_HIDDEN_RETURN_POINTER
 	if( retInMemory )
+		return false;
+#endif
+#ifdef AS_ARM64
+	// AArch64 returns each member of a floating point aggregate in a floating point
+	// register of its own, e.g. two floats in s0 and s1, which the calls can't express.
+	// hostReturnFloat doesn't tell them, as the engine only sets it where the objects
+	// are split by the types of their members, and as_callfunc_arm64.cpp looks at the
+	// flags of the type instead
+	if( retOnStack && !retInMemory && (rt.GetTypeInfo()->flags & asOBJ_APP_CLASS_ALLFLOATS) )
 		return false;
 #endif
 	if( retInMemory )                                            { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = AS_PTR_SIZE; }
