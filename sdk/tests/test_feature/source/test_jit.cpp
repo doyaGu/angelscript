@@ -4619,9 +4619,25 @@ bool Test()
 	fail = TestCallsAndObjects(engine) || fail;
 	engine->ShutDownAndRelease();
 
-	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
-	fail = TestSuspend(engine) || fail;
-	engine->ShutDownAndRelease();
+	// Suspending must work for the results to be the same as the VM's, so with
+	// JIT_NO_SUSPEND the test gets a compiler of its own without it
+	asDWORD envFlags = flags ? asDWORD(strtoul(flags, 0, 0)) : 0;
+	if( envFlags & CJITCompiler::JIT_NO_SUSPEND )
+	{
+		// The JIT compiler must outlive the engine
+		CJITCompiler jit(envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND | CJITCompiler::JIT_LOG));
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+		engine->SetJITCompiler(&jit);
+		fail = TestSuspend(engine) || fail;
+		engine->ShutDownAndRelease();
+	}
+	else
+	{
+		engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+		fail = TestSuspend(engine) || fail;
+		engine->ShutDownAndRelease();
+	}
 
 	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
 	fail = TestNestedExecution(engine) || fail;
