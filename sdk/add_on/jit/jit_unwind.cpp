@@ -6,7 +6,7 @@
 	#define JIT_UNWIND_WIN64
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
-#elif defined(__x86_64__) && defined(__linux__)
+#elif defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
 	#define JIT_UNWIND_DWARF
 #endif
 
@@ -25,8 +25,8 @@
 #endif
 
 #ifdef JIT_UNWIND_DWARF
-// libgcc and libunwind. Both accept the address of a single FDE, which is
-// followed by a zero terminator for libgcc
+// libgcc and libunwind, also the one of macOS. Both accept the address of a
+// single FDE, which is followed by a zero terminator for libgcc
 extern "C" void __register_frame(void *fde);
 extern "C" void __deregister_frame(void *fde);
 #endif

@@ -17,11 +17,12 @@ BEGIN_AS_NAMESPACE
 //
 //  - 64bit Windows: an UNWIND_INFO appended to the code and registered with
 //    RtlAddFunctionTable.
-//  - 64bit x86 Linux: a DWARF CIE and FDE registered with __register_frame.
+//  - 64bit x86 Linux and macOS: a DWARF CIE and FDE registered with
+//    __register_frame.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: AArch64 and the other x86 platforms (macOS, the BSDs, MinGW on 32bit)
+// TODO: AArch64 and the other x86 platforms (the BSDs, MinGW on 32bit)
 //       could be supported the same way, but haven't been tested.
 class CJITUnwindInfo
 {
