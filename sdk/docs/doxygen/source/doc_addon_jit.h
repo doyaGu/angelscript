@@ -129,11 +129,12 @@ through their elements. A C++ exception thrown by a function called this way is
 still caught and turned into a script exception like with the VM. For that the
 exception must be able to pass through the generated code, which needs unwind
 information for it. The add-on registers the unwind information on 64bit Windows,
-and for x86-64 on Linux and macOS, and 32bit Windows with MSVC doesn't need any.
-On other platforms the direct calls are only made when the library is compiled
-with AS_NO_EXCEPTIONS, or when the \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag
-is set, in which case a C++ exception thrown by a registered function that was
-called directly terminates the application.
+and for x86-64 and AArch64 on Linux and macOS (except arm64e), and 32bit Windows
+with MSVC doesn't need any. On other platforms the direct calls are only made
+when the library is compiled with AS_NO_EXCEPTIONS, or when the
+\ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is set, in which case a C++
+exception thrown by a registered function that was called directly terminates the
+application.
 \ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off. Neither
 flag applies to the code generated ahead of time, see \ref doc_addon_jit_aot.
 
@@ -443,10 +444,11 @@ are done by helper functions on 32bit hosts.
    uses the call stack of the VM, so these calls are not faster than with the
    interpreter.
  - Unwind information for the generated code is only registered on 64bit Windows,
-   and for x86-64 on Linux and macOS. On the other platforms besides 32bit Windows
-   with MSVC, a C++ exception that passes through the generated code terminates the
-   application, which is why direct system calls are opt-in there unless the
-   library is built with AS_NO_EXCEPTIONS.
+   and for x86-64 and AArch64 on Linux and macOS, but not for arm64e, the BSDs, or
+   64bit ARM Windows. On the other platforms besides 32bit Windows with MSVC, a C++
+   exception that passes through the generated code terminates the application,
+   which is why direct system calls are opt-in there unless the library is built
+   with AS_NO_EXCEPTIONS.
  - The code generated ahead of time compiles no calls in place and borrows no
    references, which makes the calls of short script functions slower than with
    the JIT compiler. It creates the objects of the registered types through a

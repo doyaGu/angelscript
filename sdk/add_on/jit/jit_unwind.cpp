@@ -8,10 +8,19 @@
 	#define JIT_UNWIND_HANDLER_CHAIN
 #elif defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
 	#define JIT_UNWIND_DWARF
+	#define JIT_UNWIND_X86
+#elif defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__)) && !defined(__arm64e__)
+	// The return addresses that the prologue signs on arm64e would need the
+	// pointer authentication in the call frame instructions too
+	#define JIT_UNWIND_DWARF
+	#define JIT_UNWIND_A64
 #endif
 
-#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_DWARF)
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_X86)
 #include <asmjit/x86.h>
+#endif
+#ifdef JIT_UNWIND_A64
+#include <asmjit/a64.h>
 #endif
 
 #ifdef JIT_UNWIND_WIN64
@@ -74,16 +83,26 @@ enum
 	DW_CFA_advance_loc1    = 0x02,
 	DW_CFA_advance_loc2    = 0x03,
 	DW_CFA_advance_loc4    = 0x04,
+	DW_CFA_offset_extended = 0x05,
 	DW_CFA_def_cfa         = 0x0c,
 	DW_CFA_def_cfa_offset  = 0x0e,
 	DW_CFA_advance_loc     = 0x40,
 	DW_CFA_offset          = 0x80
 };
 
+#ifdef JIT_UNWIND_X86
 // DWARF numbers of the x86-64 general purpose registers, by physical id
 static const asBYTE g_dwarfGpRegs[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
-static const asBYTE DWARF_REG_RSP = 7;
-static const asBYTE DWARF_REG_RA  = 16;
+static const asBYTE DWARF_REG_SP = 7;
+static const asBYTE DWARF_REG_RA = 16;
+static const asUINT DWARF_CFA_AT_ENTRY = 8; // the return address has been pushed
+#else
+// DWARF numbers of the AArch64 registers: x0-x30 are 0-30, and v0-v31 are 64-95
+static const asBYTE DWARF_REG_SP  = 31;
+static const asBYTE DWARF_REG_RA  = 30;
+static const asBYTE DWARF_REG_VEC = 64;
+static const asUINT DWARF_CFA_AT_ENTRY = 0; // the return address is in x30
+#endif
 
 static void PutU8(std::vector<asBYTE> &out, asUINT v)
 {
@@ -128,6 +147,101 @@ static void EndEntry(std::vector<asBYTE> &out, size_t start)
 }
 #endif
 
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_DWARF)
+// Adds what the instruction of the prologue that ends at the offset does
+bool CJITUnwindInfo::AddOps(const asmjit::InstNode *inst, asUINT end)
+{
+	using namespace asmjit;
+
+	SOp op;
+	op.end   = end;
+	op.reg   = 0;
+	op.value = 0;
+
+	Operand a, c;
+	if( inst->op_count() > 0 ) a = inst->op(0);
+	if( inst->op_count() > 1 ) c = inst->op(1);
+	InstId id = inst->inst_id();
+#ifdef JIT_UNWIND_A64
+	if( id == a64::Inst::kIdBti )
+		return true;
+	if( id == a64::Inst::kIdMov && inst->op_count() == 2 && a.is_gp() && a.as<Reg>().id() == a64::Gp::kIdFp &&
+	    c.is_gp() && c.as<Reg>().id() == a64::Gp::kIdSp )
+		return true; // the frame pointer, which the call frame isn't relative to
+	if( id == a64::Inst::kIdSub && inst->op_count() == 3 && a.is_gp() && a.as<Reg>().id() == a64::Gp::kIdSp &&
+	    c.is_gp() && c.as<Reg>().id() == a64::Gp::kIdSp && inst->op(2).is_imm() )
+	{
+		op.kind  = OP_ALLOC;
+		op.value = asUINT(inst->op(2).as<Imm>().value());
+		m_ops.push_back(op);
+		return true;
+	}
+
+	// Stores of one or two callee saved registers at the stack pointer, the first
+	// of which also allocates the room for all of them by decrementing it
+	bool pair = id == a64::Inst::kIdStp || id == a64::Inst::kIdStp_v;
+	if( !pair && id != a64::Inst::kIdStr && id != a64::Inst::kIdStr_v )
+		return false;
+	asUINT count = pair ? 2 : 1;
+	if( inst->op_count() != count + 1 || !inst->op(count).is_mem() )
+		return false;
+	const a64::Mem &mem = inst->op(count).as<a64::Mem>();
+	if( !mem.has_base_reg() || mem.base_id() != a64::Gp::kIdSp || mem.has_index() || mem.is_post_index() )
+		return false;
+	asINT64 offset = mem.offset();
+	if( mem.is_pre_index() )
+	{
+		if( offset >= 0 )
+			return false;
+		op.kind  = OP_ALLOC;
+		op.value = asUINT(-offset);
+		m_ops.push_back(op);
+		offset = 0;
+	}
+	if( offset < 0 )
+		return false;
+	for( asUINT n = 0; n < count; n++ )
+	{
+		const Operand &r = inst->op(n);
+		if( !(r.is_gp() || r.is_vec()) || r.as<Reg>().size() != 8 )
+			return false;
+		op.kind  = r.is_gp() ? OP_SAVE_GP : OP_SAVE_VEC;
+		op.reg   = r.as<Reg>().id();
+		op.value = asUINT(offset) + n * 8;
+		m_ops.push_back(op);
+	}
+	return true;
+#else
+	if( id == x86::Inst::kIdEndbr64 )
+		return true;
+	else if( id == x86::Inst::kIdPush && inst->op_count() == 1 && a.is_gp() )
+	{
+		op.kind = OP_PUSH;
+		op.reg  = a.as<Reg>().id();
+	}
+	else if( id == x86::Inst::kIdMov && inst->op_count() == 2 && a.is_gp() && c.is_gp() && c.as<Reg>().id() == x86::Gp::kIdSp )
+		return true; // copy of the stack pointer to access the arguments
+	else if( id == x86::Inst::kIdSub && inst->op_count() == 2 && a.is_gp() && a.as<Reg>().id() == x86::Gp::kIdSp && c.is_imm() )
+	{
+		op.kind  = OP_ALLOC;
+		op.value = asUINT(c.as<Imm>().value());
+	}
+	else if( inst->op_count() == 2 && a.is_mem() && c.is_vec() && c.as<Reg>().size() == 16 &&
+	         a.as<x86::Mem>().has_base_reg() && a.as<x86::Mem>().base_id() == x86::Gp::kIdSp &&
+	         !a.as<x86::Mem>().has_index() && a.as<x86::Mem>().offset() >= 0 )
+	{
+		op.kind  = OP_SAVE_VEC;
+		op.reg   = c.as<Reg>().id();
+		op.value = asUINT(a.as<x86::Mem>().offset());
+	}
+	else
+		return false;
+	m_ops.push_back(op);
+	return true;
+#endif
+}
+#endif
+
 bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *func)
 {
 	m_ops.clear();
@@ -143,10 +257,15 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 #else
 	using namespace asmjit;
 
-	// Neither is used by the generated code
+	// Neither is used by the generated code. On AArch64 the frame pointer is set up
+	// after the registers are saved, and the call frame stays relative to sp
 	const FuncFrame &frame = func->frame();
-	if( frame.has_preserved_fp() || frame.has_dynamic_alignment() )
+	if( frame.has_dynamic_alignment() )
 		return false;
+#ifndef JIT_UNWIND_A64
+	if( frame.has_preserved_fp() )
+		return false;
+#endif
 
 	// Emit the prologue again with a builder to see what each instruction does, and
 	// bind a label after each instruction to see where it ends
@@ -154,7 +273,11 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 	CodeHolder tmp;
 	if( tmp.init(holder.environment(), holder.cpu_features()) != Error::kOk )
 		return false;
+#ifdef JIT_UNWIND_A64
+	a64::Builder b(&tmp);
+#else
 	x86::Builder b(&tmp);
+#endif
 	b.add_encoding_options(cc.encoding_options());
 	if( b.emit_prolog(frame) != Error::kOk )
 		return false;
@@ -175,43 +298,8 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 		return false;
 
 	for( size_t n = 0; n < insts.size(); n++ )
-	{
-		const InstNode *inst = insts[n];
-		SOp op;
-		op.end   = asUINT(tmp.label_offset(ends[n]));
-		op.reg   = 0;
-		op.value = 0;
-
-		Operand a, c;
-		if( inst->op_count() > 0 ) a = inst->op(0);
-		if( inst->op_count() > 1 ) c = inst->op(1);
-		InstId id = inst->inst_id();
-		if( id == x86::Inst::kIdEndbr64 )
-			continue;
-		else if( id == x86::Inst::kIdPush && inst->op_count() == 1 && a.is_gp() )
-		{
-			op.kind = OP_PUSH;
-			op.reg  = a.as<Reg>().id();
-		}
-		else if( id == x86::Inst::kIdMov && inst->op_count() == 2 && a.is_gp() && c.is_gp() && c.as<Reg>().id() == x86::Gp::kIdSp )
-			continue; // copy of the stack pointer to access the arguments
-		else if( id == x86::Inst::kIdSub && inst->op_count() == 2 && a.is_gp() && a.as<Reg>().id() == x86::Gp::kIdSp && c.is_imm() )
-		{
-			op.kind  = OP_ALLOC;
-			op.value = asUINT(c.as<Imm>().value());
-		}
-		else if( inst->op_count() == 2 && a.is_mem() && c.is_vec() && c.as<Reg>().size() == 16 &&
-		         a.as<x86::Mem>().has_base_reg() && a.as<x86::Mem>().base_id() == x86::Gp::kIdSp &&
-		         !a.as<x86::Mem>().has_index() && a.as<x86::Mem>().offset() >= 0 )
-		{
-			op.kind  = OP_SAVE_VEC;
-			op.reg   = c.as<Reg>().id();
-			op.value = asUINT(a.as<x86::Mem>().offset());
-		}
-		else
+		if( !AddOps(insts[n], asUINT(tmp.label_offset(ends[n]))) )
 			return false;
-		m_ops.push_back(op);
-	}
 
 	// The prologue must be what the compiler emitted at the start of the function
 	const CodeBuffer &text = holder.text_section()->buffer();
@@ -264,6 +352,8 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 				codes.push_back(asWORD(op.value >> 16));
 			}
 			break;
+		default:
+			return false;
 		}
 	}
 	if( prologue.size() > 255 || codes.size() > 255 )
@@ -294,9 +384,15 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 	asDWORD table[3] = { m_start, m_end, infoOffset };
 	if( a.embed(table, sizeof(table)) != Error::kOk )
 		return false;
-#else
+#elif defined(JIT_UNWIND_X86)
+	// No vector registers are callee saved in the System V ABI
 	for( size_t n = 0; n < m_ops.size(); n++ )
 		if( m_ops[n].kind == OP_SAVE_VEC || (m_ops[n].kind == OP_PUSH && m_ops[n].reg >= 16) )
+			return false;
+#else
+	// The saved registers must be where the factored offsets can tell
+	for( size_t n = 0; n < m_ops.size(); n++ )
+		if( (m_ops[n].kind == OP_SAVE_GP || m_ops[n].kind == OP_SAVE_VEC) && m_ops[n].value % 8 )
 			return false;
 #endif
 
@@ -317,8 +413,9 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 #elif defined(JIT_UNWIND_DWARF)
 	std::vector<asBYTE> data;
 
-	// CIE with the state at the entry of a function: the return address is at the
-	// stack pointer, and the call frame address is the stack pointer before the call
+	// CIE with the state at the entry of a function: the call frame address is the
+	// stack pointer before the call, and on x86 the return address is at the stack
+	// pointer, while on AArch64 it is in x30
 	PutU32(data, 0);   // length
 	PutU32(data, 0);   // CIE id
 	PutU8(data, 1);    // version
@@ -331,10 +428,12 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 	PutULEB(data, 1);  // augmentation data length
 	PutU8(data, 0);    // DW_EH_PE_absptr for the addresses in the FDE
 	PutU8(data, DW_CFA_def_cfa);
-	PutULEB(data, DWARF_REG_RSP);
-	PutULEB(data, 8);
+	PutULEB(data, DWARF_REG_SP);
+	PutULEB(data, DWARF_CFA_AT_ENTRY);
+#ifdef JIT_UNWIND_X86
 	PutU8(data, DW_CFA_offset | DWARF_REG_RA);
 	PutULEB(data, 1);
+#endif
 	EndEntry(data, 0);
 
 	// FDE for the function, following the prologue
@@ -344,38 +443,58 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 	PutU64(data, asQWORD(asPWORD(code)) + m_start); // start address
 	PutU64(data, m_end - m_start);                  // size
 	PutULEB(data, 0);                               // augmentation data length
-	asUINT loc = 0, cfa = 8;
+	asUINT loc = 0, cfa = DWARF_CFA_AT_ENTRY;
 	for( size_t n = 0; n < m_ops.size(); n++ )
 	{
 		const SOp &op = m_ops[n];
+		// A store with a pre-index allocates the room for the registers it saves, and
+		// is noted as an allocation and saves that end at the same offset
 		asUINT delta = op.end - loc;
-		if( delta < 64 )
-			PutU8(data, DW_CFA_advance_loc | delta);
-		else if( delta < 256 )
-		{
-			PutU8(data, DW_CFA_advance_loc1);
-			PutU8(data, delta);
-		}
-		else if( delta < 65536 )
-		{
-			PutU8(data, DW_CFA_advance_loc2);
-			PutU16(data, delta);
-		}
-		else
+		if( delta >= 65536 )
 		{
 			PutU8(data, DW_CFA_advance_loc4);
 			PutU32(data, delta);
 		}
+		else if( delta >= 256 )
+		{
+			PutU8(data, DW_CFA_advance_loc2);
+			PutU16(data, delta);
+		}
+		else if( delta >= 64 )
+		{
+			PutU8(data, DW_CFA_advance_loc1);
+			PutU8(data, delta);
+		}
+		else if( delta > 0 )
+			PutU8(data, DW_CFA_advance_loc | delta);
 		loc = op.end;
 
-		cfa += op.kind == OP_PUSH ? 8 : op.value;
-		PutU8(data, DW_CFA_def_cfa_offset);
-		PutULEB(data, cfa);
-		if( op.kind == OP_PUSH )
+		if( op.kind == OP_PUSH || op.kind == OP_ALLOC )
 		{
-			PutU8(data, DW_CFA_offset | g_dwarfGpRegs[op.reg]);
-			PutULEB(data, cfa / 8);
+			cfa += op.kind == OP_PUSH ? 8 : op.value;
+			PutU8(data, DW_CFA_def_cfa_offset);
+			PutULEB(data, cfa);
+			if( op.kind == OP_ALLOC )
+				continue;
 		}
+
+		// A pushed register is at the stack pointer, and a stored one at its offset
+		// from it, which is the call frame address less the bytes pushed and
+		// allocated so far
+		asUINT saved = op.kind == OP_PUSH ? cfa : cfa - op.value;
+#ifdef JIT_UNWIND_X86
+		asUINT reg = g_dwarfGpRegs[op.reg];
+#else
+		asUINT reg = op.kind == OP_SAVE_VEC ? DWARF_REG_VEC + op.reg : op.reg;
+#endif
+		if( reg < 64 )
+			PutU8(data, DW_CFA_offset | reg);
+		else
+		{
+			PutU8(data, DW_CFA_offset_extended);
+			PutULEB(data, reg);
+		}
+		PutULEB(data, saved / 8);
 	}
 	EndEntry(data, fde);
 	PutU32(data, 0); // terminator

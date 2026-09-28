@@ -17,12 +17,12 @@ BEGIN_AS_NAMESPACE
 //
 //  - 64bit Windows: an UNWIND_INFO appended to the code and registered with
 //    RtlAddFunctionTable.
-//  - 64bit x86 Linux and macOS: a DWARF CIE and FDE registered with
-//    __register_frame.
+//  - 64bit x86 and AArch64 on Linux and macOS: a DWARF CIE and FDE registered
+//    with __register_frame.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: AArch64 and the other x86 platforms (the BSDs, MinGW on 32bit)
+// TODO: The other platforms (the BSDs, MinGW on 32bit, arm64e, 64bit ARM Windows)
 //       could be supported the same way, but haven't been tested.
 class CJITUnwindInfo
 {
@@ -50,6 +50,7 @@ protected:
 	{
 		OP_PUSH,     // push of a callee saved register
 		OP_ALLOC,    // allocation of the stack frame
+		OP_SAVE_GP,  // store of a callee saved general purpose register in the frame
 		OP_SAVE_VEC  // store of a callee saved vector register in the frame
 	};
 
@@ -60,6 +61,8 @@ protected:
 		asUINT reg;   // physical id of the register pushed or saved
 		asUINT value; // bytes allocated, or the offset of the saved register from the stack pointer
 	};
+
+	bool AddOps(const asmjit::InstNode *inst, asUINT end);
 
 	std::vector<SOp> m_ops;
 	asUINT           m_start;       // offset of the function in the code

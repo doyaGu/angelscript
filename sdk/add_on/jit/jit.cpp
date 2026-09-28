@@ -40,7 +40,7 @@
 //    does, which is 1.13 times as fast (jit_cppgen.cpp, asBC_SUSPEND).
 //  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall,
 //    and jit_cppgen.cpp, GetSystemCall), and unwind information on the platforms besides
-//    64bit Windows, and 64bit x86 on Linux and macOS (jit_unwind.h).
+//    64bit Windows, and 64bit x86 and AArch64 on Linux and macOS (jit_unwind.h).
 //  - Construct the objects of the registered types directly in the code generated ahead
 //    of time, which calls JIT_Alloc for them (jit_cppgen.cpp, asBC_ALLOC).
 //  - Count the references of the script objects in place on AArch64 too, which needs the
