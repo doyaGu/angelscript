@@ -438,6 +438,44 @@ RetObj.1 for example takes 0.704 seconds with the interpreter, and 0.160 seconds
 with the JIT compiler and the pooled memory functions. 64bit integer operations
 are done by helper functions on 32bit hosts.
 
+The table below shows the same tests measured on an Apple M5 Pro with the arm64
+release build from Apple clang 21 on macOS, as the fastest of ten runs of each
+test. By the geometric mean of the speedups over the interpreter, the tests are 3.0
+times as fast with the JIT compiler without direct system calls, 4.1 times with
+the default settings, 4.2 times with the pooled memory functions too, and 3.5 times
+with the code generated ahead of time. The JIT compiler gains less than on x86-64,
+as the interpreter is faster on this CPU, and the generated code doesn't count the
+references of the script classes itself.
+
+<pre>
+Test           VM       No direct  JIT      JIT+pool  AOT
+Basic          0.154    0.069      0.040    0.041     0.037
+Basic2         0.047    0.006      0.006    0.006     0.013
+Call           0.169    0.085      0.078    0.081     0.075
+Call2          0.205    0.116      0.110    0.115     0.103
+Fib            0.267    0.101      0.101    0.102     0.088
+Int            0.044    0.019      0.006    0.006     0.006
+Intf           0.092    0.008      0.008    0.008     0.022
+Mthd           0.088    0.008      0.008    0.008     0.018
+String         0.184    0.147      0.070    0.069     0.076
+String2        0.105    0.079      0.036    0.036     0.049
+StringPooled   0.131    0.117      0.043    0.043     0.045
+ThisProp       0.096    0.020      0.021    0.021     0.015
+Vector3        0.076    0.059      0.029    0.029     0.029
+Assign.1       0.052    0.004      0.004    0.004     0.010
+Assign.2       0.085    0.012      0.012    0.012     0.011
+Assign.3       0.072    0.011      0.011    0.011     0.009
+Assign.4       0.085    0.019      0.019    0.019     0.017
+Assign.5       0.085    0.019      0.019    0.019     0.017
+Array.1        0.171    0.102      0.070    0.052     0.073
+Array.2        0.087    0.066      0.029    0.029     0.029
+GlobalVar      0.038    0.034      0.014    0.014     0.017
+ClassProp      0.066    0.041      0.021    0.021     0.020
+RetObj.1       0.213    0.132      0.133    0.102     0.139
+RetObj.2       0.125    0.064      0.064    0.049     0.073
+RetObj.3       0.041    0.004      0.004    0.004     0.011
+</pre>
+
 \section doc_addon_jit_limits Known limitations
 
  - Imported functions and delegates are called through a helper function that
