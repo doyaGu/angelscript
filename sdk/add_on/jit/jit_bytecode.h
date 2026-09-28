@@ -102,10 +102,11 @@ static const asUINT JIT_FRAME_BIT = 0x80000000u;
 #define JIT_NATIVE_RETURN
 #endif
 
-// On x86 the generated code counts the references of the script objects itself,
-// see FindInPlaceRefCounts. The atomic operations of the engine are compatible
-// with the locked instructions used there
-#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__X86__) || defined(__i386__)
+// On x86 and AArch64 the generated code counts the references of the script objects
+// itself, see FindInPlaceRefCounts. The atomic operations of the engine are
+// compatible with the locked and the atomic instructions used there
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__X86__) || defined(__i386__) || \
+    defined(_M_ARM64) || defined(__aarch64__)
 #define JIT_INPLACE_REFCOUNT
 #endif
 

@@ -1541,9 +1541,8 @@ void CJITCodeGen::EmitScriptRelease(asUINT idx, const Gp &obj)
 	Label slow = m_uc.new_label();
 	Label race = m_uc.new_label();
 	Label done = m_uc.new_label();
-	EmitReleaseInPlace(obj, slow, race);
 	BaseNode *cold;
-	if( JIT_GetObjectLayout().atomicRefCount )
+	if( EmitReleaseInPlace(obj, slow, race) )
 	{
 		// Another thread has released a reference between the check and the
 		// decrement, so the reference is given back for Release to destroy the object

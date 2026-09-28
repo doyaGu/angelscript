@@ -134,8 +134,8 @@ void CJITCodeGen::EmitAddRefInPlace(const Gp &obj, const Label &slow)
 // Like asCScriptObject::Release the flag of the GC is cleared. The last reference
 // is left to Release, which destroys the object. With atomic reference counts
 // another thread may release a reference between the check and the decrement,
-// which jumps to race with the count at 0
-void CJITCodeGen::EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race)
+// which jumps to race with the count at 0. Returns whether the code may jump there
+bool CJITCodeGen::EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race)
 {
 	x86::Compiler *cc = m_uc.cc;
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
@@ -150,9 +150,10 @@ void CJITCodeGen::EmitReleaseInPlace(const Gp &obj, const Label &slow, const Lab
 	{
 		cc->lock().dec(count);
 		cc->jz(race);
+		return true;
 	}
-	else
-		cc->dec(count);
+	cc->dec(count);
+	return false;
 }
 
 void CJITCodeGen::EmitRefCountInc(const Gp &obj)
@@ -348,6 +349,118 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 	return true;
 }
 
+// The reference counts of the script objects, see the x86 version. The flag of the
+// GC and the one of the objects being destroyed are loaded from the same byte if
+// they share it. The atomic operations use the LSE instructions if the CPU has
+// them, else loops of exclusive loads and stores. AsmJit notes the first operand of
+// ldadd and the like as written, which they read, so stadd and cas are used
+static bool HasLSE(a64::Compiler *cc)
+{
+	return cc->code()->cpu_features().arm().has_lse();
+}
+
+void CJITCodeGen::EmitAddRefInPlace(const Gp &obj, const Label &slow)
+{
+	a64::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Gp flags = m_uc.new_gp32();
+	cc->ldrb(flags, Addr(obj, layout.deadFlag));
+	cc->tst(flags, Imm(layout.deadFlagMask));
+	cc->b_ne(slow);
+	if( layout.gcFlag != layout.deadFlag )
+		cc->ldrb(flags, Addr(obj, layout.gcFlag));
+	cc->and_(flags, flags, Imm(~uint32_t(layout.gcFlagMask)));
+	cc->strb(flags, Addr(obj, layout.gcFlag));
+	EmitRefCountInc(obj);
+}
+
+// The count is compared with 1 by the same atomic operation that decrements it,
+// so the release never jumps to race
+bool CJITCodeGen::EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &)
+{
+	a64::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Gp flags = m_uc.new_gp32();
+	cc->ldrb(flags, Addr(obj, layout.gcFlag));
+	cc->and_(flags, flags, Imm(~uint32_t(layout.gcFlagMask)));
+	cc->strb(flags, Addr(obj, layout.gcFlag));
+	Gp count = m_uc.new_gp32();
+	Gp next = m_uc.new_gp32();
+	if( !layout.atomicRefCount )
+	{
+		cc->ldr(count, Addr(obj, layout.refCount));
+		cc->cmp(count, Imm(1));
+		cc->b_ls(slow);
+		cc->sub(next, count, Imm(1));
+		cc->str(next, Addr(obj, layout.refCount));
+		return false;
+	}
+
+	Gp addr = m_uc.new_gp_ptr();
+	Label loop = m_uc.new_label();
+	m_uc.add(addr, obj, Imm(layout.refCount));
+	if( HasLSE(cc) )
+	{
+		// cas leaves the count it has seen in the register, and stores the next only
+		// if that is the one compared
+		Gp seen = m_uc.new_gp32();
+		cc->ldr(count, mem_ptr(addr));
+		m_uc.bind(loop);
+		cc->cmp(count, Imm(1));
+		cc->b_ls(slow);
+		cc->sub(next, count, Imm(1));
+		cc->mov(seen, count);
+		cc->casal(seen, next, mem_ptr(addr));
+		cc->cmp(seen, count);
+		cc->mov(count, seen);
+		cc->b_ne(loop);
+	}
+	else
+	{
+		Gp failed = m_uc.new_gp32();
+		m_uc.bind(loop);
+		cc->ldaxr(count, mem_ptr(addr));
+		cc->cmp(count, Imm(1));
+		cc->b_ls(slow);
+		cc->sub(next, count, Imm(1));
+		cc->stlxr(failed, next, mem_ptr(addr));
+		cc->cbnz(failed, loop);
+	}
+	return false;
+}
+
+void CJITCodeGen::EmitRefCountInc(const Gp &obj)
+{
+	a64::Compiler *cc = m_uc.cc;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Gp count = m_uc.new_gp32();
+	if( !layout.atomicRefCount )
+	{
+		cc->ldr(count, Addr(obj, layout.refCount));
+		cc->add(count, count, Imm(1));
+		cc->str(count, Addr(obj, layout.refCount));
+		return;
+	}
+
+	Gp addr = m_uc.new_gp_ptr();
+	m_uc.add(addr, obj, Imm(layout.refCount));
+	if( HasLSE(cc) )
+	{
+		m_uc.mov(count, Imm(1));
+		cc->staddl(count, mem_ptr(addr));
+	}
+	else
+	{
+		Gp failed = m_uc.new_gp32();
+		Label loop = m_uc.new_label();
+		m_uc.bind(loop);
+		cc->ldaxr(count, mem_ptr(addr));
+		cc->add(count, count, Imm(1));
+		cc->stlxr(failed, count, mem_ptr(addr));
+		cc->cbnz(failed, loop);
+	}
+}
+
 #else
 
 void CJITCodeGen::SetHomeRegHints(asUINT)
@@ -407,17 +520,18 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 
 #endif
 
-#if !defined(ASMJIT_UJIT_X86)
+#if !defined(ASMJIT_UJIT_X86) && !defined(ASMJIT_UJIT_AARCH64)
 
-// The references are only counted in place on x86, see JIT_INPLACE_REFCOUNT
+// The references are only counted in place on x86 and AArch64, see JIT_INPLACE_REFCOUNT
 void CJITCodeGen::EmitAddRefInPlace(const Gp &, const Label &)
 {
 	m_failed = true;
 }
 
-void CJITCodeGen::EmitReleaseInPlace(const Gp &, const Label &, const Label &)
+bool CJITCodeGen::EmitReleaseInPlace(const Gp &, const Label &, const Label &)
 {
 	m_failed = true;
+	return false;
 }
 
 void CJITCodeGen::EmitRefCountInc(const Gp &)

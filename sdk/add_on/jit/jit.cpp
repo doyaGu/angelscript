@@ -43,8 +43,6 @@
 //    64bit Windows, and 64bit x86 and AArch64 on Linux and macOS (jit_unwind.h).
 //  - Construct the objects of the registered types directly in the code generated ahead
 //    of time, which calls JIT_Alloc for them (jit_cppgen.cpp, asBC_ALLOC).
-//  - Count the references of the script objects in place on AArch64 too, which needs the
-//    LSE atomics or loops of exclusive loads and stores (jit_codegen_arch.cpp).
 //  - Borrow the references of the handle arguments on 32bit hosts, whose call states have
 //    no room to note the borrowed parameters, and for the calls that aren't inlined, which
 //    would need entry points of the callees that don't release the parameters

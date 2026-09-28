@@ -202,7 +202,7 @@ protected:
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void StoreImm32(const Mem &dst, int value);
 	void EmitAddRefInPlace(const Gp &obj, const Label &slow);
-	void EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
+	bool EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
 	void EmitRefCountInc(const Gp &obj);
 
 	// Calls a C function. Arguments and return value are set on the returned node
