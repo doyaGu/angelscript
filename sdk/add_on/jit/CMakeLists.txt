@@ -5,7 +5,7 @@ project(angelscript_jit CXX)
 # fetched at a pinned revision unless a local copy is pointed to with AS_JIT_ASMJIT_DIR.
 set(AS_JIT_ASMJIT_DIR "" CACHE PATH "Path to a local AsmJit source tree (leave empty to download it)")
 set(AS_JIT_ASMJIT_REPOSITORY "https://github.com/asmjit/asmjit.git" CACHE STRING "AsmJit git repository")
-set(AS_JIT_ASMJIT_TAG "dffd8b164f228abbc47246c9881f107d656952b2" CACHE STRING "AsmJit git revision")
+set(AS_JIT_ASMJIT_TAG "0d7f01052f2d3f6d6b9bb6714ef32bd7b80177eb" CACHE STRING "AsmJit git revision")
 option(AS_JIT_LOGGING "Include support for logging the generated code (increases binary size)" ON)
 set(AS_JIT_AOT_DIR "" CACHE PATH "Directory with the C++ code generated ahead of time by CJITCompiler::WriteAOTOutput to build into the library")
 
