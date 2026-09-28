@@ -120,10 +120,10 @@ the calling convention at runtime. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.
 The handles copied from the temporary variables that are released right after,
 for example the result of p.next in @p = p.next, are moved instead, so no
-reference is added and released for them. On x86 the generated code counts the
-references of the script classes itself, the same way as the engine does, and
-only calls their AddRef and Release when an object loses its last reference or
-is resurrected while it is being destroyed. The initialization lists that hold only
+reference is added and released for them. On x86 and AArch64 the generated code
+counts the references of the script classes itself like the engine does, and only
+calls their AddRef and Release when an object loses its last reference or is
+resurrected while it is being destroyed. The initialization lists that hold only
 primitives, enums, or value types without a destructor are freed without going
 through their elements. A C++ exception thrown by a function called this way is
 still caught and turned into a script exception like with the VM. For that the
@@ -444,8 +444,7 @@ test. By the geometric mean of the speedups over the interpreter, the tests are 
 times as fast with the JIT compiler without direct system calls, 4.1 times with
 the default settings, 4.2 times with the pooled memory functions too, and 3.5 times
 with the code generated ahead of time. The JIT compiler gains less than on x86-64,
-as the interpreter is faster on this CPU, and the generated code doesn't count the
-references of the script classes itself.
+as the interpreter is faster on this CPU.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
