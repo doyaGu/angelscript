@@ -85,6 +85,8 @@ struct SJITSlot
 	int    offset;    // variable offset as used in the bytecode (fp - offset)
 	asUINT kinds;     // bit mask of EJITSlotKind
 	asUINT useCount;
+	asUINT floatUses; // of the uses, those by the float and double operations
+	asUINT intUses;   // and those by the integer operations
 	int    cacheKind; // JIT_SLOT_I32, I64, F32, F64 if the slot can be kept in a register, else JIT_SLOT_NONE
 	int    cacheBit;  // bit in the dirty masks for cached slots, else -1
 };

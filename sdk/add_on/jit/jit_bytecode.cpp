@@ -1981,6 +1981,8 @@ void CJITByteCode::AddSlotUse(int offset, asUINT kind)
 		s.offset    = offset;
 		s.kinds     = 0;
 		s.useCount  = 0;
+		s.floatUses = 0;
+		s.intUses   = 0;
 		s.cacheKind = JIT_SLOT_NONE;
 		s.cacheBit  = -1;
 		m_slotIndex[offset] = int(m_slots.size());
@@ -1989,6 +1991,10 @@ void CJITByteCode::AddSlotUse(int offset, asUINT kind)
 	}
 	slot->kinds |= kind;
 	slot->useCount++;
+	if( kind == JIT_SLOT_F32 || kind == JIT_SLOT_F64 )
+		slot->floatUses++;
+	else if( kind == JIT_SLOT_I32 || kind == JIT_SLOT_I64 )
+		slot->intUses++;
 }
 
 void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
@@ -2270,8 +2276,12 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	if( !allowRegisterCache )
 		return;
 
-	// Determine which slots hold a single kind of primitive value and are never
-	// accessed through their address. Only those can be kept in registers
+	// Determine which slots hold primitive values of one size and are never accessed
+	// through their address. Only those can be kept in registers. The temporary
+	// variables are reused for values of other types, and the conversions are done
+	// in place, so a slot may hold both integers and floats of the same size. It is
+	// kept in the register of the kind that most of the operations use then, and the
+	// others move the bits between the registers, see CJITCodeGen::Load32
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 	{
 		SJITSlot &slot = m_slots[n];
@@ -2282,7 +2292,18 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 		if( kinds & (JIT_SLOT_PTR | JIT_SLOT_ADDR) )
 			continue;
 
-		// More than one typed kind
+		if( typed == (JIT_SLOT_I32 | JIT_SLOT_F32) )
+			typed = slot.floatUses > slot.intUses ? JIT_SLOT_F32 : JIT_SLOT_I32;
+		else if( typed == (JIT_SLOT_I64 | JIT_SLOT_F64) )
+		{
+			// A 64bit integer can't be held in a register on 32bit hosts, where the
+			// integer operations read the slot in memory
+			if( sizeof(void*) < 8 )
+				continue;
+			typed = slot.floatUses > slot.intUses ? JIT_SLOT_F64 : JIT_SLOT_I64;
+		}
+
+		// Values of different sizes
 		if( typed & (typed - 1) )
 			continue;
 

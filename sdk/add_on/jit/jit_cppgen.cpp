@@ -511,10 +511,10 @@ CJITCppGen::SLocal *CJITCppGen::FindLocal(int offset)
 }
 
 // The value of a variable as the type of AOT_V. The instructions access the local
-// variables with the types of their kind, the conversions between integers of the
-// same size aside, or with the untyped copies. Anything else can't happen, as the
-// analysis wouldn't keep the variable in a register, but the function isn't
-// generated then
+// variables with the types of their kind, with the integers or the floats of the
+// same size, see CJITByteCode::AnalyseSlots, or with the untyped copies. Anything
+// else can't happen, as the analysis wouldn't keep the variable in a register, but
+// the function isn't generated then
 std::string CJITCppGen::Var(const char *type, int offset)
 {
 	SLocal *local = FindLocal(offset);
@@ -532,15 +532,21 @@ std::string CJITCppGen::Var(const char *type, int offset)
 		if( strcmp(type, "i16") == 0 ) return Format("((short)%s)", name);
 		if( strcmp(type, "u8") == 0 )  return Format("((asBYTE)%s)", name);
 		if( strcmp(type, "i8") == 0 )  return Format("((signed char)%s)", name);
+		if( strcmp(type, "f32") == 0 ) return Format("aot_f32bits(%s)", name);
 		break;
 	case JIT_SLOT_F32:
 		if( strcmp(type, "f32") == 0 ) return name;
 		if( strcmp(type, "u32") == 0 ) return Format("aot_bits32(%s)", name);
 		if( strcmp(type, "i32") == 0 ) return Format("((int)aot_bits32(%s))", name);
+		if( strcmp(type, "u16") == 0 ) return Format("((asWORD)aot_bits32(%s))", name);
+		if( strcmp(type, "i16") == 0 ) return Format("((short)aot_bits32(%s))", name);
+		if( strcmp(type, "u8") == 0 )  return Format("((asBYTE)aot_bits32(%s))", name);
+		if( strcmp(type, "i8") == 0 )  return Format("((signed char)aot_bits32(%s))", name);
 		break;
 	case JIT_SLOT_I64:
 		if( strcmp(type, "u64") == 0 ) return name;
 		if( strcmp(type, "i64") == 0 ) return Format("((asINT64)%s)", name);
+		if( strcmp(type, "f64") == 0 ) return Format("aot_f64bits(%s)", name);
 		break;
 	case JIT_SLOT_F64:
 		if( strcmp(type, "f64") == 0 ) return name;
@@ -567,6 +573,7 @@ std::string CJITCppGen::SetVar(const char *type, int offset, const std::string &
 	{
 	case JIT_SLOT_I32:
 		if( is32 ) return Format("%s = (asDWORD)(%s);", name, value.c_str());
+		if( strcmp(type, "f32") == 0 ) return Format("%s = aot_bits32(%s);", name, value.c_str());
 		break;
 	case JIT_SLOT_F32:
 		if( strcmp(type, "f32") == 0 ) return Format("%s = %s;", name, value.c_str());
@@ -574,6 +581,7 @@ std::string CJITCppGen::SetVar(const char *type, int offset, const std::string &
 		break;
 	case JIT_SLOT_I64:
 		if( is64 ) return Format("%s = (asQWORD)(%s);", name, value.c_str());
+		if( strcmp(type, "f64") == 0 ) return Format("%s = aot_bits64(%s);", name, value.c_str());
 		break;
 	case JIT_SLOT_F64:
 		if( strcmp(type, "f64") == 0 ) return Format("%s = %s;", name, value.c_str());
@@ -595,6 +603,8 @@ std::string CJITCppGen::SetVarLow(const char *type, int offset, const std::strin
 		return Format("{ %s v_ = (%s)(%s); AOT_V(u32, %d) = 0; AOT_V(%s, %d) = v_; }", ctype, ctype, value.c_str(), offset, type, offset);
 
 	local->used = true;
+	if( local->kind == JIT_SLOT_F32 )
+		return Format("%s = aot_f32bits((%s)(%s));", local->name.c_str(), ctype, value.c_str());
 	if( local->kind != JIT_SLOT_I32 )
 		m_failed = true;
 	return Format("%s = (%s)(%s);", local->name.c_str(), ctype, value.c_str());
@@ -939,7 +949,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 				Emit("AOT_NOTL(%s);", local->name.c_str());
 			}
 			else
-				return false;
+				Emit("{ asDWORD n_ = %s; AOT_NOTL(n_); %s }", Var("u32", SW0).c_str(), SetVar("u32", SW0, "n_").c_str());
 		}
 		break;
 
