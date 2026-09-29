@@ -228,7 +228,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			SyncAll(idx);
 			InvokeNode *call = Invoke(instr.op == asBC_POWi ? (const void*)JIT_POWi : (const void*)JIT_POWu, FuncSignature::build<int, asSVMRegisters*, void*, asDWORD, asDWORD>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, dst);
 			call->set_arg(2, a);
 			call->set_arg(3, b);
@@ -339,7 +339,7 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			SyncAll(idx);
 			InvokeNode *call = Invoke(instr.op == asBC_POWi64 ? (const void*)JIT_POWi64 : (const void*)JIT_POWu64, FuncSignature::build<int, asSVMRegisters*, void*, const void*, const void*>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, dst);
 			call->set_arg(2, pa);
 			call->set_arg(3, pb);
@@ -617,7 +617,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			SyncAll(idx);
 			InvokeNode *call = Invoke((const void*)JIT_POWf, FuncSignature::build<int, asSVMRegisters*, void*, float, float>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, dst);
 			call->set_arg(2, a);
 			call->set_arg(3, b);
@@ -650,7 +650,7 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 				call->set_arg(3, b);
 			}
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, dst);
 			call->set_arg(2, a);
 			call->set_ret(0, r);

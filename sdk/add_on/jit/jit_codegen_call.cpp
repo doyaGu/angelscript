@@ -212,7 +212,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		SetPC(instr.pos);
 	}
 	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
-	call->set_arg(0, m_regs);
+	SetRegsArg(call, 0);
 	call->set_arg(1, Imm(kind));
 	call->set_arg(2, Imm(funcId));
 	if( extra )
@@ -487,7 +487,7 @@ void CJITCodeGen::EmitInlineExit(int frame)
 		Gp fp = m_uc.new_gp_ptr();
 		Lea(fp, mem_ptr(m_fp, -callee.base * 4));
 		InvokeNode *call = Invoke((const void*)JIT_ExitInlined, FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*, asDWORD*, asDWORD*, asUINT>());
-		call->set_arg(0, m_regs);
+		SetRegsArg(call, 0);
 		call->set_arg(1, Imm(int64_t(asPWORD(callee.code->GetFunction()))));
 		call->set_arg(2, fp);
 		call->set_arg(3, Imm(int64_t(asPWORD(code->GetByteCode() + instr.pos + instr.size))));
@@ -740,7 +740,7 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 		m_uc.cc->invoke(Out(call), target, sig);
 	else
 		m_uc.cc->invoke(Out(call), m_uc.cc->func()->label(), sig);
-	call->set_arg(0, m_regs);
+	SetRegsArg(call, 0);
 	call->set_arg(1, Imm(0));
 	call->set_arg(2, m_callLimit);
 	if( m_spInArg )
@@ -831,7 +831,7 @@ void CJITCodeGen::EmitDirectEntry()
 	SetPC(0);
 	InvokeNode *call = Invoke((const void*)JIT_PrepareFrame, FuncSignature::build<int, asSVMRegisters*>());
 	Gp r = m_uc.new_gp32();
-	call->set_arg(0, m_regs);
+	SetRegsArg(call, 0);
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
 
@@ -861,7 +861,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			SyncForCall(idx);
 			InvokeNode *call = Invoke((const void*)JIT_CallSystem, FuncSignature::build<int, asSVMRegisters*, int>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, Imm(asBC_INTARG(bc)));
 			call->set_ret(0, r);
 			EmitAfterHelperCall(r, idx);
@@ -881,7 +881,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			SyncForCall(idx);
 			InvokeNode *call = Invoke((const void*)JIT_Thiscall1, FuncSignature::build<int, asSVMRegisters*, int>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, Imm(asBC_INTARG(bc)));
 			call->set_ret(0, r);
 			EmitAfterHelperCall(r, idx);
@@ -1416,7 +1416,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		SyncVR();
 	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int, void*>());
 	Gp r = m_uc.new_gp32();
-	after->set_arg(0, m_regs);
+	SetRegsArg(after, 0);
 	after->set_arg(1, Imm(funcId));
 	if( retOnStack )
 		after->set_arg(2, retPtr);
@@ -1595,7 +1595,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				SyncAll(idx);
 				InvokeNode *call = Invoke((const void*)JIT_Alloc, FuncSignature::build<int, asSVMRegisters*, void*, int>());
 				Gp r = m_uc.new_gp32();
-				call->set_arg(0, m_regs);
+				SetRegsArg(call, 0);
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, Imm(func));
 				call->set_ret(0, r);
@@ -1657,7 +1657,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				Gp var = m_uc.new_gp_ptr();
 				LeaVar(var, a0);
 				InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
-				call->set_arg(0, m_regs);
+				SetRegsArg(call, 0);
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, var);
 			}
@@ -1785,7 +1785,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			{
 				// Releases the old object and clears the variable
 				InvokeNode *call = Invoke((const void*)JIT_Free, FuncSignature::build<void, asSVMRegisters*, void*, void*>());
-				call->set_arg(0, m_regs);
+				SetRegsArg(call, 0);
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, d);
 				m_uc.store(mem_ptr(d), s);
@@ -1793,7 +1793,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			else
 			{
 				InvokeNode *call = Invoke((const void*)JIT_RefCpy, FuncSignature::build<void, asSVMRegisters*, void*, void*, void*>());
-				call->set_arg(0, m_regs);
+				SetRegsArg(call, 0);
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, d);
 				call->set_arg(3, s);
@@ -1807,7 +1807,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			Gp a = m_uc.new_gp_ptr();
 			m_uc.load(a, Stack(0));
 			InvokeNode *call = Invoke((const void*)JIT_Cast, FuncSignature::build<void, asSVMRegisters*, void*, asDWORD>());
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_arg(1, a);
 			call->set_arg(2, Imm(int(asBC_DWORDARG(bc))));
 			PopStack(PTR_BYTES);

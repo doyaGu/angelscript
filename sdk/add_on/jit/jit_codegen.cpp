@@ -132,7 +132,7 @@ bool CJITCodeGen::Generate()
 		m_uc.j(guarded, test_nz(m_arg, Imm(JIT_GUARDED_ENTRY)));
 		InvokeNode *call = Invoke((const void*)JIT_GuardedEntry, FuncSignature::build<int, asSVMRegisters*, asPWORD>());
 		Gp r = m_uc.new_gp32();
-		call->set_arg(0, m_regs);
+		SetRegsArg(call, 0);
 		call->set_arg(1, m_arg);
 		call->set_ret(0, r);
 		m_uc.ret(r);
@@ -223,7 +223,7 @@ bool CJITCodeGen::Generate()
 		InvokeNode *call = Invoke(m_options.exactEntry, FuncSignature::build<int, void*, asSVMRegisters*, asPWORD>());
 		Gp r = m_uc.new_gp32();
 		call->set_arg(0, Imm(int64_t(asPWORD(m_options.exactParam))));
-		call->set_arg(1, m_regs);
+		SetRegsArg(call, 1);
 		call->set_arg(2, m_arg);
 		call->set_ret(0, r);
 		m_uc.ret(r);
@@ -233,7 +233,7 @@ bool CJITCodeGen::Generate()
 	{
 		m_uc.bind(m_leaveBorrowed);
 		InvokeNode *call = Invoke((const void*)JIT_OwnBorrowed, FuncSignature::build<void, asSVMRegisters*, asDWORD*, asCScriptFunction*>());
-		call->set_arg(0, m_regs);
+		SetRegsArg(call, 0);
 		call->set_arg(1, m_fp);
 		call->set_arg(2, Imm(int64_t(asPWORD(m_code->GetFunction()))));
 	}
@@ -586,10 +586,14 @@ bool CJITCodeGen::FailIfHidden()
 // The cached variables in the mask get the callee-saved registers left over
 void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
 {
+	// With a bias the prologue has computed the registers pointer from the argument
 	BaseNode *cursor = m_uc.cc->set_cursor(m_func);
-	Gp regsArg = m_uc.new_gp_ptr("regsArg");
-	m_func->set_arg(0, regsArg);
-	m_uc.mov(m_regs, regsArg);
+	if( !m_regsBias )
+	{
+		Gp regsArg = m_uc.new_gp_ptr("regsArg");
+		m_func->set_arg(0, regsArg);
+		m_uc.mov(m_regs, regsArg);
+	}
 	if( m_callLimit.is_valid() )
 	{
 		Gp limitArg = m_uc.new_gp32("callLimitArg");
@@ -938,7 +942,15 @@ void CJITCodeGen::EmitPrologue()
 
 	m_regs = m_uc.new_gp_ptr("regs");
 	m_arg  = m_uc.new_gp_ptr("jitArg");
-	func->set_arg(0, m_regs);
+	m_regsBias = RegsBias();
+	if( m_regsBias )
+	{
+		Gp regsArg = m_uc.new_gp_ptr("regsArg");
+		func->set_arg(0, regsArg);
+		m_uc.sub(m_regs, regsArg, Imm(m_regsBias));
+	}
+	else
+		func->set_arg(0, m_regs);
 	func->set_arg(1, m_arg);
 	if( m_spInArg )
 	{
@@ -1118,14 +1130,30 @@ void CJITCodeGen::EmitBailStubs()
 //------------------------------------------------------------------------
 // Memory operands
 
+// Passes the registers pointer to the call. With a bias it's computed before the
+// node of the call, which has been added already
+void CJITCodeGen::SetRegsArg(InvokeNode *call, uint32_t index)
+{
+	if( !m_regsBias )
+	{
+		call->set_arg(index, m_regs);
+		return;
+	}
+	BaseNode *cursor = m_uc.cc->set_cursor(call->prev());
+	Gp regs = m_uc.new_gp_ptr();
+	m_uc.add(regs, m_regs, Imm(m_regsBias));
+	m_uc.cc->set_cursor(cursor);
+	call->set_arg(index, regs);
+}
+
 Mem CJITCodeGen::RegsField(size_t offset)
 {
-	return Addr(m_regs, int32_t(offset));
+	return Addr(m_regs, int32_t(offset) + m_regsBias);
 }
 
 Mem CJITCodeGen::ContextField(int offset)
 {
-	return Addr(m_regs, int32_t(offset));
+	return Addr(m_regs, offset + m_regsBias);
 }
 
 Mem CJITCodeGen::VRMem()
@@ -2630,7 +2658,7 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			SyncAll(idx);
 			InvokeNode *call = Invoke((const void*)JIT_Suspend, FuncSignature::build<int, asSVMRegisters*>());
 			Gp r = m_uc.new_gp32();
-			call->set_arg(0, m_regs);
+			SetRegsArg(call, 0);
 			call->set_ret(0, r);
 			EmitLeaveIf(r);
 

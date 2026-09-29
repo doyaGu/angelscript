@@ -76,6 +76,12 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 }
 
 // x86 takes any 32bit displacement
+// The displacements reach the fields of the context from the registers pointer
+int CJITCodeGen::RegsBias() const
+{
+	return 0;
+}
+
 Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
 {
 	return mem_ptr(base, disp);
@@ -274,6 +280,24 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	Gp p = m_uc.new_gp_ptr();
 	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
 	return mem_ptr(p);
+}
+
+// The fields of the context lie below the VM registers, mostly further than the
+// 256 bytes that loads and stores reach below their base, see Addr. So the
+// registers pointer is kept less a bias, which puts all of them above the base,
+// where they are in reach. The bias is a multiple of 8, so that the pointers in the
+// VM registers stay in reach too. The pointer itself is computed where it's
+// passed, see SetRegsArg
+int CJITCodeGen::RegsBias() const
+{
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	const int fields[] = { layout.callStackArray, layout.callStackLength, layout.callStackCapacity, layout.currentFunction,
+	                       layout.stackIndex, layout.stackBlocks, layout.callingSystemFunction, layout.status };
+	int bias = 0;
+	for( size_t n = 0; n < sizeof(fields)/sizeof(fields[0]); n++ )
+		if( -fields[n] > bias )
+			bias = -fields[n];
+	return (bias + 7) & ~7;
 }
 
 // The loads and stores take the displacements from -256 to 255, and the multiples
@@ -495,6 +519,11 @@ Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 	Gp p = m_uc.new_gp_ptr();
 	m_uc.add_ext(p, array, index, AS_PTR_SIZE * 4);
 	return mem_ptr(p);
+}
+
+int CJITCodeGen::RegsBias() const
+{
+	return 0;
 }
 
 Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)

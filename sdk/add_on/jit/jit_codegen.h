@@ -193,6 +193,7 @@ protected:
 
 	// Architecture specific code (jit_codegen_arch.cpp)
 	void SetHomeRegHints(asUINT slotMask);
+	int  RegsBias() const;
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 	Mem  PtrElement(const Gp &array, const Gp &index);
@@ -210,6 +211,7 @@ protected:
 	asmjit::InvokeNode *Invoke(const void *fn, const asmjit::FuncSignature &sig);
 
 	// Access to the VM registers
+	void SetRegsArg(asmjit::InvokeNode *call, uint32_t index);
 	Mem  RegsField(size_t offset);
 	Mem  ContextField(int offset);  // offset from SJITContextLayout
 	Mem  VRMem();
@@ -312,7 +314,8 @@ protected:
 	SJITCodeGenOptions         m_options;
 	asmjit::FuncNode          *m_func;
 
-	Gp  m_regs;     // asSVMRegisters*
+	Gp  m_regs;     // asSVMRegisters*, less m_regsBias bytes
+	int m_regsBias; // see RegsBias
 	Gp  m_arg;      // jitArg
 	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
