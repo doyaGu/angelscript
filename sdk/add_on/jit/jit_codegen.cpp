@@ -36,6 +36,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_spInArg    = uc.is_64bit();
 	m_staticStack = code.HasStaticStack();
 	m_spOffset   = 0;
+	m_thisChecked = asUINT(-1);
 	m_vrAddrValid = false;
 	m_instrCount = 0;
 	m_bailCount  = 0;
@@ -146,6 +147,7 @@ bool CJITCodeGen::Generate()
 	const SJITContextLayout &layout = JIT_GetContextLayout();
 	m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackFramePointer)));
 	ReloadStack();
+	ReloadThis();
 	if( m_callLimit.is_valid() )
 	{
 		// The native calls may push call states as long as the call stack doesn't
@@ -968,6 +970,22 @@ void CJITCodeGen::EmitPrologue()
 	m_fp = m_uc.new_gp_ptr("fp");
 	if( !m_staticStack )
 		m_sp = m_uc.new_gp_ptr("sp");
+	if( m_code->IsThisConstant() )
+		m_this = m_uc.new_gp_ptr("this");
+
+	// The entries sync all variables when syncing every instruction, the fields aren't held then
+	const std::vector<SJITField> &fields = m_code->GetFields();
+	m_fieldGp.resize(fields.size());
+	m_fieldVec.resize(fields.size());
+	for( asUINT n = 0; n < fields.size() && m_this.is_valid() && !m_options.syncEveryInstr; n++ )
+	{
+		if( !fields[n].kept )
+			continue;
+		if( fields[n].kind == JIT_SLOT_F32 )
+			m_fieldVec[n] = m_uc.new_vec128_f32x1("field%d", fields[n].offset);
+		else
+			m_fieldGp[n] = m_uc.new_gp32("field%d", fields[n].offset);
+	}
 
 	if( m_vrInReg )
 		m_vr = m_uc.new_gp64("vr");
@@ -985,7 +1003,7 @@ bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 		return m_vrInReg || !m_cached.empty();
 	asUINT entry = m_code->GetEntries()[n];
 	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
-	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0;
+	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0 || HeldFields(entry) != 0;
 }
 
 Label CJITCodeGen::EntryTarget(asUINT n)
@@ -1041,6 +1059,7 @@ void CJITCodeGen::EmitEntryStubs()
 			if( block.vrLiveIn )
 				ReloadVR();
 			ReloadSlots(m_code->GetEntryMask(entries[n]));
+			ReloadFields(HeldFields(entries[n]));
 		}
 		m_uc.j(InstrLabel(entries[n]));
 	}
@@ -1519,6 +1538,59 @@ void CJITCodeGen::ReloadStack()
 {
 	if( !m_staticStack )
 		m_uc.load(m_sp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+}
+
+// The entry paths load the object pointer after setting up the frame, and
+// asBC_LoadThisR after the calls
+void CJITCodeGen::ReloadThis()
+{
+	if( m_this.is_valid() )
+		m_uc.load(m_this, Addr(m_fp, 0));
+}
+
+// The fields of the object whose registers hold their value when the instruction of
+// frame 0 is reached
+asUINT CJITCodeGen::HeldFields(asUINT idx) const
+{
+	asUINT mask = m_code->GetFieldMask(idx), held = 0;
+	for( asUINT f = 0; f < m_fieldGp.size(); f++ )
+		if( ((mask >> f) & 1) && (m_fieldGp[f].is_valid() || m_fieldVec[f].is_valid()) )
+			held |= 1u << f;
+	return held;
+}
+
+// Where the VM enters, the fields are loaded from the object. The null pointer is
+// found by asBC_LoadThisR before the fields are read. The registers are cleared
+// for it anyway, as the register allocator would otherwise take them to be live
+// from the start of the function, across the calls there
+void CJITCodeGen::ReloadFields(asUINT mask)
+{
+	if( mask == 0 )
+		return;
+	const std::vector<SJITField> &fields = m_code->GetFields();
+	Gp zero = m_uc.new_gp32();
+	m_uc.mov(zero, 0);
+	for( asUINT f = 0; f < fields.size(); f++ )
+	{
+		if( !((mask >> f) & 1) )
+			continue;
+		if( m_fieldVec[f].is_valid() )
+			m_uc.s_mov_u32(m_fieldVec[f], zero);
+		else
+			m_uc.mov(m_fieldGp[f], zero);
+	}
+	Label skip = m_uc.new_label();
+	m_uc.j(skip, test_z(m_this));
+	for( asUINT f = 0; f < fields.size(); f++ )
+	{
+		if( !((mask >> f) & 1) )
+			continue;
+		if( m_fieldVec[f].is_valid() )
+			m_uc.v_loadu32_f32(m_fieldVec[f], Addr(m_this, fields[f].offset));
+		else
+			m_uc.load_u32(m_fieldGp[f], Addr(m_this, fields[f].offset));
+	}
+	m_uc.bind(skip);
 }
 
 // After a call has completed the instruction, the static stack pointer is the one
@@ -2211,10 +2283,28 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 	case asBC_WRTV2:
 	case asBC_WRTV4:
 		{
-			// Floats kept in vector registers are stored from there
+			// Floats kept in vector registers are stored from there. The fields of
+			// the object held in registers are stored from theirs
 			Mem dst = VRAddr();
 			SCachedSlot *c = FindCached(a0);
-			if( instr.op == asBC_WRTV4 && c && c->kind == JIT_SLOT_F32 )
+			int f = m_frame == 0 ? m_code->GetFieldAccess(idx) : -1;
+			if( f >= 0 && m_fieldVec[f].is_valid() )
+			{
+				if( !c )
+					m_uc.v_loadu32_f32(m_fieldVec[f], Var(a0));
+				else
+					MoveVec(m_fieldVec[f], LoadF32(a0));
+				m_uc.v_storeu32_f32(dst, m_fieldVec[f]);
+			}
+			else if( f >= 0 && m_fieldGp[f].is_valid() )
+			{
+				if( !c )
+					m_uc.load_u32(m_fieldGp[f], Var(a0));
+				else
+					m_uc.mov(m_fieldGp[f], Load32(a0));
+				m_uc.store_u32(dst, m_fieldGp[f]);
+			}
+			else if( instr.op == asBC_WRTV4 && c && c->kind == JIT_SLOT_F32 )
 				m_uc.v_storeu32_f32(dst, c->vec);
 			else if( instr.op == asBC_WRTV1 )
 				m_uc.store_u8(dst, Load32(a0));
@@ -2240,6 +2330,29 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 	case asBC_RDR2:
 	case asBC_RDR4:
 		{
+			// The fields of the object held in registers are read from there, and
+			// kept there when read from the memory
+			int f = m_frame == 0 ? m_code->GetFieldAccess(idx) : -1;
+			bool held = f >= 0 && ((HeldFields(idx) >> f) & 1);
+			if( f >= 0 && (m_fieldVec[f].is_valid() || m_fieldGp[f].is_valid()) )
+			{
+				if( held )
+					m_vrAddrValid = false;
+				if( m_fieldVec[f].is_valid() )
+				{
+					if( !held )
+						m_uc.v_loadu32_f32(m_fieldVec[f], VRAddr());
+					CommitF32(a0, m_fieldVec[f]);
+				}
+				else
+				{
+					if( !held )
+						m_uc.load_u32(m_fieldGp[f], VRAddr());
+					Commit32(a0, m_fieldGp[f]);
+				}
+				break;
+			}
+
 			Mem src = VRAddr();
 			SCachedSlot *c = FindCached(a0);
 			if( instr.op == asBC_RDR4 && c && c->kind == JIT_SLOT_F32 )
@@ -2324,6 +2437,19 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		break;
 
 	case asBC_LoadThisR:
+		if( m_frame == 0 && m_this.is_valid() )
+		{
+			// The pointer doesn't change, so once checked it is known to be valid in the rest of the block
+			if( !(m_code->GetFieldMask(idx) & JIT_THIS_HELD) )
+				ReloadThis();
+			if( m_thisChecked != instr.block )
+			{
+				m_uc.j(BailLabel(idx), test_z(m_this));
+				m_thisChecked = instr.block;
+			}
+			SetVRAddr(idx, Addr(m_this, asBC_SWORDARG0(bc)));
+		}
+		else
 		{
 			Gp t = m_uc.new_gp_ptr();
 			m_uc.load(t, Var(0));
@@ -2508,8 +2634,10 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			call->set_ret(0, r);
 			EmitLeaveIf(r);
 
-			// The line callback may have modified variables
+			// The line callback may have modified variables and the object
 			ReloadAll(idx);
+			ReloadThis();
+			ReloadFields(HeldFields(idx));
 			EndCold(cold, cont);
 			m_uc.bind(cont);
 		}

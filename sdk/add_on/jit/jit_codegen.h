@@ -263,6 +263,9 @@ protected:
 	void SyncStack();
 	void ReloadStack();
 	void ReloadStackAfter(asUINT idx); // after a call that has completed the instruction
+	void ReloadThis();
+	asUINT HeldFields(asUINT idx) const;
+	void ReloadFields(asUINT mask);
 
 	// The stack pointer. If the stack is static, it is the frame pointer minus a
 	// constant, else it is kept in m_sp
@@ -315,6 +318,9 @@ protected:
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_inlineRoom; // words of room on the call stack for the inlined functions, only if some are called in loops, see EmitInlineRoom
 	Gp  m_fp;       // stack frame pointer
+	Gp  m_this;     // object pointer of a method that doesn't modify it, see CJITByteCode::IsThisConstant
+	std::vector<Gp>  m_fieldGp;  // the fields of the object held in registers, see CJITByteCode::GetFields
+	std::vector<Vec> m_fieldVec; // those kept in vector registers
 	Gp  m_sp;       // stack pointer, unless the stack is static
 	Gp  m_vr;       // value register (64bit hosts only)
 	Gp  m_bailPC;   // program pointer to set when bailing
@@ -322,6 +328,7 @@ protected:
 	bool m_spInArg;     // native callers pass the stack pointer as argument (64bit hosts only)
 	bool m_staticStack;
 	int  m_spOffset;    // offset of the stack pointer from fp if the stack is static
+	asUINT m_thisChecked; // the block of frame 0 where m_this has been checked for null, or -1
 	bool m_guarded;
 	Mem  m_vrAddr;      // the address left to the next instruction by SetVRAddr
 	bool m_vrAddrValid;

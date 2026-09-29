@@ -91,6 +91,24 @@ struct SJITSlot
 	int    cacheBit;  // bit in the dirty masks for cached slots, else -1
 };
 
+// A field of the object of a method, which asBC_LoadThisR and asBC_RDR4, asBC_WRTV4,
+// or the 32-bit increments read and write. Its value is kept in a register after
+// the accesses, so that the next reads don't have to load it, see
+// CJITByteCode::AnalyseThisFields
+struct SJITField
+{
+	int    offset;    // from the object pointer, in bytes
+	int    kind;      // JIT_SLOT_I32 or JIT_SLOT_F32, the register it is kept in
+	asUINT floatUses; // of the accesses, those of variables kept in vector registers
+	asUINT forwarded; // the reads that take the value from the register
+	bool   kept;      // the field is kept in a register
+};
+
+// The bit in the field masks for the object pointer, which its register holds after
+// asBC_LoadThisR until a call. It is loaded again from the variable then, so that
+// the register isn't saved across the calls. The other 31 bits are for the fields
+static const asUINT JIT_THIS_HELD = 0x80000000u;
+
 // The frame of the function, i.e. the stack frame pointer in the VM registers and
 // the current function of the context, is written back like the register cached
 // variables, and has this bit in the dirty masks. The native entry leaves it to
@@ -186,6 +204,19 @@ public:
 
 	// Returns the bit of a register cached variable in the dirty masks, or -1
 	int  GetCacheBit(int offset) const;
+
+	// Returns true if the function is a method that reads its object pointer with
+	// asBC_LoadThisR and never modifies the variable, so that it can be held in a
+	// register
+	bool IsThisConstant() const { return m_thisConstant; }
+
+	// Returns the fields of the object that are kept in registers, the one read or
+	// written by the instruction, or -1, and the mask of the fields whose register
+	// holds their value when the instruction is reached, with JIT_THIS_HELD. Where
+	// the VM enters, the entry stubs load the fields, see AnalyseThisFields
+	const std::vector<SJITField> &GetFields() const { return m_fields; }
+	int    GetFieldAccess(asUINT instrIdx) const { return m_fieldAccess.empty() ? -1 : m_fieldAccess[instrIdx]; }
+	asUINT GetFieldMask(asUINT instrIdx) const   { return m_fieldMask.empty() ? 0 : m_fieldMask[instrIdx]; }
 
 	// Returns the mask of the register cached variables whose register may hold
 	// a newer value than the memory when the instruction is reached, and of the
@@ -304,6 +335,7 @@ protected:
 	void AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots);
 	void AnalyseDirtySlots();
 	void AnalyseSlotLiveness();
+	void AnalyseThisFields();
 	void AnalyseStackDepth();
 	void AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots);
 	struct SInlineSearch;
@@ -344,6 +376,10 @@ protected:
 	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
 	std::vector<asUINT>     m_liveAfter;   // per instruction mask of cached slots live after it
 	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
+	bool                    m_thisConstant; // see IsThisConstant
+	std::vector<SJITField>  m_fields;      // see GetFields
+	std::vector<int>        m_fieldAccess; // per instruction the field read or written, or -1
+	std::vector<asUINT>     m_fieldMask;   // per instruction mask of the fields held in registers, and JIT_THIS_HELD
 	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF

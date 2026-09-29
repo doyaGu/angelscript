@@ -672,7 +672,44 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 
 bool CJITCodeGen::EmitIncDec(const SJITInstr &instr)
 {
+	asUINT idx = asUINT(&instr - &m_code->GetInstructions()[0]);
 	Mem m = VRAddr();
+
+	// The fields of the object held in registers are incremented there and stored
+	int f = m_frame == 0 ? m_code->GetFieldAccess(idx) : -1;
+	if( f >= 0 && (m_fieldGp[f].is_valid() || m_fieldVec[f].is_valid()) )
+	{
+		bool held = ((HeldFields(idx) >> f) & 1) != 0;
+		bool inc = instr.op == asBC_INCi || instr.op == asBC_INCf;
+		if( instr.op == asBC_INCi || instr.op == asBC_DECi )
+		{
+			Gp t = m_fieldGp[f].is_valid() ? m_fieldGp[f] : m_uc.new_gp32();
+			if( !held )
+				m_uc.load_u32(t, m);
+			else if( !m_fieldGp[f].is_valid() )
+				m_uc.s_mov_u32(t, m_fieldVec[f]);
+			inc ? m_uc.add(t, t, Imm(1)) : m_uc.sub(t, t, Imm(1));
+			m_uc.store_u32(m, t);
+			if( m_fieldVec[f].is_valid() )
+				m_uc.s_mov_u32(m_fieldVec[f], t);
+		}
+		else
+		{
+			Vec v = m_fieldVec[f].is_valid() ? m_fieldVec[f] : m_uc.new_vec128_f32x1();
+			Vec one = m_uc.new_vec128_f32x1();
+			Gp c = PtrConst(asPWORD(&g_oneF32));
+			if( !held )
+				m_uc.v_loadu32_f32(v, m);
+			else if( !m_fieldVec[f].is_valid() )
+				m_uc.s_mov_u32(v, m_fieldGp[f]);
+			m_uc.v_loadu32_f32(one, mem_ptr(c));
+			inc ? m_uc.s_add_f32(v, v, one) : m_uc.s_sub_f32(v, v, one);
+			m_uc.v_storeu32_f32(m, v);
+			if( m_fieldGp[f].is_valid() )
+				m_uc.s_mov_u32(m_fieldGp[f], v);
+		}
+		return true;
+	}
 
 	switch( instr.op )
 	{

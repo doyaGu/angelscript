@@ -798,6 +798,7 @@ void CJITCodeGen::EmitDirectEntry()
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
 	m_uc.bind(ready);
+	ReloadThis();
 	if( m_inlineRoom.is_valid() )
 		EmitInlineRoom();
 	if( m_options.syncEveryInstr )

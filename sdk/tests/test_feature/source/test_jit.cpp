@@ -511,6 +511,154 @@ static bool TestSuspend(asIScriptEngine *engine)
 	return fail;
 }
 
+// The fields of the object of a method are kept in registers between the accesses,
+// see CJITByteCode::AnalyseThisFields. The line callback, the application while
+// the context is suspended, the writes through other handles, and the calls modify
+// them behind the method's back. The loops access the fields before, so that they
+// are held all through
+static int *PropertyOf(asIScriptObject *obj, const char *name)
+{
+	for( asUINT n = 0; n < obj->GetPropertyCount(); n++ )
+		if( std::string(obj->GetPropertyName(n)) == name )
+			return (int*)obj->GetAddressOfProperty(n);
+	return 0;
+}
+
+static bool TestThisFields(asIScriptEngine *engine)
+{
+	bool fail = false;
+	COutStream out;
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+
+	const char *script =
+		"class Obj                                                         \n"
+		"{                                                                 \n"
+		"  int flag = 0;                                                   \n"
+		"  int spins = 0;                                                  \n"
+		"  float pos = 0;                                                  \n"
+		"  float vel = 1;                                                  \n"
+		"  int count = 0;                                                  \n"
+		"  int poll()                                                      \n"
+		"  {                                                               \n"
+		"    spins = flag;                                                 \n"
+		"    while( flag == 0 && spins < 100000 )                          \n"
+		"      spins++;                                                    \n"
+		"    return spins;                                                 \n"
+		"  }                                                               \n"
+		"  float pollFloat()                                               \n"
+		"  {                                                               \n"
+		"    pos = flag;                                                   \n"
+		"    while( flag == 0 && pos < 100000 )                            \n"
+		"      pos += 1;                                                   \n"
+		"    return pos;                                                   \n"
+		"  }                                                               \n"
+		"  float move(int n)                                               \n"
+		"  {                                                               \n"
+		"    for( int i = 0; i < n; i++ )                                  \n"
+		"    {                                                             \n"
+		"      pos += vel;                                                 \n"
+		"      if( pos > 3 ) pos = 0;                                      \n"
+		"      count++;                                                    \n"
+		"    }                                                             \n"
+		"    return pos + count;                                           \n"
+		"  }                                                               \n"
+		"  void touch() { count += 100; pos = -50; }                       \n"
+		"  int alias(Obj@ o)                                               \n"
+		"  {                                                               \n"
+		"    count = 1;                                                    \n"
+		"    o.count = 2;                                                  \n"
+		"    int a = count;                                                \n"
+		"    count = 3;                                                    \n"
+		"    touch();                                                      \n"
+		"    return a * 1000 + count;                                      \n"
+		"  }                                                               \n"
+		"}                                                                 \n";
+
+	asIScriptModule *mod = engine->GetModule("fields", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("fields", script);
+	if( mod->Build() < 0 )
+	{
+		TEST_FAILED;
+		return fail;
+	}
+	asITypeInfo *type = mod->GetTypeInfoByName("Obj");
+
+	// Sets the flag from the line callback, which the loop must see then
+	struct SFlag
+	{
+		int calls;
+		bool suspend;
+		static void Callback(asIScriptContext *ctx, SFlag *self)
+		{
+			if( ++self->calls != 20 )
+				return;
+			if( self->suspend )
+				ctx->Suspend();
+			else
+				*PropertyOf((asIScriptObject*)ctx->GetThisPointer(0), "flag") = 1;
+		}
+	};
+	static const char *polls[] = { "int poll()", "float pollFloat()" };
+	for( int n = 0; n < 4; n++ )
+	{
+		asIScriptObject *obj = (asIScriptObject*)engine->CreateScriptObject(type);
+		asIScriptContext *ctx = engine->CreateContext();
+		SFlag flag = { 0, n >= 2 };
+		ctx->SetLineCallback(asFUNCTION(SFlag::Callback), &flag, asCALL_CDECL);
+		ctx->Prepare(type->GetMethodByDecl(polls[n & 1]));
+		ctx->SetObject(obj);
+		int r = ctx->Execute();
+
+		// The application sets the flag while the context is suspended
+		if( flag.suspend && r == asEXECUTION_SUSPENDED )
+		{
+			*PropertyOf(obj, "flag") = 1;
+			ctx->ClearLineCallback();
+			r = ctx->Execute();
+		}
+		float spins = (n & 1) ? ctx->GetReturnFloat() : float(ctx->GetReturnDWord());
+		if( r != asEXECUTION_FINISHED || spins < 1 || spins >= 100000 )
+		{
+			PRINTF("%s%s: %d, %f spins\n", polls[n & 1], flag.suspend ? " suspended" : "", r, spins);
+			TEST_FAILED;
+		}
+		ctx->Release();
+		obj->Release();
+	}
+
+	// The writes through another handle to the object, and the calls
+	asIScriptObject *obj = (asIScriptObject*)engine->CreateScriptObject(type);
+	asIScriptObject *other = (asIScriptObject*)engine->CreateScriptObject(type);
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(type->GetMethodByDecl("float move(int)"));
+	ctx->SetObject(obj);
+	ctx->SetArgDWord(0, 10);
+	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnFloat() != 12 )
+	{
+		PRINTF("move: %f\n", ctx->GetReturnFloat());
+		TEST_FAILED;
+	}
+	for( int n = 0; n < 2; n++ )
+	{
+		ctx->Prepare(type->GetMethodByDecl("int alias(Obj@)"));
+		ctx->SetObject(obj);
+		ctx->SetArgObject(0, n == 0 ? obj : other);
+		int expected = n == 0 ? 2103 : 1103;
+		if( ctx->Execute() != asEXECUTION_FINISHED || int(ctx->GetReturnDWord()) != expected )
+		{
+			PRINTF("alias: %d, expected %d\n", int(ctx->GetReturnDWord()), expected);
+			TEST_FAILED;
+		}
+	}
+	if( *PropertyOf(obj, "count") != 103 || *(float*)PropertyOf(obj, "pos") != -50 || *PropertyOf(other, "count") != 2 )
+		TEST_FAILED;
+	ctx->Release();
+	other->Release();
+	obj->Release();
+
+	return fail;
+}
+
 // Script code executed on the same context while the native code has
 // arguments for a pending call on the stack
 static bool TestNestedExecution(asIScriptEngine *engine)
@@ -4632,12 +4780,14 @@ bool Test()
 		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
 		engine->SetJITCompiler(&jit);
 		fail = TestSuspend(engine) || fail;
+		fail = TestThisFields(engine) || fail;
 		engine->ShutDownAndRelease();
 	}
 	else
 	{
 		engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
 		fail = TestSuspend(engine) || fail;
+		fail = TestThisFields(engine) || fail;
 		engine->ShutDownAndRelease();
 	}
 

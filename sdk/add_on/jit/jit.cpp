@@ -397,6 +397,14 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		                   slots[n].cacheKind == JIT_SLOT_F32 ? "float" : "double";
 		fprintf(file, "; v%d cached in register as %s (%d uses)\n", slots[n].offset, kind, slots[n].useCount);
 	}
+
+	const std::vector<SJITField> &fields = code.GetFields();
+	for( asUINT n = 0; n < fields.size(); n++ )
+	{
+		if( fields[n].kept )
+			fprintf(file, "; this+%d kept in register as %s (%d reads forwarded)\n", fields[n].offset,
+			        fields[n].kind == JIT_SLOT_F32 ? "float" : "int32", fields[n].forwarded);
+	}
 }
 
 bool CJITCompiler::SImpl::IsLogged(asCScriptFunction *func) const

@@ -7,6 +7,7 @@
 #include "as_module.h"
 
 #include <algorithm>
+#include <climits>
 
 BEGIN_AS_NAMESPACE
 
@@ -17,6 +18,7 @@ CJITByteCode::CJITByteCode()
 	m_length   = 0;
 	m_retReadsVR = false;
 	m_tempMask   = 0;
+	m_thisConstant = false;
 	m_staticStack = false;
 	m_aot = false;
 	m_inlinedLength = 0;
@@ -1373,6 +1375,7 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 	AnalyseSlots(allowRegisterCache, maxCachedSlots);
 	AnalyseSlotLiveness();
 	AnalyseDirtySlots();
+	AnalyseThisFields();
 }
 
 bool CJITByteCode::IsSyncPoint(asEBCInstr op)
@@ -2269,12 +2272,41 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	m_slots.clear();
 	m_slotIndex.clear();
 	m_tempMask = 0;
+	m_thisConstant = false;
 
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 		CollectSlotUses(m_instrs[n]);
 
 	if( !allowRegisterCache )
 		return;
+
+	// asBC_LoadThisR reads the object pointer without being a use of the variable.
+	// The variable holds the same pointer throughout the function if the other
+	// instructions only read it, and its address is never taken
+	const SJITSlot *self = FindSlot(0);
+	m_thisConstant = m_func->objectType != 0 && (!self || self->kinds == JIT_SLOT_PTR);
+	bool readsThis = false;
+	for( asUINT n = 0; n < m_instrs.size() && m_thisConstant; n++ )
+	{
+		switch( m_instrs[n].op )
+		{
+		case asBC_LoadThisR:
+			readsThis = true;
+			break;
+		case asBC_ClrVPtr:
+		case asBC_FREE:
+		case asBC_LOADOBJ:
+		case asBC_STOREOBJ:
+		case asBC_RefCpyV:
+		case asBC_AllocMem:
+			if( asBC_SWORDARG0(m_instrs[n].bc) == 0 )
+				m_thisConstant = false;
+			break;
+		default:
+			break;
+		}
+	}
+	m_thisConstant = m_thisConstant && readsThis;
 
 	// Determine which slots hold primitive values of one size and are never accessed
 	// through their address. Only those can be kept in registers. The temporary
@@ -2383,6 +2415,235 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 			named = vars[v]->stackOffset == m_slots[n].offset && vars[v]->name.GetLength() > 0;
 		if( !named )
 			m_tempMask |= asUINT(1) << m_slots[n].cacheBit;
+	}
+}
+
+// The instructions that don't modify the memory of objects, across which the object
+// pointer is held in its register too. asBC_SUSPEND reloads the fields and the
+// pointer after the line callback or the suspension, see CJITCodeGen::EmitMisc
+static bool KeepsFields(asEBCInstr op)
+{
+	switch( op )
+	{
+	case asBC_RDR1: case asBC_RDR2: case asBC_RDR4: case asBC_RDR8:
+	case asBC_JitEntry:
+	case asBC_JMP: case asBC_JZ: case asBC_JNZ: case asBC_JS: case asBC_JNS: case asBC_JP: case asBC_JNP:
+	case asBC_JLowZ: case asBC_JLowNZ: case asBC_JMPP:
+	case asBC_TZ: case asBC_TNZ: case asBC_TS: case asBC_TNS: case asBC_TP: case asBC_TNP:
+	case asBC_CMPi: case asBC_CMPu: case asBC_CMPf: case asBC_CMPd: case asBC_CMPi64: case asBC_CMPu64:
+	case asBC_CMPIi: case asBC_CMPIu: case asBC_CMPIf: case asBC_CmpPtr:
+	case asBC_NOT: case asBC_ClrHi: case asBC_IncVi: case asBC_DecVi:
+	case asBC_NEGi: case asBC_NEGf: case asBC_NEGd: case asBC_NEGi64:
+	case asBC_BNOT: case asBC_BNOT64:
+	case asBC_ADDi: case asBC_SUBi: case asBC_MULi: case asBC_DIVi: case asBC_MODi: case asBC_DIVu: case asBC_MODu:
+	case asBC_ADDIi: case asBC_SUBIi: case asBC_MULIi:
+	case asBC_BAND: case asBC_BOR: case asBC_BXOR: case asBC_BSLL: case asBC_BSRL: case asBC_BSRA:
+	case asBC_ADDi64: case asBC_SUBi64: case asBC_MULi64: case asBC_DIVi64: case asBC_MODi64: case asBC_DIVu64: case asBC_MODu64:
+	case asBC_BAND64: case asBC_BOR64: case asBC_BXOR64: case asBC_BSLL64: case asBC_BSRL64: case asBC_BSRA64:
+	case asBC_ADDf: case asBC_SUBf: case asBC_MULf: case asBC_DIVf: case asBC_MODf:
+	case asBC_ADDIf: case asBC_SUBIf: case asBC_MULIf:
+	case asBC_ADDd: case asBC_SUBd: case asBC_MULd: case asBC_DIVd: case asBC_MODd:
+	case asBC_iTOb: case asBC_iTOw: case asBC_sbTOi: case asBC_swTOi: case asBC_ubTOi: case asBC_uwTOi:
+	case asBC_iTOf: case asBC_fTOi: case asBC_uTOf: case asBC_fTOu: case asBC_dTOi: case asBC_dTOu: case asBC_dTOf:
+	case asBC_iTOd: case asBC_uTOd: case asBC_fTOd: case asBC_i64TOi: case asBC_uTOi64: case asBC_iTOi64:
+	case asBC_fTOi64: case asBC_fTOu64: case asBC_dTOi64: case asBC_dTOu64: case asBC_i64TOf: case asBC_u64TOf:
+	case asBC_i64TOd: case asBC_u64TOd:
+	case asBC_SetV1: case asBC_SetV2: case asBC_SetV4: case asBC_SetV8:
+	case asBC_CpyVtoV4: case asBC_CpyVtoV8: case asBC_CpyVtoR4: case asBC_CpyVtoR8: case asBC_CpyRtoV4: case asBC_CpyRtoV8:
+	case asBC_CpyGtoV4: case asBC_LdGRdR4: case asBC_CpyVtoG4: case asBC_SetG4:
+	case asBC_LoadThisR: case asBC_LoadRObjR: case asBC_LoadVObjR: case asBC_SUSPEND:
+		return true;
+	default:
+		return false;
+	}
+}
+
+// The bytes that an instruction reads or writes where the value register points
+static bool GetVRAccess(asEBCInstr op, int &size, bool &writes)
+{
+	writes = true;
+	switch( op )
+	{
+	case asBC_RDR1: writes = false; size = 1; return true;
+	case asBC_RDR2: writes = false; size = 2; return true;
+	case asBC_RDR4: writes = false; size = 4; return true;
+	case asBC_RDR8: writes = false; size = 8; return true;
+	case asBC_WRTV1: case asBC_INCi8: case asBC_DECi8: size = 1; return true;
+	case asBC_WRTV2: case asBC_INCi16: case asBC_DECi16: size = 2; return true;
+	case asBC_WRTV4: case asBC_INCi: case asBC_DECi: case asBC_INCf: case asBC_DECf: size = 4; return true;
+	case asBC_WRTV8: case asBC_INCi64: case asBC_DECi64: case asBC_INCd: case asBC_DECd: size = 8; return true;
+	default: return false;
+	}
+}
+
+// Forward data flow over the blocks to find out which fields of the object hold
+// the value that the function has last read or written when an instruction is
+// reached. They can be read from the register then. Anything that may modify an
+// object invalidates them all: the calls and the writes through other pointers.
+// The writes through the object pointer invalidate the fields they overlap. Like
+// the variables, the fields aren't reloaded for the other threads, which would
+// have to synchronize with the context anyway, but only where the line callback
+// or the debugger may have modified them. The object pointer is held from
+// asBC_LoadThisR until the next instruction that may call
+void CJITByteCode::AnalyseThisFields()
+{
+	m_fields.clear();
+	m_fieldAccess.clear();
+	m_fieldMask.clear();
+	if( !m_thisConstant || m_instrs.empty() )
+		return;
+
+	// The accesses through the value register set by asBC_LoadThisR before in the
+	// block, like the read and the write of a compound assignment. The instructions
+	// in between leave the value register and the object alone
+	const int none = INT_MIN;
+	std::vector<int> thisOffset(m_instrs.size(), none);
+	std::vector<asUINT> accesses;
+	m_fieldAccess.assign(m_instrs.size(), -1);
+	int vrOffset = none;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		const asUINT skipped = JIT_INSTR_BAIL | JIT_INSTR_SKIP;
+		if( instr.flags & JIT_INSTR_DEAD )
+			continue;
+		if( n > 0 && instr.block != m_instrs[n - 1].block )
+			vrOffset = none;
+		if( instr.flags & skipped )
+		{
+			vrOffset = none;
+			continue;
+		}
+		int size;
+		bool writes;
+		thisOffset[n] = vrOffset;
+		if( instr.op == asBC_LoadThisR )
+			vrOffset = asBC_SWORDARG0(instr.bc);
+		else if( !GetVRAccess(instr.op, size, writes) && (WritesVR(instr.op) || !KeepsFields(instr.op)) )
+			vrOffset = none;
+		if( thisOffset[n] == none )
+			continue;
+		bool incFloat = instr.op == asBC_INCf || instr.op == asBC_DECf;
+		if( instr.op != asBC_RDR4 && instr.op != asBC_WRTV4 && instr.op != asBC_INCi && instr.op != asBC_DECi && !incFloat )
+			continue;
+
+		asUINT f = 0;
+		while( f < m_fields.size() && m_fields[f].offset != thisOffset[n] )
+			f++;
+		if( f == m_fields.size() )
+		{
+			if( f == 31 )
+				continue;
+			SJITField field = { thisOffset[n], JIT_SLOT_I32, 0, 0, false };
+			m_fields.push_back(field);
+			accesses.push_back(0);
+		}
+		m_fieldAccess[n] = int(f);
+		accesses[f]++;
+		if( incFloat || ((instr.op == asBC_RDR4 || instr.op == asBC_WRTV4) && GetCacheKind(asBC_SWORDARG0(instr.bc)) == JIT_SLOT_F32) )
+			m_fields[f].floatUses++;
+	}
+
+	// The function may be entered at the first instruction through a loop too,
+	// where only the object pointer is held. Where the VM enters, the entry paths
+	// load the pointer and the entry stubs the fields, so only the predecessors matter
+	std::vector<asUINT> succ;
+	std::vector<bool> reached(m_blocks.size(), false);
+	for( asUINT b = 0; b < m_blocks.size(); b++ )
+	{
+		GetSuccessors(b, succ);
+		for( asUINT k = 0; k < succ.size(); k++ )
+			reached[succ[k]] = true;
+	}
+	asUINT first = asUINT(m_instrs[0].block);
+	std::vector<asUINT> in(m_blocks.size(), 0);
+	for( asUINT b = 0; b < m_blocks.size(); b++ )
+		in[b] = reached[b] && b != first ? ~asUINT(0) : b == first ? JIT_THIS_HELD : 0;
+
+	m_fieldMask.assign(m_instrs.size(), 0);
+	bool changed = true;
+	while( changed )
+	{
+		changed = false;
+		for( asUINT b = 0; b < m_blocks.size(); b++ )
+		{
+			const SJITBlock &block = m_blocks[b];
+			asUINT mask = in[b];
+			for( asUINT n = block.first; n <= block.last; n++ )
+			{
+				const SJITInstr &instr = m_instrs[n];
+				m_fieldMask[n] = mask;
+				int size;
+				bool writes;
+				if( instr.flags & JIT_INSTR_DEAD )
+					continue;
+				if( instr.flags & JIT_INSTR_BAIL )
+					mask = 0;
+				else if( GetVRAccess(instr.op, size, writes) && thisOffset[n] != none )
+				{
+					for( asUINT f = 0; f < m_fields.size() && writes; f++ )
+						if( m_fields[f].offset < thisOffset[n] + size && thisOffset[n] < m_fields[f].offset + 4 )
+							mask &= ~(1u << f);
+					if( m_fieldAccess[n] >= 0 )
+						mask |= 1u << m_fieldAccess[n];
+				}
+				else if( !KeepsFields(instr.op) )
+					mask = 0;
+				else if( instr.op == asBC_LoadThisR )
+					mask |= JIT_THIS_HELD;
+			}
+
+			GetSuccessors(b, succ);
+			for( asUINT k = 0; k < succ.size(); k++ )
+			{
+				if( (in[succ[k]] & mask) != in[succ[k]] )
+				{
+					in[succ[k]] &= mask;
+					changed = true;
+				}
+			}
+		}
+	}
+
+	// Only the fields that are read again are kept. Each takes a register, so
+	// those read the most are kept
+	std::vector<asUINT> order;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		int f = m_fieldAccess[n];
+		if( f >= 0 && m_instrs[n].op != asBC_WRTV4 && ((m_fieldMask[n] >> f) & 1) )
+			m_fields[f].forwarded++;
+	}
+	// The register is chosen by the type of the property, or else by the variables
+	// the value is moved between
+	const asCArray<asCObjectProperty*> &props = m_func->objectType->properties;
+	for( asUINT f = 0; f < m_fields.size(); f++ )
+	{
+		m_fields[f].kind = m_fields[f].floatUses * 2 > accesses[f] ? JIT_SLOT_F32 : JIT_SLOT_I32;
+		for( asUINT p = 0; p < props.GetLength(); p++ )
+		{
+			const asCObjectProperty *prop = props[p];
+			if( prop->byteOffset != m_fields[f].offset || prop->compositeOffset != 0 || prop->isCompositeIndirect ||
+				!prop->type.IsPrimitive() || prop->type.IsReference() || prop->type.GetSizeInMemoryBytes() != 4 )
+				continue;
+			m_fields[f].kind = prop->type.IsFloatType() ? JIT_SLOT_F32 : JIT_SLOT_I32;
+			break;
+		}
+		if( m_fields[f].forwarded )
+			order.push_back(f);
+	}
+	std::stable_sort(order.begin(), order.end(), [this](asUINT a, asUINT b) { return m_fields[a].forwarded > m_fields[b].forwarded; });
+	asUINT kept = 0;
+	for( asUINT k = 0; k < order.size() && k < 8; k++ )
+	{
+		m_fields[order[k]].kept = true;
+		kept |= 1u << order[k];
+	}
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		m_fieldMask[n] &= kept | JIT_THIS_HELD;
+		if( m_fieldAccess[n] >= 0 && !m_fields[m_fieldAccess[n]].kept )
+			m_fieldAccess[n] = -1;
 	}
 }
 
