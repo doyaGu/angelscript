@@ -203,6 +203,7 @@ protected:
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void StoreImm32(const Mem &dst, int value);
 	void MoveVec(const Vec &dst, const Vec &src);
+	void MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble);
 	void EmitAddRefInPlace(const Gp &obj, const Label &slow);
 	bool EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
 	void EmitRefCountInc(const Gp &obj);

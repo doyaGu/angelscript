@@ -125,6 +125,26 @@ void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
 	m_uc.v_mov(dst, src);
 }
 
+// Moves the bits of a float or a double to the vector register. Zero is xored,
+// which the cores do without a dependency, the others go through a register
+void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
+{
+	if( bits == 0 )
+		m_uc.v_zero_f(dst);
+	else if( isDouble )
+	{
+		Gp t = m_uc.new_gp64();
+		m_uc.mov(t, Imm(int64_t(bits)));
+		m_uc.s_mov_u64(dst, t);
+	}
+	else
+	{
+		Gp t = m_uc.new_gp32();
+		m_uc.mov(t, Imm(int(asDWORD(bits))));
+		m_uc.s_mov_u32(dst, t);
+	}
+}
+
 // The reference counts of the script objects, see CJITByteCode::FindInPlaceRefCounts.
 // Like asCScriptObject::AddRef the flag of the GC is cleared. The objects that are
 // being destroyed are left to AddRef, which reports the error
@@ -361,6 +381,35 @@ void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
 	m_uc.cc->mov(dst.as<a64::Vec>().b16(), src.as<a64::Vec>().b16());
 }
 
+// Moves the bits of a float or a double to the vector register. fmov takes the
+// values with a 4 bit mantissa and a 3 bit exponent, such as 0.5, 1, 2 or 10, and
+// movi zero, the others go through a register
+void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
+{
+	a64::Vec v = dst.as<a64::Vec>();
+	float  f;
+	double d;
+	asDWORD bits32 = asDWORD(bits);
+	memcpy(&f, &bits32, sizeof(f));
+	memcpy(&d, &bits, sizeof(d));
+	if( bits == 0 )
+		m_uc.cc->movi(v.b16(), Imm(0));
+	else if( isDouble ? a64::Utils::is_fp64_imm8(uint64_t(bits)) : a64::Utils::is_fp32_imm8(bits32) )
+		m_uc.cc->fmov(isDouble ? v.d() : v.s(), Imm(isDouble ? d : double(f)));
+	else if( isDouble )
+	{
+		Gp t = m_uc.new_gp64();
+		m_uc.mov(t, Imm(int64_t(bits)));
+		m_uc.s_mov_u64(dst, t);
+	}
+	else
+	{
+		Gp t = m_uc.new_gp32();
+		m_uc.mov(t, Imm(int(bits32)));
+		m_uc.s_mov_u32(dst, t);
+	}
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -563,6 +612,22 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
 {
 	m_uc.v_mov(dst, src);
+}
+
+void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
+{
+	if( isDouble )
+	{
+		Gp t = m_uc.new_gp64();
+		m_uc.mov(t, Imm(int64_t(bits)));
+		m_uc.s_mov_u64(dst, t);
+	}
+	else
+	{
+		Gp t = m_uc.new_gp32();
+		m_uc.mov(t, Imm(int(asDWORD(bits))));
+		m_uc.s_mov_u32(dst, t);
+	}
 }
 
 #endif

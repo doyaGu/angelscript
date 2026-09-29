@@ -593,10 +593,8 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 	case asBC_MULIf:
 		{
 			Vec a = LoadF32(a1);
-			Gp bits = m_uc.new_gp32();
-			m_uc.mov(bits, Imm(int(asBC_DWORDARG(bc + 1))));
 			Vec b = m_uc.new_vec128_f32x1();
-			m_uc.s_mov_u32(b, bits);
+			MoveFloatImm(b, asBC_DWORDARG(bc + 1), false);
 			Vec r = DstF32(a0);
 			if( instr.op == asBC_ADDIf )
 				m_uc.s_add_f32(r, a, b);
@@ -909,10 +907,8 @@ bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 		Vec b;
 		if( hasImm )
 		{
-			Gp bits = m_uc.new_gp32();
-			m_uc.mov(bits, Imm(int(asBC_DWORDARG(bc))));
 			b = m_uc.new_vec128_f32x1();
-			m_uc.s_mov_u32(b, bits);
+			MoveFloatImm(b, asBC_DWORDARG(bc), false);
 		}
 		else
 			b = isDouble ? LoadF64(a1) : LoadF32(a1);

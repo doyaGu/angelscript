@@ -201,6 +201,107 @@ static bool TestArithmetic(asIScriptEngine *engine)
 	return fail;
 }
 
+static bool TestFloatConstants(asIScriptEngine *engine)
+{
+	bool fail = false;
+	COutStream out;
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+
+	// The constants are moved to the variables and the operands kept in registers,
+	// with zero, negative zero, and the values that fmov takes on AArch64 or not
+	const char *script =
+		"float  gt = 0;                                                    \n"
+		"double ge = 0;                                                    \n"
+		"double consts(float x, double y, int n)                           \n"
+		"{                                                                 \n"
+		"  float s = 0, t = 1;                                             \n"
+		"  double d = 0, e = 1;                                            \n"
+		"  for( int i = 0; i < n; i++ )                                    \n"
+		"  {                                                               \n"
+		"    t = 0.1f;                                                     \n"
+		"    if( i % 2 == 0 ) t = -2.5f;                                   \n"
+		"    if( i % 3 == 0 ) t = 0;                                       \n"
+		"    if( i % 5 == 0 ) t = -0.0f;                                   \n"
+		"    e = 0.1;                                                      \n"
+		"    if( i % 2 == 0 ) e = 31;                                      \n"
+		"    if( i % 3 == 0 ) e = 0;                                       \n"
+		"    if( i % 5 == 0 ) e = -0.0;                                    \n"
+		"    s = s * 0.5f + t + x * 0.1f - 1.25f;                          \n"
+		"    if( s < 0.3f ) s += 1;                                        \n"
+		"    if( s == 0 ) s = 0.5f;                                        \n"
+		"    d = d * 0.5 + e + y * 0.1 - 1.25;                             \n"
+		"    if( d < 0.3 ) d += 1;                                         \n"
+		"  }                                                               \n"
+		"  gt = t; ge = e;                                                 \n"
+		"  return s + d;                                                   \n"
+		"}                                                                 \n";
+
+	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("test", script);
+	int r = mod->Build();
+	if( r < 0 )
+		TEST_FAILED;
+
+	struct SArgs { float x; double y; int n; };
+	SArgs args[] = { { 3.25f, -7.75, 50 }, { -0.75f, 12345.678, 7 }, { 0.0f, 0.0, 6 }, { 1.0f, 2.0, 1 } };
+
+	for( asUINT n = 0; n < sizeof(args)/sizeof(args[0]); n++ )
+	{
+		float x = args[n].x;
+		double y = args[n].y;
+		float s = 0, t = 1;
+		double d = 0, e = 1;
+		for( int i = 0; i < args[n].n; i++ )
+		{
+			t = 0.1f;
+			if( i % 2 == 0 ) t = -2.5f;
+			if( i % 3 == 0 ) t = 0;
+			if( i % 5 == 0 ) t = -0.0f;
+			e = 0.1;
+			if( i % 2 == 0 ) e = 31;
+			if( i % 3 == 0 ) e = 0;
+			if( i % 5 == 0 ) e = -0.0;
+			s = s * 0.5f + t + x * 0.1f - 1.25f;
+			if( s < 0.3f ) s += 1;
+			if( s == 0 ) s = 0.5f;
+			d = d * 0.5 + e + y * 0.1 - 1.25;
+			if( d < 0.3 ) d += 1;
+		}
+		double expected = s + d;
+
+		asIScriptFunction *func = mod->GetFunctionByDecl("double consts(float, double, int)");
+		asIScriptContext *ctx = engine->CreateContext();
+		ctx->Prepare(func);
+		ctx->SetArgFloat(0, x);
+		ctx->SetArgDouble(1, y);
+		ctx->SetArgDWord(2, args[n].n);
+		r = ctx->Execute();
+		double result = ctx->GetReturnDouble();
+		ctx->Release();
+		if( r != asEXECUTION_FINISHED )
+		{
+			PRINTF("case %d: execution returned %d\n", n, r);
+			TEST_FAILED;
+		}
+		else if( !(result == expected || fabs(result - expected) <= fabs(expected) * 1e-5) )
+		{
+			PRINTF("case %d: %g/%g\n", n, result, expected);
+			TEST_FAILED;
+		}
+
+		// Also the sign of zero
+		float gt = *(float*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("gt"));
+		double ge = *(double*)mod->GetAddressOfGlobalVar(mod->GetGlobalVarIndexByName("ge"));
+		if( memcmp(&gt, &t, sizeof(t)) != 0 || memcmp(&ge, &e, sizeof(e)) != 0 )
+		{
+			PRINTF("case %d: float %g/%g double %g/%g\n", n, gt, t, ge, e);
+			TEST_FAILED;
+		}
+	}
+
+	return fail;
+}
+
 static bool TestExceptions(asIScriptEngine *engine)
 {
 	bool fail = false;
@@ -4759,6 +4860,10 @@ bool Test()
 
 	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
 	fail = TestArithmetic(engine) || fail;
+	engine->ShutDownAndRelease();
+
+	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+	fail = TestFloatConstants(engine) || fail;
 	engine->ShutDownAndRelease();
 
 	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);

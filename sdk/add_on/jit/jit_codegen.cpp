@@ -2187,6 +2187,8 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			SCachedSlot *c = FindCached(a0);
 			if( c && c->kind == JIT_SLOT_I32 )
 				m_uc.mov(c->gp, Imm(int(asBC_DWORDARG(bc))));
+			else if( c && c->kind == JIT_SLOT_F32 && instr.op == asBC_SetV4 )
+				MoveFloatImm(c->vec, asBC_DWORDARG(bc), false);
 			else if( c )
 			{
 				Gp t = m_uc.new_gp32();
@@ -2206,6 +2208,8 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			{
 				if( c && c->kind == JIT_SLOT_I64 )
 					m_uc.mov(c->gp, Imm(int64_t(value)));
+				else if( c && c->kind == JIT_SLOT_F64 )
+					MoveFloatImm(c->vec, value, true);
 				else
 				{
 					Gp t = m_uc.new_gp64();
