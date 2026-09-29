@@ -39,7 +39,8 @@ class asCScriptFunction;
 // back only where the VM or the engine may see it. On 64bit hosts native callers
 // may mark the call state by setting the sign bit of the stack index, whose upper
 // half the VM ignores. The function then returns without restoring the frame, the
-// program pointer, and the stack pointer of the caller, which keeps them itself.
+// program pointer, the stack pointer, and the length of the call stack of the
+// caller, which keeps them itself.
 // The VM entry clears the mark of the call state on top, as the function doesn't
 // return to a native caller once the VM has executed it. The functions generated
 // ahead of time restore everything whether the call state is marked or not, and

@@ -193,7 +193,6 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
 		bool vrInReg = !callee || kind == JIT_CALL_PTR || CJITByteCode::ReturnsInVR(callee);
 		vrReturned = EmitNativeCall(idx, target, method, r, slow, !reload, vrInReg);
-		EmitLeaveIf(r);
 		if( reload || m_staticStack )
 			ReloadStackAfter(idx);
 		else
@@ -688,13 +687,17 @@ void CJITCodeGen::EmitRecompile(asUINT idx)
 }
 
 // Pushes the call state like asCContext::PushCallState and calls the native code
-// of a script function, or this function if target isn't valid. Jumps to slow if
-// the call stack has reached the call limit, which is passed on. On 64bit hosts
-// the call state may be marked with the sign bit of the stack index, so that the
-// function doesn't restore the frame and the registers, see JITFunction. It then
-// returns the value register too, which is taken if vrInReg is set and the value
-// register is live, and true is returned then. In interop mode the current function
-// of the context is set to callee, and the call state isn't marked, see JITFunction
+// of a script function, or this function if target isn't valid, and leaves to the
+// VM if it must take over. Jumps to slow if the call stack has reached the call
+// limit, which is passed on. On 64bit hosts the call state may be marked
+// with the sign bit of the stack index, so that the function doesn't restore the
+// frame, the registers, and the length of the call stack, see JITFunction. The
+// length is restored here then, from the one held across the call, so that the
+// next call doesn't wait for the function to read back what was just stored for
+// it. It returns the value register too, which is taken if vrInReg is set and the
+// value register is live, and true is returned then. In interop mode the current
+// function of the context is set to callee, and the call state isn't marked, see
+// JITFunction
 bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg)
 {
 	if( FailIfHidden() )
@@ -726,8 +729,9 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	(void)mark;
 #endif
 	m_uc.store(PtrAt(state, 4), t);
-	m_uc.add(length, length, Imm(layout.callStackFrameSize));
-	m_uc.store_u32(ContextField(layout.callStackLength), length);
+	Gp top = m_uc.new_gp_ptr();
+	m_uc.add(top, length, Imm(layout.callStackFrameSize));
+	m_uc.store_u32(ContextField(layout.callStackLength), top);
 
 	FuncSignature sig = m_spInArg ? FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT, asDWORD*>() :
 	                                FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT>();
@@ -742,6 +746,7 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	if( m_spInArg )
 		call->set_arg(3, sp);
 	call->set_ret(0, result);
+	bool vrReturned = false;
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
 	{
@@ -749,13 +754,18 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 		if( vrInReg && m_vr.is_valid() && m_code->IsVRLiveAfter(idx) )
 		{
 			call->set_ret(1, m_vr);
-			return true;
+			vrReturned = true;
 		}
 	}
 #else
 	(void)vrInReg;
 #endif
-	return false;
+	EmitLeaveIf(result);
+#ifdef JIT_NATIVE_RETURN
+	if( mark )
+		m_uc.store_u32(ContextField(layout.callStackLength), length);
+#endif
+	return vrReturned;
 }
 
 // Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
@@ -962,15 +972,15 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			Mem state = PtrElement(array, length);
 #ifdef JIT_NATIVE_RETURN
 			{
-				// Native callers keep their frame and set the program pointer and the
-				// stack pointer themselves, so only the call stack is restored for them.
+				// Native callers keep their frame, and set the program pointer, the
+				// stack pointer, and the length of the call stack themselves, see
+				// EmitNativeCall, so only the stack index is restored for them.
 				// They get the value register in the second return register
 				Label vm = m_uc.new_label();
 				Gp index = m_uc.new_gp_ptr();
 				m_uc.load(index, PtrAt(state, 4));
 				m_uc.j(vm, scmp_ge(index, Imm(0)));
 				m_uc.store_u32(ContextField(layout.stackIndex), index);
-				m_uc.store_u32(ContextField(layout.callStackLength), length);
 				Gp zero = m_uc.new_gp32();
 				m_uc.mov(zero, Imm(0));
 				if( vr && m_vr.is_valid() )
