@@ -86,12 +86,13 @@ public:
 	static const char *GetABI();
 
 protected:
-	// A variable kept in a local variable
+	// A variable kept in a local variable, or a field of the object, whose offset is
+	// the one from the object pointer
 	struct SLocal
 	{
 		int         offset;
 		int         kind;  // JIT_SLOT_I32, I64, F32, or F64
-		int         bit;   // bit in the masks of the analysis
+		int         bit;   // bit in the masks of the analysis, or -1 if it isn't kept
 		std::string name;
 		bool        used;  // whether the function declares it
 		bool        read;
@@ -117,6 +118,9 @@ protected:
 	std::string VarAddr(int offset);
 	std::string Stores(asUINT mask);
 	std::string Loads(asUINT mask);
+	std::string Field(int f, const char *type);
+	std::string SetField(int f, const char *type, const std::string &value);
+	std::string FieldLoads(asUINT mask);
 	std::string Bail() const;
 
 	static const char *LocalType(int kind);
@@ -128,6 +132,7 @@ protected:
 	std::string         m_out;
 	std::vector<bool>   m_labels; // instructions that are jumped to
 	std::vector<SLocal> m_locals;
+	std::vector<SLocal> m_fields; // the fields of the object in local variables, see CJITByteCode::GetFields
 	bool                m_failed; // an instruction accesses a local variable in a way it can't
 
 	// For the instruction being translated, its position and the statements that

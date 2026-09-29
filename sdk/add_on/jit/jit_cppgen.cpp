@@ -108,6 +108,20 @@ CJITCppGen::CJITCppGen(const CJITByteCode &code, TargetCallback target, void *ta
 		local.read   = false;
 		m_locals.push_back(local);
 	}
+
+	// The fields of the object that the analysis keeps in registers, by their index
+	const std::vector<SJITField> &fields = code.GetFields();
+	for( asUINT n = 0; n < fields.size(); n++ )
+	{
+		SLocal field;
+		field.offset = fields[n].offset;
+		field.kind   = fields[n].kind;
+		field.bit    = fields[n].kept ? int(n) : -1;
+		field.name   = Format("f_%d", fields[n].offset);
+		field.used   = false;
+		field.read   = false;
+		m_fields.push_back(field);
+	}
 }
 
 void CJITCppGen::GetHeapVariables(asCScriptFunction *func, std::vector<int> &offsets)
@@ -294,6 +308,8 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 	m_direct = direct;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 		m_locals[n].used = m_locals[n].read = false;
+	for( asUINT n = 0; n < m_fields.size(); n++ )
+		m_fields[n].used = m_fields[n].read = false;
 
 	// Only the instructions that are jumped to get labels, as unused labels give
 	// warnings. The VM doesn't enter the direct entry
@@ -366,6 +382,15 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		text += Format("\t%s %s = 0;\n", LocalType(local.kind), local.name.c_str());
 		if( !local.read )
 			text += Format("\t(void)%s;\n", local.name.c_str());
+	}
+	for( asUINT n = 0; n < m_fields.size(); n++ )
+	{
+		const SLocal &field = m_fields[n];
+		if( !field.used )
+			continue;
+		text += Format("\t%s %s = 0;\n", LocalType(field.kind), field.name.c_str());
+		if( !field.read )
+			text += Format("\t(void)%s;\n", field.name.c_str());
 	}
 
 	// The C++ exceptions of the registered functions called directly are caught
@@ -445,6 +470,9 @@ void CJITCppGen::EmitEntry(bool calls)
 	for( asUINT n = 0; n < entries.size(); n++ )
 	{
 		std::string loads = Loads(m_code.GetEntryMask(entries[n]));
+		std::string fields = FieldLoads(m_code.GetFieldMask(entries[n]));
+		if( !fields.empty() )
+			loads += loads.empty() ? fields : " " + fields;
 		Emit("\tcase %u: bc = regs->programPointer - %u; %s%sgoto L_%u;", n + 1, instrs[entries[n]].pos, loads.c_str(), loads.empty() ? "" : " ", entries[n]);
 	}
 	Emit("\t}");
@@ -653,6 +681,48 @@ std::string CJITCppGen::Loads(asUINT mask)
 		text += Format("%s = AOT_V(%s, %d);", local.name.c_str(), FrameType(local.kind), local.offset);
 	}
 	return text;
+}
+
+// The value of a field of the object kept in a local variable as u32 or f32, and the
+// statement that writes it, see CJITByteCode::AnalyseThisFields. The fields are
+// written through to the object
+std::string CJITCppGen::Field(int f, const char *type)
+{
+	SLocal &field = m_fields[f];
+	field.used = field.read = true;
+	bool isFloat = strcmp(type, "f32") == 0;
+	if( (field.kind == JIT_SLOT_F32) == isFloat )
+		return field.name;
+	return Format(isFloat ? "aot_f32bits(%s)" : "aot_bits32(%s)", field.name.c_str());
+}
+
+std::string CJITCppGen::SetField(int f, const char *type, const std::string &value)
+{
+	SLocal &field = m_fields[f];
+	field.used = true;
+	bool isFloat = strcmp(type, "f32") == 0;
+	if( (field.kind == JIT_SLOT_F32) == isFloat )
+		return Format("%s = %s;", field.name.c_str(), value.c_str());
+	return Format(isFloat ? "%s = aot_bits32(%s);" : "%s = aot_f32bits(%s);", field.name.c_str(), value.c_str());
+}
+
+// The statement that loads the fields in the mask from the object, where the VM
+// enters and after the line callbacks. The null pointer is found by asBC_LoadThisR
+// before the fields are read
+std::string CJITCppGen::FieldLoads(asUINT mask)
+{
+	std::string text;
+	for( asUINT f = 0; f < m_fields.size(); f++ )
+	{
+		SLocal &field = m_fields[f];
+		if( field.bit < 0 || !((mask >> f) & 1) )
+			continue;
+		field.used = true;
+		text += Format(" %s = *(aot_%s*)(t_ + %d);", field.name.c_str(), FrameType(field.kind), field.offset);
+	}
+	if( text.empty() )
+		return text;
+	return "{ asPWORD t_ = AOT_V(pw, 0); if( t_ != 0 ) {" + text + " } }";
 }
 
 // The statement that returns to the VM at the instruction, which raises the exception
@@ -1019,10 +1089,30 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_INCi8:  Emit("++AOT_R(u8);"); break;
 	case asBC_DECi16: Emit("--AOT_R(u16);"); break;
 	case asBC_DECi8:  Emit("--AOT_R(u8);"); break;
-	case asBC_INCi:   Emit("++AOT_R(u32);"); break;
-	case asBC_DECi:   Emit("--AOT_R(u32);"); break;
-	case asBC_INCf:   Emit("AOT_R(f32) += 1.0f;"); break;
-	case asBC_DECf:   Emit("AOT_R(f32) -= 1.0f;"); break;
+	case asBC_INCi:
+	case asBC_DECi:
+	case asBC_INCf:
+	case asBC_DECf:
+		{
+			// The fields of the object kept in local variables are incremented there and stored
+			int f = m_code.GetFieldAccess(idx);
+			bool inc = instr.op == asBC_INCi || instr.op == asBC_INCf;
+			bool isFloat = instr.op == asBC_INCf || instr.op == asBC_DECf;
+			if( f < 0 && !isFloat )
+				Emit(inc ? "++AOT_R(u32);" : "--AOT_R(u32);");
+			else if( f < 0 )
+				Emit(inc ? "AOT_R(f32) += 1.0f;" : "AOT_R(f32) -= 1.0f;");
+			else
+			{
+				const char *type = isFloat ? "f32" : "u32";
+				const char *step = isFloat ? (inc ? " + 1.0f" : " - 1.0f") : (inc ? " + 1u" : " - 1u");
+				if( !((m_code.GetFieldMask(idx) >> f) & 1) )
+					Put(SetField(f, type, Format("AOT_R(%s)", type)));
+				Put(SetField(f, type, Field(f, type) + step));
+				Emit("AOT_R(%s) = %s;", type, Field(f, type).c_str());
+			}
+		}
+		break;
 	case asBC_INCd:   Emit("AOT_R(f64) += 1.0;"); break;
 	case asBC_DECd:   Emit("AOT_R(f64) -= 1.0;"); break;
 	case asBC_INCi64: Emit("++AOT_R(u64);"); break;
@@ -1193,6 +1283,11 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		Emit("\tif( JIT_Suspend(regs) )");
 		Emit("\t\treturn 1;");
 		EmitReload("\t");
+		{
+			std::string fields = FieldLoads(m_code.GetFieldMask(idx));
+			if( !fields.empty() )
+				Emit("\t%s", fields.c_str());
+		}
 		Emit("}");
 		break;
 
@@ -1364,11 +1459,39 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 
 	case asBC_WRTV1:    Emit("AOT_R(u8) = %s;", Var("u8", SW0).c_str()); break;
 	case asBC_WRTV2:    Emit("AOT_R(u16) = %s;", Var("u16", SW0).c_str()); break;
-	case asBC_WRTV4:    Emit("AOT_R(u32) = %s;", Var("u32", SW0).c_str()); break;
+	case asBC_WRTV4:
+		{
+			// The fields of the object kept in local variables are stored from there
+			int f = m_code.GetFieldAccess(idx);
+			if( f < 0 )
+			{
+				Emit("AOT_R(u32) = %s;", Var("u32", SW0).c_str());
+				break;
+			}
+			const char *type = FrameType(m_fields[f].kind);
+			Put(SetField(f, type, Var(type, SW0)));
+			Emit("AOT_R(%s) = %s;", type, Field(f, type).c_str());
+		}
+		break;
 	case asBC_WRTV8:    Emit("AOT_R(u64) = %s;", Var("u64", SW0).c_str()); break;
 	case asBC_RDR1:     Put(SetVarLow("u8", SW0, "AOT_R(u8)")); break;
 	case asBC_RDR2:     Put(SetVarLow("u16", SW0, "AOT_R(u16)")); break;
-	case asBC_RDR4:     Put(SetVar("u32", SW0, "AOT_R(u32)")); break;
+	case asBC_RDR4:
+		{
+			// The fields of the object kept in local variables are read from there,
+			// and kept there when read from the memory
+			int f = m_code.GetFieldAccess(idx);
+			if( f < 0 )
+			{
+				Put(SetVar("u32", SW0, "AOT_R(u32)"));
+				break;
+			}
+			const char *type = FrameType(m_fields[f].kind);
+			if( !((m_code.GetFieldMask(idx) >> f) & 1) )
+				Put(SetField(f, type, Format("AOT_R(%s)", type)));
+			Put(SetVar(type, SW0, Field(f, type)));
+		}
+		break;
 	case asBC_RDR8:     Put(SetVar("u64", SW0, "AOT_R(u64)")); break;
 	case asBC_LDG:      Emit("AOT_SETVR(asPWORD, AOT_PW(%u));", pos + 1); break;
 	case asBC_LDV:      Emit("AOT_SETVR(asPWORD, (asPWORD)%s);", VarAddr(SW0).c_str()); break;
