@@ -670,7 +670,7 @@ void CJITCodeGen::CopyLiveArgs()
 				else
 				{
 					Vec copy = m_uc.cc->new_similar_reg(op.as<Vec>());
-					m_uc.v_mov(copy, op.as<Vec>());
+					MoveVec(copy, op.as<Vec>());
 					op = copy;
 				}
 			}
@@ -1317,7 +1317,7 @@ void CJITCodeGen::CommitF32(int offset, const Vec &value)
 	if( c && c->kind == JIT_SLOT_F32 )
 	{
 		if( c->vec.id() != value.id() )
-			m_uc.v_mov(c->vec, value);
+			MoveVec(c->vec, value);
 	}
 	else if( c && c->kind == JIT_SLOT_I32 )
 		m_uc.s_mov_u32(c->gp, value);
@@ -1331,7 +1331,7 @@ void CJITCodeGen::CommitF64(int offset, const Vec &value)
 	if( c && c->kind == JIT_SLOT_F64 )
 	{
 		if( c->vec.id() != value.id() )
-			m_uc.v_mov(c->vec, value);
+			MoveVec(c->vec, value);
 	}
 	else if( c && c->kind == JIT_SLOT_I64 )
 		m_uc.s_mov_u64(c->gp, value);

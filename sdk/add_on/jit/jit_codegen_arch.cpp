@@ -114,6 +114,11 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	m_uc.cc->mov(m, Imm(value));
 }
 
+void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
+{
+	m_uc.v_mov(dst, src);
+}
+
 // The reference counts of the script objects, see CJITByteCode::FindInPlaceRefCounts.
 // Like asCScriptObject::AddRef the flag of the GC is cleared. The objects that are
 // being destroyed are left to AddRef, which reports the error
@@ -324,6 +329,14 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	m_uc.store_u32(dst, t);
 }
 
+// The whole register is moved even for a scalar. Apple's cores rename the 128bit
+// move, but take cycles for the 64bit one that the UniCompiler emits for a scalar,
+// which slows down the loops that keep floats in registers
+void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
+{
+	m_uc.cc->mov(dst.as<a64::Vec>().b16(), src.as<a64::Vec>().b16());
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -516,6 +529,11 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	Gp t = m_uc.new_gp32();
 	m_uc.mov(t, Imm(value));
 	m_uc.store_u32(dst, t);
+}
+
+void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
+{
+	m_uc.v_mov(dst, src);
 }
 
 #endif

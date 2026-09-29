@@ -201,6 +201,7 @@ protected:
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void StoreImm32(const Mem &dst, int value);
+	void MoveVec(const Vec &dst, const Vec &src);
 	void EmitAddRefInPlace(const Gp &obj, const Label &slow);
 	bool EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
 	void EmitRefCountInc(const Gp &obj);
