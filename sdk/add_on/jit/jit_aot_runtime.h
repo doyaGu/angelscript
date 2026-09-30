@@ -101,6 +101,11 @@ typedef asPWORD     aot_pw;
 #define AOT_CDECL
 #endif
 
+// A value type that a registered function returns in more than one register, as
+// the struct of members of one type that the ABI returns in the same registers,
+// see CJITCppGen::GetSystemCall
+template<typename T, int N> struct aot_parts { T v[N]; };
+
 // Booleans. The VM writes the byte of a boolean and clears the rest of the dword,
 // or of the value register for the tests
 #if AS_SIZEOF_BOOL == 1

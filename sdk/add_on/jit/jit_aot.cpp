@@ -231,7 +231,7 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code)
 				hash.Add(0);
 				continue;
 			}
-			hash.Add(1 | (call.obj << 1) | (call.retOnStack << 3) | (call.retInMemory << 4) | (call.retAfterObj << 5) | (call.ret << 6));
+			hash.Add(1 | (call.obj << 1) | (call.retOnStack << 3) | (call.retInMemory << 4) | (call.retAfterObj << 5) | (call.ret << 6) | (call.retParts << 9) | (call.retBytes << 12));
 			hash.Add(call.popSize);
 			hash.Add(call.args.size());
 			for( asUINT a = 0; a < call.args.size(); a++ )

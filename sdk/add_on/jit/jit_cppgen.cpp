@@ -19,11 +19,9 @@ BEGIN_AS_NAMESPACE
 // x86. The hidden pointer for a value returned in memory is passed like the first
 // argument, except after the object pointer of class methods with MSVC. The other
 // compilers for 32bit x86 let the called function pop it, which the calls can't
-// express. AArch64 passes it in a register that isn't used for arguments, and the
-// small classes returned in registers in ways that depend on their members, so the
-// values of registered types aren't returned directly there. The arguments of the
-// calls are all passed in registers there too, as the ABIs of the platforms lay out
-// the ones on the stack differently
+// express, and AArch64 passes it in a register that isn't used for arguments. The
+// arguments of the calls are all passed in registers there too, as the ABIs of the
+// platforms lay out the ones on the stack differently
 #if defined(AS_MAX_PORTABILITY) || defined(AS_BIG_ENDIAN)
 #elif defined(AS_X64_MSVC)
 #define JIT_AOT_ABI "defined(AS_X64_MSVC)"
@@ -202,7 +200,42 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.retOnStack  = descr->DoesReturnOnStack();
 	call.retInMemory = call.retOnStack && sysFunc->hostReturnInMemory;
 	call.retAfterObj = false;
+	call.retParts    = 0;
+	call.retBytes    = 0;
 	int retSize;
+#if defined(AS_X64_GCC) || defined(AS_ARM64)
+	const int objSize = call.retOnStack ? rt.GetSizeInMemoryBytes() : 0;
+#endif
+#ifdef AS_ARM64
+	// The aggregates of up to four floats or doubles in a floating point register
+	// each, like CJITCodeGen::EmitDirectSystemCall calls them
+	const asQWORD retFlags = call.retOnStack ? rt.GetTypeInfo()->flags : 0;
+	if( (retFlags & asOBJ_APP_CLASS_ALLFLOATS) && !(retFlags & COMPLEX_MASK) &&
+		objSize <= 4 * ((retFlags & asOBJ_APP_CLASS_ALIGN8) ? 8 : 4) )
+	{
+		int partSize = (retFlags & asOBJ_APP_CLASS_ALIGN8) ? 8 : 4;
+		if( objSize % partSize )
+			return false;
+		call.retInMemory = false;
+		call.ret = partSize == 4 ? SJITSystemCall::VALUE_F32 : SJITSystemCall::VALUE_F64;
+		call.retParts = objSize / partSize;
+		call.retBytes = objSize;
+		retSize = sysFunc->hostReturnSize;
+	}
+	else
+#endif
+#if defined(AS_X64_GCC) || defined(AS_ARM64)
+	// The other objects of 9 to 16 bytes that aren't returned in memory, in two
+	// registers for integers, or two for floats if the engine says they hold floats
+	if( call.retOnStack && !call.retInMemory && (sysFunc->hostReturnSize == 3 || sysFunc->hostReturnSize == 4) )
+	{
+		call.ret = sysFunc->hostReturnFloat ? SJITSystemCall::VALUE_F64 : SJITSystemCall::VALUE_I64;
+		call.retParts = 2;
+		call.retBytes = objSize;
+		retSize = sysFunc->hostReturnSize;
+	}
+	else
+#endif
 	if( call.retInMemory )
 	{
 #ifdef JIT_AOT_RETURN_IN_MEMORY
@@ -215,10 +248,6 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 #endif
 	}
-#ifdef AS_ARM64
-	else if( call.retOnStack )
-		return false;
-#endif
 	else if( call.retOnStack )
 	{
 		if( sysFunc->hostReturnSize == 1 )
@@ -238,7 +267,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	else if( rt.GetSizeOnStackDWords() == 2 )                   { call.ret = SJITSystemCall::VALUE_I64;    retSize = 2; }
 	else                                                        { call.ret = SJITSystemCall::VALUE_I32;    retSize = 1; }
 	bool retFloat = call.ret == SJITSystemCall::VALUE_F32 || call.ret == SJITSystemCall::VALUE_F64;
-	if( sysFunc->hostReturnSize != retSize || sysFunc->hostReturnFloat != retFloat )
+	if( sysFunc->hostReturnSize != retSize || (!call.retParts && sysFunc->hostReturnFloat != retFloat) )
 		return false;
 
 	// The arguments, as laid out on the stack
@@ -926,17 +955,20 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	Emit("\tregs->programPointer = bc + %u;", pos);
 	Emit("\tregs->stackPointer = sp;");
 	Emit("\tctx->m_callingSystemFunction = d_;");
-	std::string func = Format("((%s (AOT_CDECL*)(%s))d_->sysFuncIntf->func)(%s)", types[call.ret], paramList.c_str(), argList.c_str());
+	std::string retType = call.retParts ? Format("aot_parts<%s, %d>", types[call.ret], call.retParts) : types[call.ret];
+	std::string func = Format("((%s (AOT_CDECL*)(%s))d_->sysFuncIntf->func)(%s)", retType.c_str(), paramList.c_str(), argList.c_str());
 	if( call.ret == SJITSystemCall::VALUE_VOID )
 		Emit("\t%s;", func.c_str());
 	else
-		Emit("\t%s x_ = %s;", types[call.ret], func.c_str());
+		Emit("\t%s x_ = %s;", retType.c_str(), func.c_str());
 	Emit("\tctx->m_callingSystemFunction = 0;");
 	Emit("\tsp += %d;", call.popSize);
 
 	// The value is stored like the VM does, but the value register only if it is read
 	bool vrLive = m_code.IsVRLiveAfter(idx);
-	if( call.retOnStack && call.ret != SJITSystemCall::VALUE_VOID )
+	if( call.retParts )
+		Emit("\tmemcpy(r_, &x_, %d);", call.retBytes);
+	else if( call.retOnStack && call.ret != SJITSystemCall::VALUE_VOID )
 		Emit("\t*(aot_%s*)r_ = x_;", stack[call.ret]);
 	else if( call.ret == SJITSystemCall::VALUE_HANDLE )
 	{

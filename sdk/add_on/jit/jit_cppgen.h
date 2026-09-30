@@ -51,6 +51,8 @@ struct SJITSystemCall
 	bool             retInMemory; // through the hidden pointer, which is passed first,
 	bool             retAfterObj; // or after the object pointer
 	int              ret;         // the kind of the value returned, VALUE_VOID for retInMemory
+	int              retParts;    // or of the members of the struct returned, if not 0,
+	int              retBytes;    // whose first bytes are the object
 	std::vector<int> args;        // the kinds of the arguments, not VALUE_VOID or VALUE_HANDLE
 	int              popSize;     // dwords popped off the stack
 };
