@@ -161,7 +161,7 @@ static asUINT GetKeyOperands(asEBCInstr op)
 	}
 }
 
-SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code)
+SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
 {
 	asCScriptFunction *func = code.GetFunction();
 	CJITAOTHasher hash;
@@ -222,9 +222,20 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code)
 		if( instr.op == asBC_FREE || instr.op == asBC_REFCPY || instr.op == asBC_RefCpyV )
 			hash.Add(CJITByteCode::GetRefKind(func->engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(bc))));
 
-		// The function id isn't, but how the function is called
+		// The function id isn't, but how the function is called, or where the
+		// indexers compiled in place find the element
 		if( instr.op == asBC_CALLSYS || instr.op == asBC_Thiscall1 )
 		{
+			SJITIndexerCall indexer;
+			if( CJITByteCode::FindIndexer(func->engine, asBC_INTARG(bc), indexers, indexer) )
+			{
+				hash.Add(2 | (indexer.indirect << 2) | (asQWORD(indexer.elementSize) << 3));
+				hash.Add(asQWORD(indexer.layout.bufferOffset));
+				hash.Add(asQWORD(indexer.layout.lengthOffset));
+				hash.Add(asQWORD(indexer.layout.dataOffset));
+				continue;
+			}
+
 			SJITSystemCall call;
 			if( !CJITCppGen::GetSystemCall(func->engine, asBC_INTARG(bc), call) )
 			{
@@ -249,14 +260,14 @@ std::string JIT_GetAOTName(const SJITAOTKey &key)
 	return name;
 }
 
-// The name of the code for the function that a call calls, see CJITCppGen. Whether
-// the code is written is known when the output is
-static std::string GetTargetName(asCScriptFunction *func, void *)
+// The name of the code for the function that a call calls, see CJITCppGen, with the
+// indexers in the parameter. Whether the code is written is known when the output is
+static std::string GetTargetName(asCScriptFunction *func, void *indexers)
 {
 	CJITByteCode code;
 	if( code.Decode(func) < 0 )
 		return "";
-	return JIT_GetAOTName(JIT_GetAOTKey(code));
+	return JIT_GetAOTName(JIT_GetAOTKey(code, static_cast<const std::map<asFUNCTION_t, SJITIndexer>*>(indexers)));
 }
 
 // The code with the regions that call the code in the set, without the lines that
@@ -294,16 +305,16 @@ CJITAOTOutput::CJITAOTOutput()
 {
 }
 
-CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl)
+CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
 {
 	// The code is generated from an analysis of its own, which the JIT compiler
 	// doesn't do
 	CJITByteCode analysed(code);
-	analysed.AnalyseForAOT(JIT_AOT_MAX_LOCALS);
+	analysed.AnalyseForAOT(JIT_AOT_MAX_LOCALS, indexers);
 
 	std::string name = JIT_GetAOTName(key);
 	std::string text;
-	CJITCppGen gen(analysed, GetTargetName, 0);
+	CJITCppGen gen(analysed, GetTargetName, const_cast<std::map<asFUNCTION_t, SJITIndexer>*>(indexers));
 	if( !gen.Generate(name.c_str(), text) )
 		return AOT_FAILED;
 

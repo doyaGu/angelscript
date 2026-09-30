@@ -509,13 +509,13 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 
 	if( aot )
 	{
-		SJITAOTKey key = JIT_GetAOTKey(code);
+		SJITAOTKey key = JIT_GetAOTKey(code, &m_impl->indexers);
 		if( aotOutput )
 		{
 			CJITAOTOutput::EResult result;
 			{
 				std::lock_guard<std::mutex> lock(m_impl->mutex);
-				result = m_impl->aotOutput.Add(code, key, func->GetDeclaration(true, true));
+				result = m_impl->aotOutput.Add(code, key, func->GetDeclaration(true, true), &m_impl->indexers);
 			}
 			if( result == CJITAOTOutput::AOT_CONFLICT )
 			{

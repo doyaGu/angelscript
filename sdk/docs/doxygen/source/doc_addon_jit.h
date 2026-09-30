@@ -319,7 +319,9 @@ jit_scriptarray.cpp of the add-on has JIT_AddScriptArrayIndexers, which adds the
 At methods of the \ref doc_addon_array "array add-on", whose opIndex they implement,
 with the layout of its buffer found by creating some arrays in an engine of its own.
 It must be compiled together with the array add-on. The code generated ahead of
-time still calls the methods.
+time finds the elements the same way. The indexers are part of the key of that
+code, so the application must add the same ones when it generates the code and
+when it uses it, otherwise the functions that call them don't find their code.
 
 \code
 CJITCompiler *jit = new CJITCompiler();
@@ -329,7 +331,9 @@ engine->SetJITCompiler(jit);
 
 With the indexers of the arrays, ClassProp of the test_performance project takes
 0.011 seconds instead of 0.021, Array.2 0.012 instead of 0.028, and Array.1 0.061
-instead of 0.070.
+instead of 0.070. With the code generated ahead of time ClassProp takes 0.010
+seconds instead of 0.021, Array.2 0.010 instead of 0.030, and Array.1 0.065
+instead of 0.075.
 
 \section doc_addon_jit_suspend Suspension and line callbacks
 
@@ -414,8 +418,9 @@ The generated functions call each other and the JIT compiled functions natively,
 and are called natively by them. Like the JIT compiled functions they call the
 registered functions directly, count the references of the script classes
 themselves, move the handles out of the temporary variables, free the plain
-initialization lists without going through their elements, and create the
-objects of the script classes without the VM. They make the direct calls on every
+initialization lists without going through their elements, create the objects of
+the script classes without the VM, and find the elements of the
+\ref doc_addon_jit_indexers "indexers" themselves. They make the direct calls on every
 platform whose calling convention they know, regardless of the flags for the
 direct system calls, as the C++ compiler provides the unwind information for them
 and they catch the C++ exceptions themselves where they are entered from the VM or

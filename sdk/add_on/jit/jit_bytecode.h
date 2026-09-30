@@ -197,8 +197,9 @@ public:
 	// Performs the analysis for the code generated ahead of time, which must depend
 	// only on the key of the function, see JIT_GetAOTKey. Nothing is inlined, and the
 	// instructions aren't marked with what their objects and callees allow. The script
-	// calls that the code may make directly leave the frame dirty, see CJITCppGen
-	void AnalyseForAOT(asUINT maxCachedSlots);
+	// calls that the code may make directly leave the frame dirty, see CJITCppGen.
+	// The indexers are part of the key too
+	void AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
 	const asDWORD                 *GetByteCode() const     { return m_byteCode; }
@@ -304,6 +305,10 @@ public:
 
 	// Returns the indexer called by an instruction marked with JIT_INSTR_INDEXER
 	const SJITIndexerCall *GetIndexer(asUINT instrIdx) const;
+
+	// Returns true if the registered function is one of the indexers, which are
+	// compiled in place, and how
+	static bool FindIndexer(asCScriptEngine *engine, int funcId, const std::map<asFUNCTION_t, SJITIndexer> *indexers, SJITIndexerCall &call);
 
 	// Returns true if the function or one inlined into it calls something that may
 	// see the VM registers, or releases objects, where the frames of the calls that

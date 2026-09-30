@@ -5131,6 +5131,18 @@ static bool TestIndexers()
 		}
 	if( jitCalls.size() != sizeof(expectedCalls) / sizeof(expectedCalls[0]) || vmCalls[5] <= 2 )
 		TEST_FAILED;
+
+	// With the compiler of the tests, which only has the indexers of the arrays, and
+	// the code generated ahead of time if the tests are built with it
+	std::vector<int> calls;
+	engine = asCreateScriptEngine(ANGELSCRIPT_VERSION);
+	actual = Indexers::Run(engine, 0, calls, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected || calls != vmCalls )
+	{
+		PRINTF("indexers:\nVM:\n%sthe compiler of the tests:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
 	return fail;
 }
 

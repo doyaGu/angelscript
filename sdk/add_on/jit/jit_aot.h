@@ -21,8 +21,9 @@ struct SJITAOTKey
 // depends on: the instructions with the operands that are the same in every module
 // and engine, e.g. the offsets of the variables and the branch targets, the size of
 // the frame, the variables cleared on entry, and the version of the engine and the
-// generator. Two functions with the same key can share the code
-SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code);
+// generator, and the indexers compiled in place, see CJITCompiler::AddIndexer. Two
+// functions with the same key can share the code
+SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 
 // The name of the generated function with the key
 std::string JIT_GetAOTName(const SJITAOTKey &key);
@@ -47,8 +48,8 @@ public:
 	};
 
 	// Generates the code for the function, which is described by the declaration in
-	// the comment of the code
-	EResult Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl);
+	// the comment of the code, with the indexers that the key was computed with
+	EResult Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl, const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 
 	// Writes the files that differ from the ones in the directory, and removes the
 	// ones that are no longer needed. Returns a negative value on failure

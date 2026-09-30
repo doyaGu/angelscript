@@ -361,7 +361,7 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		if( CallsScript(instrs[n].op) )
 			calls = true;
 		SJITSystemCall call;
-		if( (instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1) && GetSystemCall(instrs[n], call) )
+		if( (instrs[n].op == asBC_CALLSYS || instrs[n].op == asBC_Thiscall1) && !(instrs[n].flags & JIT_INSTR_INDEXER) && GetSystemCall(instrs[n], call) )
 			systemCalls = true;
 	}
 
@@ -904,6 +904,25 @@ void CJITCppGen::EmitReload(const char *indent)
 		Emit("%s%s", indent, m_reload.c_str());
 }
 
+// Loads the address of the element instead of calling the indexer, see
+// CJITByteCode::FindIndexer. The code returns to the VM for a null object or buffer
+// and an index out of range, and the VM calls the method, which raises the
+// exception. The variables are only stored then, like the JIT does, as the call
+// isn't a sync point
+void CJITCppGen::EmitIndexer(asUINT idx)
+{
+	const SJITIndexerCall &indexer = *m_code.GetIndexer(idx);
+	const int P = AS_PTR_SIZE;
+	Emit("{");
+	Emit("\tasPWORD o_ = AOT_S(pw, 0), b_ = o_ ? *(aot_pw*)(o_ + %d) : 0;", indexer.layout.bufferOffset);
+	Emit("\tasDWORD i_ = AOT_S(u32, %d);", P);
+	Emit("\tif( b_ == 0 || i_ >= *(aot_u32*)(b_ + %d) )", indexer.layout.lengthOffset);
+	Emit("\t\t%s", Bail().c_str());
+	Emit("\tAOT_SETVR(asPWORD, %s(b_ + %d + (asPWORD)i_ * %d));", indexer.indirect ? "*(aot_pw*)" : "", indexer.layout.dataOffset, indexer.elementSize);
+	Emit("\tsp += %d;", P + 1);
+	Emit("}");
+}
+
 // Calls the registered function like CallSystemFunction does, see GetSystemCall,
 // with the function pointer cast to the types of the values. A null object pointer is
 // an exception raised by the VM. The VM registers are stored like for the calls
@@ -1270,6 +1289,11 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 	case asBC_STR:     Put(Bail()); break;
 
 	case asBC_CALLSYS:
+		if( instr.flags & JIT_INSTR_INDEXER )
+		{
+			EmitIndexer(idx);
+			break;
+		}
 		{
 			SJITSystemCall call;
 			if( GetSystemCall(instr, call) )
@@ -1598,6 +1622,11 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_Thiscall1:
+		if( instr.flags & JIT_INSTR_INDEXER )
+		{
+			EmitIndexer(idx);
+			break;
+		}
 		{
 			SJITSystemCall call;
 			if( GetSystemCall(instr, call) )

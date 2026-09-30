@@ -196,7 +196,8 @@ public:
 	// buffer. The elements follow each other: the primitives with their size, the
 	// handles as pointers, and the other objects as pointers to them. The method is
 	// still called for a null buffer or an index out of range, to raise the exception.
-	// JIT_AddScriptArrayIndexers adds the opIndex methods of CScriptArray. Must be
+	// JIT_AddScriptArrayIndexers adds the opIndex methods of CScriptArray. The code
+	// generated ahead of time with indexers is only used with the same ones. Must be
 	// called before any function is compiled. Returns a negative value on failure
 	int AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexer);
 
