@@ -440,40 +440,40 @@ with the JIT compiler and the pooled memory functions. 64bit integer operations
 are done by helper functions on 32bit hosts.
 
 The table below shows the same tests measured on an Apple M5 Pro with the arm64
-release build from Apple clang 21 on macOS, as the fastest of ten runs of each
-test. By the geometric mean of the speedups over the interpreter, the tests are 3.1
-times as fast with the JIT compiler without direct system calls, 4.2 times with
-the default settings, 4.3 times with the pooled memory functions too, and 3.5 times
-with the code generated ahead of time. The JIT compiler gains less than on x86-64,
-as the interpreter is faster on this CPU.
+release build from Apple clang 21 on macOS, as the fastest of the ten runs of each
+test in three runs of the program. By the geometric mean of the speedups over the
+interpreter, the tests are 3.1 times as fast with the JIT compiler without direct
+system calls, 4.5 times with the default settings, 4.6 times with the pooled memory
+functions too, and 3.7 times with the code generated ahead of time. The JIT
+compiler gains less than on x86-64, as the interpreter is faster on this CPU.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
-Basic          0.150    0.066      0.037    0.037     0.037
-Basic2         0.047    0.006      0.006    0.006     0.014
-Call           0.162    0.079      0.079    0.075     0.075
-Call2          0.198    0.113      0.112    0.113     0.108
-Fib            0.270    0.102      0.103    0.103     0.092
-Int            0.044    0.020      0.006    0.006     0.006
-Intf           0.093    0.009      0.009    0.009     0.024
-Mthd           0.090    0.008      0.009    0.009     0.019
-String         0.184    0.149      0.070    0.071     0.079
-String2        0.102    0.080      0.036    0.036     0.051
-StringPooled   0.132    0.115      0.043    0.043     0.047
-ThisProp       0.097    0.008      0.009    0.008     0.006
-Vector3        0.077    0.060      0.030    0.030     0.029
-Assign.1       0.054    0.005      0.005    0.005     0.010
-Assign.2       0.086    0.012      0.012    0.012     0.011
-Assign.3       0.079    0.011      0.012    0.012     0.008
+Basic          0.151    0.067      0.036    0.035     0.037
+Basic2         0.048    0.006      0.006    0.006     0.014
+Call           0.163    0.080      0.079    0.082     0.077
+Call2          0.205    0.115      0.112    0.117     0.110
+Fib            0.282    0.094      0.094    0.094     0.092
+Int            0.045    0.020      0.006    0.006     0.006
+Intf           0.096    0.009      0.009    0.009     0.024
+Mthd           0.092    0.009      0.009    0.009     0.019
+String         0.188    0.154      0.070    0.070     0.081
+String2        0.106    0.080      0.037    0.036     0.052
+StringPooled   0.133    0.117      0.043    0.043     0.047
+ThisProp       0.101    0.008      0.008    0.008     0.006
+Vector3        0.082    0.064      0.009    0.009     0.008
+Assign.1       0.053    0.005      0.005    0.005     0.010
+Assign.2       0.087    0.012      0.012    0.012     0.011
+Assign.3       0.068    0.012      0.012    0.012     0.008
 Assign.4       0.084    0.019      0.019    0.019     0.018
-Assign.5       0.085    0.019      0.019    0.019     0.018
-Array.1        0.179    0.105      0.072    0.053     0.077
-Array.2        0.086    0.066      0.029    0.029     0.029
-GlobalVar      0.039    0.034      0.014    0.014     0.018
-ClassProp      0.068    0.042      0.021    0.021     0.021
-RetObj.1       0.214    0.128      0.129    0.099     0.146
-RetObj.2       0.126    0.063      0.063    0.046     0.075
-RetObj.3       0.040    0.003      0.004    0.004     0.011
+Assign.5       0.084    0.019      0.019    0.020     0.018
+Array.1        0.171    0.104      0.070    0.051     0.074
+Array.2        0.082    0.071      0.028    0.028     0.030
+GlobalVar      0.040    0.030      0.012    0.012     0.018
+ClassProp      0.069    0.042      0.021    0.021     0.021
+RetObj.1       0.215    0.128      0.127    0.101     0.146
+RetObj.2       0.127    0.063      0.062    0.046     0.075
+RetObj.3       0.039    0.004      0.004    0.004     0.011
 </pre>
 
 \section doc_addon_jit_limits Known limitations
