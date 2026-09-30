@@ -114,7 +114,8 @@ releases again right after are left out.
 The generated code calls registered functions directly with their native calling
 convention whenever the signature allows it (primitives, references, and handles
 as arguments; primitives, references, handles, or value types as return value,
-except on AArch64 the value types of only floats that are returned in registers),
+except the value types that AArch64 and the compilers for 32bit x86 other than
+MSVC return in memory),
 instead of going through the code the VM uses, which marshals the arguments for
 the calling convention at runtime. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.

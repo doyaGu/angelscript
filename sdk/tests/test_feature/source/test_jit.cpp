@@ -811,6 +811,12 @@ namespace DirectCalls
 	// Value types returned by value, in memory or in registers depending on the ABI
 	struct CVec  { float x, y, z; };
 	struct CPair { int a, b; };
+	struct CVec2  { float x, y; };
+	struct CQuat  { float x, y, z, w; };
+	struct CDVec2 { double x, y; };
+	struct CDVec3 { double x, y, z; };
+	struct CInts3 { int a, b, c; };
+	struct CLongs { asINT64 a, b; };
 	typedef float CFlt; // asOBJ_APP_FLOAT is for types that are a float in C++
 	struct CVal
 	{
@@ -833,6 +839,8 @@ namespace DirectCalls
 		int  &At(int i)          { return arr[i]; }
 		CVec  Scale(float s)     { CVec r = { v * s, v * s, v * s }; return r; }
 		CPair Pair(int b)        { CPair r = { v, b }; return r; }
+		CQuat Quat(float s)      { CQuat r = { v * s, v * s + 1, v * s + 2, v * s + 3 }; return r; }
+		CDVec3 DVec3(double s)   { CDVec3 r = { v * s, v * s + 1, v * s + 2 }; return r; }
 		int   Throw(int a)       { if( a < 0 ) throw std::runtime_error("method"); return a + v; }
 		CVal  Five(int a, double b, float c, int d) { CVal r; r.v = int(a + b + c + d) + v; return r; }
 		double Four(float a, float b, double c, float d) { return a + b + c + d + v; }
@@ -902,6 +910,13 @@ namespace DirectCalls
 	static CVec  VecMul(float s, const CVec &a)         { CVec r = { a.x * s, a.y * s, a.z * s }; return r; }
 	static CPair MakePair(int a, int b)                 { CPair r = { a, b }; return r; }
 	static CFlt  MakeFlt(float f)                       { return f + 1; }
+	static CVec2 MakeVec2(float x, float y)             { CVec2 r = { x, y }; return r; }
+	static CQuat MakeQuat(float x, float y, float z, float w) { CQuat r = { x, y, z, w }; return r; }
+	static CQuat QuatMul(float s, const CQuat &a)       { CQuat r = { a.x * s, a.y * s, a.z * s, a.w * s }; return r; }
+	static CDVec2 MakeDVec2(double x, double y)         { CDVec2 r = { x, y }; return r; }
+	static CDVec3 MakeDVec3(double x, double y, double z) { CDVec3 r = { x, y, z }; return r; }
+	static CInts3 MakeInts3(int a, int b, int c)        { CInts3 r = { a, b, c }; return r; }
+	static CLongs MakeLongs(asINT64 a, asINT64 b)       { CLongs r = { a, b }; return r; }
 	static CVal  MakeVal(int v)                         { CVal r; r.v = v; return r; }
 	static CVal  MakeValThrow(int v)                    { CVal r; r.v = v; asGetActiveContext()->SetException("raised in MakeValThrow"); return r; }
 	static void  ValConstruct(CVal *p)                  { new(p) CVal(); }
@@ -967,6 +982,39 @@ namespace DirectCalls
 		r = engine->RegisterObjectType("flt", sizeof(CFlt), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_FLOAT); assert( r >= 0 );
 		r = engine->RegisterObjectProperty("flt", "float f", 0); assert( r >= 0 );
 		r = engine->RegisterGlobalFunction("flt MakeFlt(float)", asFUNCTION(MakeFlt), asCALL_CDECL); assert( r >= 0 );
+
+		// Returned in up to four registers, or in memory
+		r = engine->RegisterObjectType("vec2", sizeof(CVec2), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("vec2", "float x", asOFFSET(CVec2, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("vec2", "float y", asOFFSET(CVec2, y)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("vec2 MakeVec2(float, float)", asFUNCTION(MakeVec2), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectType("quat", sizeof(CQuat), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("quat", "float x", asOFFSET(CQuat, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("quat", "float y", asOFFSET(CQuat, y)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("quat", "float z", asOFFSET(CQuat, z)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("quat", "float w", asOFFSET(CQuat, w)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("quat MakeQuat(float, float, float, float)", asFUNCTION(MakeQuat), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("quat", "quat opMul(float) const", asFUNCTION(QuatMul), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "quat Quat(float)", asMETHOD(CObj, Quat), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectType("dvec2", sizeof(CDVec2), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS | asOBJ_APP_CLASS_ALIGN8); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("dvec2", "double x", asOFFSET(CDVec2, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("dvec2", "double y", asOFFSET(CDVec2, y)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("dvec2 MakeDVec2(double, double)", asFUNCTION(MakeDVec2), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectType("dvec3", sizeof(CDVec3), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLFLOATS | asOBJ_APP_CLASS_ALIGN8); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("dvec3", "double x", asOFFSET(CDVec3, x)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("dvec3", "double y", asOFFSET(CDVec3, y)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("dvec3", "double z", asOFFSET(CDVec3, z)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("dvec3 MakeDVec3(double, double, double)", asFUNCTION(MakeDVec3), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectMethod("CObj", "dvec3 DVec3(double)", asMETHOD(CObj, DVec3), asCALL_THISCALL); assert( r >= 0 );
+		r = engine->RegisterObjectType("ints3", sizeof(CInts3), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLINTS); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("ints3", "int a", asOFFSET(CInts3, a)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("ints3", "int b", asOFFSET(CInts3, b)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("ints3", "int c", asOFFSET(CInts3, c)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("ints3 MakeInts3(int, int, int)", asFUNCTION(MakeInts3), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterObjectType("longs", sizeof(CLongs), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_CLASS | asOBJ_APP_CLASS_ALLINTS | asOBJ_APP_CLASS_ALIGN8); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("longs", "int64 a", asOFFSET(CLongs, a)); assert( r >= 0 );
+		r = engine->RegisterObjectProperty("longs", "int64 b", asOFFSET(CLongs, b)); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("longs MakeLongs(int64, int64)", asFUNCTION(MakeLongs), asCALL_CDECL); assert( r >= 0 );
 
 		r = engine->RegisterObjectType("val", sizeof(CVal), asOBJ_VALUE | asOBJ_APP_CLASS_CDAK); assert( r >= 0 );
 		r = engine->RegisterObjectBehaviour("val", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(ValConstruct), asCALL_CDECL_OBJLAST); assert( r >= 0 );
@@ -1061,6 +1109,27 @@ static bool TestDirectCalls()
 		"  assert( obj.Floats(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 390 );  \n"
 		"  assert( obj.Doubles(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 390 ); \n"
 		"  return obj.Many(1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4); \n"
+		"}                                                             \n"
+		"int aggregates()                                              \n"
+		"{                                                             \n"
+		"  obj.v = 5;                                                  \n"
+		"  vec2 a = MakeVec2(1, 2); assert( a.x == 1 && a.y == 2 );    \n"
+		"  quat q = MakeQuat(1, 2, 3, 4) * 2;                          \n"
+		"  assert( q.x == 2 && q.y == 4 && q.z == 6 && q.w == 8 );     \n"
+		"  quat p = obj.Quat(2);                                       \n"
+		"  assert( p.x == 10 && p.y == 11 && p.z == 12 && p.w == 13 ); \n"
+		"  dvec2 d = MakeDVec2(1.5, -2.5); assert( d.x == 1.5 && d.y == -2.5 ); \n"
+		"  dvec3 e = MakeDVec3(1.5, 2.5, 3.5);                         \n"
+		"  assert( e.x == 1.5 && e.y == 2.5 && e.z == 3.5 );           \n"
+		"  dvec3 f = obj.DVec3(0.5);                                   \n"
+		"  assert( f.x == 2.5 && f.y == 3.5 && f.z == 4.5 );           \n"
+		"  ints3 i = MakeInts3(1, -2, 3);                              \n"
+		"  assert( i.a == 1 && i.b == -2 && i.c == 3 );                \n"
+		"  longs l = MakeLongs(5000000000, -3);                        \n"
+		"  assert( l.a == 5000000000 && l.b == -3 );                   \n"
+		"  vec v = MakeVec(1, 2, 3) + MakeVec(4, 5, 6);                \n"
+		"  assert( v.x == 5 && v.y == 7 && v.z == 9 );                 \n"
+		"  return int(a.y + q.w + p.x + d.x + e.z + f.y + v.z) + i.c + int(l.a / 1000000000); \n"
 		"}                                                             \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
@@ -1165,6 +1234,16 @@ static bool TestDirectCalls()
 	{
 		if( r == asEXECUTION_EXCEPTION )
 			PRINTF("stackArgs: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
+		TEST_FAILED;
+	}
+
+	// Value types returned in more than one register
+	ctx->Prepare(mod->GetFunctionByDecl("int aggregates()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 45 )
+	{
+		if( r == asEXECUTION_EXCEPTION )
+			PRINTF("aggregates: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
 		TEST_FAILED;
 	}
 	ctx->Unprepare();

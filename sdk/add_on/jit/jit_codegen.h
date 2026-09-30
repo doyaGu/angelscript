@@ -201,6 +201,7 @@ protected:
 	void Lea(const Gp &dst, const Mem &src);
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
+	void AddReturn(asmjit::FuncDetail &detail, int index, asmjit::TypeId type);
 	void StoreImm32(const Mem &dst, int value);
 	void MoveVec(const Vec &dst, const Vec &src);
 	void MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble);

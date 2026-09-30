@@ -1035,7 +1035,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // of through the generic CallSystemFunction of the engine. This is only done for
 // simple signatures: primitives and pointers as arguments, a primitive, pointer,
 // handle, or value type as return value, and nothing to clean up after the call.
-// On AArch64 the value types of only floats returned in registers are left out too.
+// Value types returned in memory are left out where the address isn't passed like
+// an argument (see JIT_HIDDEN_RETURN_POINTER).
 // Everything else, e.g. objects passed by value, returns false and is called
 // through the engine.
 //
@@ -1045,8 +1046,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 //
 // TODO: runtime optimize: Objects passed by value could be supported by setting up the
 //                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
-//                         do for each ABI, and value types returned in more than two
-//                         registers by reading them the way as_callfunc_x64_gcc.cpp does.
+//                         do for each ABI, and value types returned in memory on AArch64
+//                         by setting x8, which the calls of the AsmJit compiler can't do.
 //                         Auto handles would need a release of the parameters after the call
 //                         and an AddRef of the returned handle, and asCALL_GENERIC could be
 //                         called with an asCGeneric set up inline. Each of these should be
@@ -1099,27 +1100,52 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Return value. A value type returned by value is stored at the location that the
 	// caller put on the stack, either by the function itself through the hidden pointer,
-	// or from the registers it was returned in
-	enum { RET_VOID, RET_I32, RET_I64, RET_F32, RET_F64, RET_PTR, RET_HANDLE } retKind;
+	// or from the registers it was returned in. RET_PARTS is an object returned in up to
+	// four registers, which hold retPartSize bytes of it each, in turn
+	enum { RET_VOID, RET_I32, RET_I64, RET_F32, RET_F64, RET_PTR, RET_HANDLE, RET_PARTS } retKind;
 	TypeId retType;
 	const asCDataType &rt = descr->returnType;
 	bool retOnStack = descr->DoesReturnOnStack();
 	bool retInMemory = retOnStack && sysFunc->hostReturnInMemory;
 	int expectedRetSize;
+	int retSize = retOnStack ? rt.GetSizeInMemoryBytes() : 0;
+	int retParts = 0, retPartSize = 8;
+	bool retPartsFloat = false;
+#ifdef AS_ARM64
+	// AArch64 returns an aggregate of up to four floats or doubles in a floating point
+	// register each, e.g. three floats in s0, s1 and s2. hostReturnFloat doesn't tell
+	// them, as the engine only sets it where the objects are split by the types of their
+	// members, and as_callfunc_arm64.cpp looks at the flags of the type instead, also
+	// for those of three or four doubles that the engine takes to be returned in memory
+	const asQWORD retFlags = retOnStack ? rt.GetTypeInfo()->flags : 0;
+	if( (retFlags & asOBJ_APP_CLASS_ALLFLOATS) && !(retFlags & COMPLEX_MASK) &&
+		retSize <= 4 * ((retFlags & asOBJ_APP_CLASS_ALIGN8) ? 8 : 4) )
+	{
+		retPartSize = (retFlags & asOBJ_APP_CLASS_ALIGN8) ? 8 : 4;
+		if( retSize % retPartSize )
+			return false;
+		retParts = retSize / retPartSize;
+		retPartsFloat = true;
+		retInMemory = false;
+	}
+	else
+#endif
+#if defined(AS_X64_GCC) || defined(AS_ARM64)
+	// The other objects of 9 to 16 bytes that aren't returned in memory come in two
+	// registers, rax and rdx or x0 and x1, or xmm0 and xmm1 if the engine says they
+	// hold floats
+	if( retOnStack && !retInMemory && (sysFunc->hostReturnSize == 3 || sysFunc->hostReturnSize == 4) )
+	{
+		retParts = 2;
+		retPartsFloat = sysFunc->hostReturnFloat;
+	}
+#endif
 #ifndef JIT_HIDDEN_RETURN_POINTER
 	if( retInMemory )
 		return false;
 #endif
-#ifdef AS_ARM64
-	// AArch64 returns each member of a floating point aggregate in a floating point
-	// register of its own, e.g. two floats in s0 and s1, which the calls can't express.
-	// hostReturnFloat doesn't tell them, as the engine only sets it where the objects
-	// are split by the types of their members, and as_callfunc_arm64.cpp looks at the
-	// flags of the type instead
-	if( retOnStack && !retInMemory && (rt.GetTypeInfo()->flags & asOBJ_APP_CLASS_ALLFLOATS) )
-		return false;
-#endif
-	if( retInMemory )                                            { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = AS_PTR_SIZE; }
+	if( retParts )                                               { retKind = RET_PARTS;  retType = !retPartsFloat ? TypeId::kInt64 : retPartSize == 4 ? TypeId::kFloat32 : TypeId::kFloat64; expectedRetSize = sysFunc->hostReturnSize; }
+	else if( retInMemory )                                       { retKind = RET_VOID;   retType = TypeId::kVoid;    expectedRetSize = AS_PTR_SIZE; }
 	else if( retOnStack && sysFunc->hostReturnSize == 1 )        { retKind = sysFunc->hostReturnFloat ? RET_F32 : RET_I32; retType = sysFunc->hostReturnFloat ? TypeId::kFloat32 : TypeId::kInt32; expectedRetSize = 1; }
 	else if( retOnStack && sysFunc->hostReturnSize == 2 )        { retKind = sysFunc->hostReturnFloat ? RET_F64 : RET_I64; retType = sysFunc->hostReturnFloat ? TypeId::kFloat64 : TypeId::kInt64; expectedRetSize = 2; }
 	else if( retOnStack )                                        return false;
@@ -1131,7 +1157,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	else if( rt.IsDoubleType() )                                 { retKind = RET_F64;    retType = TypeId::kFloat64; expectedRetSize = 2; }
 	else if( rt.GetSizeOnStackDWords() == 2 )                    { retKind = RET_I64;    retType = TypeId::kInt64;   expectedRetSize = 2; }
 	else                                                         { retKind = RET_I32;    retType = TypeId::kInt32;   expectedRetSize = 1; }
-	if( sysFunc->hostReturnSize != expectedRetSize || sysFunc->hostReturnFloat != (retKind == RET_F32 || retKind == RET_F64) )
+	if( sysFunc->hostReturnSize != expectedRetSize || (retKind != RET_PARTS && sysFunc->hostReturnFloat != (retKind == RET_F32 || retKind == RET_F64)) )
 		return false;
 
 	// Arguments, as laid out on the script stack
@@ -1287,10 +1313,27 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	if( hasObj && objLast )
 		call->set_arg(argIdx++, obj);
 
-	Gp  retGp, retGpHi;
-	Vec retVec;
+	Gp  retGp, retGpHi, retGps[4];
+	Vec retVec, retVecs[4];
 	switch( retKind )
 	{
+	case RET_PARTS:
+		for( int n = 0; n < retParts; n++ )
+		{
+			if( n )
+				AddReturn(call->detail(), n, retType);
+			if( retPartsFloat )
+			{
+				retVecs[n] = retPartSize == 4 ? m_uc.new_vec128_f32x1() : m_uc.new_vec128_f64x1();
+				call->set_ret(n, retVecs[n]);
+			}
+			else
+			{
+				retGps[n] = m_uc.new_gp64();
+				call->set_ret(n, retGps[n]);
+			}
+		}
+		break;
 	case RET_I32:
 		retGp = m_uc.new_gp32();
 		call->set_ret(0, retGp);
@@ -1336,6 +1379,23 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	{
 		switch( retKind )
 		{
+		case RET_PARTS:
+			// The floats of AArch64 take 4 bytes, and so does the last part of an object
+			// of 12 bytes returned in two 8 byte registers
+			for( int n = 0; n < retParts; n++ )
+			{
+				Mem part = Addr(retPtr, n * retPartSize);
+				bool half = retPartSize == 4 || retSize - n * retPartSize == 4;
+				if( retPartsFloat && half )
+					m_uc.v_storeu32_f32(part, retVecs[n]);
+				else if( retPartsFloat )
+					m_uc.v_storeu64_f64(part, retVecs[n]);
+				else if( half )
+					m_uc.store_u32(part, retGps[n].r32());
+				else
+					m_uc.store_u64(part, retGps[n]);
+			}
+			break;
 		case RET_I32:
 			m_uc.store_u32(mem_ptr(retPtr), retGp);
 			break;

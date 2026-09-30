@@ -112,6 +112,15 @@ void CJITCodeGen::AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, x86::Gp::kIdDx, TypeId::kUInt64);
 }
 
+// The second register of an object returned in two, rdx or xmm1
+void CJITCodeGen::AddReturn(FuncDetail &detail, int index, TypeId type)
+{
+	if( type == TypeId::kInt64 )
+		detail.ret(index).init_reg(RegType::kGp64, x86::Gp::kIdDx, type);
+	else
+		detail.ret(index).init_reg(RegType::kVec128, uint32_t(index), type);
+}
+
 // x86 stores an immediate without a register
 void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 {
@@ -360,6 +369,13 @@ void CJITCodeGen::AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, 1, TypeId::kUInt64);
 }
 
+// The registers of an object returned in more than one follow x0 or v0
+void CJITCodeGen::AddReturn(FuncDetail &detail, int index, TypeId type)
+{
+	RegType regType = type == TypeId::kInt64 ? RegType::kGp64 : type == TypeId::kFloat32 ? RegType::kVec32 : RegType::kVec64;
+	detail.ret(index).init_reg(regType, uint32_t(index), type);
+}
+
 // Zero is stored from the zero register
 void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 {
@@ -598,6 +614,11 @@ void CJITCodeGen::SetSignBit(const Gp &)
 }
 
 void CJITCodeGen::AddVRReturn(FuncDetail &)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::AddReturn(FuncDetail &, int, TypeId)
 {
 	m_failed = true;
 }
