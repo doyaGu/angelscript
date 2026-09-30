@@ -127,6 +127,8 @@ asIScriptEngine *CreateEngineForTest(asDWORD version)
 			if( g_jitLogFilter )     flags |= CJITCompiler::JIT_LOG;
 			if( !g_useJit )          flags |= CJITCompiler::JIT_AOT_ONLY;
 			g_jit = new CJITCompiler(flags);
+			if( JIT_AddScriptArrayIndexers(g_jit) < 0 )
+				printf("Failed to add the indexers of the arrays to the JIT compiler\n");
 			if( g_jitLogFilter )
 				g_jit->SetLogFile(stderr, g_jitLogFilter);
 			if( g_aotOutput )

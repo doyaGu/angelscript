@@ -65,6 +65,7 @@ public:
   void    SetMaxInlineSize(asUINT sizeInDWords);
   int     SetCompileThresholds(asUINT calls, asUINT iterations);
   void    SetProfileThreshold(asUINT calls);
+  int     AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexer);
 
   // Ahead of time compilation
   void SetAOTOutput(const char *directory);
@@ -81,6 +82,17 @@ public:
   static void *AllocMemory(size_t size);
   static void  FreeMemory(void *mem);
 };
+
+// Where a container keeps its elements, see CJITCompiler::AddIndexer
+struct SJITIndexer
+{
+  int bufferOffset; // offset in the object of the pointer to the buffer, which may be null
+  int lengthOffset; // offset in the buffer of the number of elements, an asUINT
+  int dataOffset;   // offset in the buffer of the first element
+};
+
+// Adds the indexers of the array add-on to the compiler (in jit_scriptarray.cpp)
+int JIT_AddScriptArrayIndexers(CJITCompiler *jit);
 \endcode
 
 \section doc_addon_jit_2 Usage
@@ -278,6 +290,46 @@ The function is compiled 3 times in each, once more for the second loop. None of
 other tests of the test_performance project make such calls, so their times don't
 change, and with the threshold 2 the feature tests of the library compile 6 of their
 8756 functions again.
+
+\section doc_addon_jit_indexers Indexers
+
+The scripts index the arrays and the other containers through methods that are
+registered with the engine, so each access is a call of a registered function, even
+though the method does little more than check the index and compute the address of
+the element. \ref CJITCompiler::AddIndexer "AddIndexer" tells the compiler how such a
+container keeps its elements, so that the compiled code finds the element itself
+where the method is called. The object must point to a buffer, which holds the
+number of elements as an asUINT and then the elements one after the other, and the
+methods must be registered as \ref asCALL_THISCALL "thiscall" methods of a template
+type with a single subtype, take one uint by value, and return a reference to the
+element. The elements are of the size of the subtype, and the objects that aren't
+handles are stored as pointers to them, as the array add-on does. The methods are
+found by their native function, so the method given must be the same as the one
+registered, and the methods registered through a wrapper, or by other types, are
+called as usual. They must be added before any function is compiled.
+
+\code
+SJITIndexer indexer = { offsetof(CMyArray, buffer), offsetof(SMyBuffer, length), offsetof(SMyBuffer, data) };
+jit->AddIndexer(asMETHODPR(CMyArray, At, (asUINT), void*), indexer);
+\endcode
+
+The compiled code calls the method where the pointer to the buffer is null or the
+index is out of range, which sets the script exception as usual. The file
+jit_scriptarray.cpp of the add-on has JIT_AddScriptArrayIndexers, which adds the
+At methods of the \ref doc_addon_array "array add-on", whose opIndex they implement,
+with the layout of its buffer found by creating some arrays in an engine of its own.
+It must be compiled together with the array add-on. The code generated ahead of
+time still calls the methods.
+
+\code
+CJITCompiler *jit = new CJITCompiler();
+JIT_AddScriptArrayIndexers(jit);
+engine->SetJITCompiler(jit);
+\endcode
+
+With the indexers of the arrays, ClassProp of the test_performance project takes
+0.011 seconds instead of 0.021, Array.2 0.012 instead of 0.028, and Array.1 0.061
+instead of 0.070.
 
 \section doc_addon_jit_suspend Suspension and line callbacks
 

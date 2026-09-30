@@ -5,6 +5,8 @@
 #include <angelscript.h>
 #endif
 
+#include "jit.h"
+
 #include <vector>
 #include <map>
 #include <memory>
@@ -31,7 +33,8 @@ enum EJITInstrFlags
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
 	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
-	JIT_INSTR_PROFILE     = 0x1000 // asBC_CALLINTF whose classes are noted in the profile, or, if inlined for the class seen before, the others, see SJITProfile
+	JIT_INSTR_PROFILE     = 0x1000, // asBC_CALLINTF whose classes are noted in the profile, or, if inlined for the class seen before, the others, see SJITProfile
+	JIT_INSTR_INDEXER     = 0x2000  // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -162,6 +165,15 @@ struct SJITInlineOptions
 	void  *filterParam;
 	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
 	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
+	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
+};
+
+// A call of an indexer that is compiled in place, see CJITCompiler::AddIndexer
+struct SJITIndexerCall
+{
+	SJITIndexer layout;
+	int  elementSize; // bytes from one element to the next
+	bool indirect;    // the elements are pointers to the objects
 };
 
 // Decodes the bytecode of a script function and gathers the information
@@ -290,6 +302,9 @@ public:
 	// inlined method in its table
 	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
 
+	// Returns the indexer called by an instruction marked with JIT_INSTR_INDEXER
+	const SJITIndexerCall *GetIndexer(asUINT instrIdx) const;
+
 	// Returns true if the function or one inlined into it calls something that may
 	// see the VM registers, or releases objects, where the frames of the calls that
 	// inline it are handed to the VM, see CJITCodeGen::EmitMaterialize. The parameters
@@ -299,8 +314,8 @@ public:
 	// Returns true if the instruction stores the cached variables, see IsSyncPoint.
 	// The copies of the references lent to the inlined calls don't, and neither do
 	// the copies of the script objects counted in place, which only store them on
-	// the rare paths
-	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT)); }
+	// the rare paths, and the indexers compiled in place, which leave those to the VM
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER)); }
 
 	// Returns the index of the parameter in the variable, or -1
 	int    FindParam(int offset) const;
@@ -341,6 +356,7 @@ protected:
 	struct SInlineSearch;
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
 	bool CanBeInlined() const;
+	void FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 	void AnalyseBorrows();
 	void ClearBorrows();
 	void FindBorrowableParams();
@@ -384,6 +400,7 @@ protected:
 	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
 	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
+	std::map<asUINT, SJITIndexerCall> m_indexers; // by instruction, see GetIndexer
 	asUINT                  m_borrowableParams; // see GetBorrowableParams
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
 	std::map<asUINT, asUINT> m_borrowedArgs;    // by instruction, for the inlined calls

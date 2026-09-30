@@ -5,6 +5,8 @@
 #include "as_scriptfunction.h"
 #include "as_scriptengine.h"
 #include "as_module.h"
+#include "as_objecttype.h"
+#include "as_callfunc.h"
 
 #include <algorithm>
 #include <climits>
@@ -352,6 +354,12 @@ asCObjectType *CJITByteCode::GetInlineObjectType(asUINT instrIdx) const
 {
 	std::map<asUINT, asCObjectType*>::const_iterator it = m_inlineObjTypes.find(instrIdx);
 	return it == m_inlineObjTypes.end() ? 0 : it->second;
+}
+
+const SJITIndexerCall *CJITByteCode::GetIndexer(asUINT instrIdx) const
+{
+	std::map<asUINT, SJITIndexerCall>::const_iterator it = m_indexers.find(instrIdx);
+	return it == m_indexers.end() ? 0 : &it->second;
 }
 
 asUINT CJITByteCode::GetBorrowedArgs(asUINT instrIdx) const
@@ -756,6 +764,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 						search.path.push_back(func->GetId());
 						callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 						search.path.pop_back();
+						callee->FindIndexers(inlining.indexers);
 						callee->AnalyseBorrows();
 						callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 					}
@@ -799,8 +808,52 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		search.path.push_back(m_func->GetId());
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
+	FindIndexers(inlining ? inlining->indexers : 0);
 	AnalyseBorrows();
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
+}
+
+// Finds the calls of the indexers, which are compiled in place, see
+// CJITCompiler::AddIndexer. The elements are laid out like those of CScriptArray,
+// whose size depends on the subtype, and the objects are stored as pointers to them
+// if the subtype isn't a handle. The index must be unsigned, as the negative ones
+// are taken to be out of range
+void CJITByteCode::FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers)
+{
+	m_indexers.clear();
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		instr.flags &= ~JIT_INSTR_INDEXER;
+		if( indexers == 0 || indexers->empty() || (instr.op != asBC_CALLSYS && instr.op != asBC_Thiscall1) ||
+		    (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
+			continue;
+
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 || func->objectType == 0 )
+			continue;
+		const asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
+		std::map<asFUNCTION_t, SJITIndexer>::const_iterator it = indexers->find(sysFunc->func);
+		if( it == indexers->end() || sysFunc->callConv != ICC_THISCALL || sysFunc->baseOffset || sysFunc->auxiliary ||
+		    sysFunc->compositeOffset || sysFunc->isCompositeIndirect )
+			continue;
+		if( !func->returnType.IsReference() || func->parameterTypes.GetLength() != 1 ||
+		    func->parameterTypes[0].IsReference() || func->parameterTypes[0].GetTokenType() != ttUInt ||
+		    func->objectType->templateSubTypes.GetLength() != 1 )
+			continue;
+
+		int typeId = engine->GetTypeIdFromDataType(func->objectType->templateSubTypes[0]);
+		SJITIndexerCall call;
+		call.layout      = it->second;
+		call.indirect    = (typeId & asTYPEID_MASK_OBJECT) && !(typeId & asTYPEID_OBJHANDLE);
+		call.elementSize = (typeId & asTYPEID_MASK_OBJECT) ? int(sizeof(asPWORD)) : engine->GetSizeOfPrimitiveType(typeId);
+		if( call.elementSize != 1 && call.elementSize != 2 && call.elementSize != 4 && call.elementSize != 8 )
+			continue;
+		instr.flags |= JIT_INSTR_INDEXER;
+		m_indexers[n] = call;
+	}
 }
 
 // The depth of the stack depends on the callees, and the borrows on the objects.
@@ -820,6 +873,7 @@ void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots)
 	m_inlinees.clear();
 	m_inlineObjTypes.clear();
 	m_inlinedLength = 0;
+	FindIndexers(0);
 	ClearBorrows();
 	FindMovedRefs();
 	FindInPlaceRefCounts();

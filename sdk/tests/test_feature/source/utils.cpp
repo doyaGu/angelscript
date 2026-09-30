@@ -529,6 +529,8 @@ asIScriptEngine *CreateEngineWithJit(asDWORD version)
 		if( env )
 			flags = asDWORD(strtoul(env, 0, 0));
 		g_jit = new CJITCompiler(flags);
+		if( JIT_AddScriptArrayIndexers(g_jit) < 0 )
+			PRINTF("JIT: failed to add the indexers of the arrays\n");
 		const char *filter = getenv("AS_JIT_LOG_FILTER");
 		if( filter )
 			g_jit->SetLogFile(stdout, filter);

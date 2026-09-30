@@ -855,6 +855,11 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	switch( instr.op )
 	{
 	case asBC_CALLSYS:
+		if( instr.flags & JIT_INSTR_INDEXER )
+		{
+			EmitIndexer(idx);
+			break;
+		}
 		if( m_options.directSystemCalls && EmitDirectSystemCall(idx, asBC_INTARG(bc)) )
 			break;
 		{
@@ -870,6 +875,11 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 
 	case asBC_Thiscall1:
 		// The instruction is a CALLSYS for methods taking an int and returning a reference
+		if( instr.flags & JIT_INSTR_INDEXER )
+		{
+			EmitIndexer(idx);
+			break;
+		}
 		if( m_options.directSystemCalls && EmitDirectSystemCall(idx, asBC_INTARG(bc)) )
 			break;
 		{
@@ -1052,6 +1062,40 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 //                         and an AddRef of the returned handle, and asCALL_GENERIC could be
 //                         called with an asCGeneric set up inline. Each of these should be
 //                         measured against CallSystemFunction before adding the code.
+// The indexers are compiled in place as the loads of the address of the element, see
+// CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
+// left to the VM, which calls the method to raise the exception. Nothing else can
+// see the variables, so they aren't stored, see CJITByteCode::IsSyncPointAt
+void CJITCodeGen::EmitIndexer(asUINT idx)
+{
+	const SJITIndexerCall &indexer = *m_code->GetIndexer(idx);
+	Label bail = BailLabel(idx);
+	Gp obj   = m_uc.new_gp_ptr();
+	Gp index = m_uc.new_gp_ptr();
+	Gp buf   = m_uc.new_gp_ptr();
+	Gp count = m_uc.new_gp32();
+	m_uc.load(obj, Stack(0));
+	m_uc.load_u32(index, Stack(AS_PTR_SIZE));
+	m_uc.j(bail, test_z(obj));
+	m_uc.load(buf, Addr(obj, indexer.layout.bufferOffset));
+	m_uc.j(bail, test_z(buf));
+	m_uc.load_u32(count, Addr(buf, indexer.layout.lengthOffset));
+	m_uc.j(bail, ucmp_ge(index.r32(), count));
+
+	Gp elem = m_uc.new_gp_ptr();
+	m_uc.add_ext(elem, buf, index, asUINT(indexer.elementSize), indexer.layout.dataOffset);
+	if( indexer.indirect )
+		m_uc.load(elem, mem_ptr(elem));
+
+	// Pop the object and the index, and set the value register like the VM does. The
+	// next instruction may read or write the element through the address itself
+	PopStack((AS_PTR_SIZE + 1) * 4);
+	if( m_code->IsVRLiveAfter(idx) && CanFoldVRAddr(idx) )
+		SetVRAddr(idx, mem_ptr(elem));
+	else if( m_code->IsVRLiveAfter(idx) )
+		StoreVRPtr(elem);
+}
+
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];

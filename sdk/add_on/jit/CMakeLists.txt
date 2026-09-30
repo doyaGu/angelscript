@@ -56,6 +56,7 @@ add_library(angelscript_jit STATIC
     jit_memory.cpp
     jit_runtime.h
     jit_runtime.cpp
+    jit_scriptarray.cpp
     jit_unwind.h
     jit_unwind.cpp
 )

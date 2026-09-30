@@ -26,6 +26,15 @@ struct SJITStatistics
 	asUINT functionsForLineCallbacks; // compiled functions compiled again with the checks at every statement, see JIT_CHECK_EVERY_STATEMENT
 };
 
+// Where a container keeps its elements, see CJITCompiler::AddIndexer. The object
+// points to a buffer, which holds the number of elements and then the elements
+struct SJITIndexer
+{
+	int bufferOffset; // offset in the object of the pointer to the buffer, which may be null
+	int lengthOffset; // offset in the buffer of the number of elements, an asUINT
+	int dataOffset;   // offset in the buffer of the first element
+};
+
 // Callback used to decide if a function should be JIT compiled
 typedef bool (*JITCompileFilterFunc_t)(asIScriptFunction *func, void *userParam);
 
@@ -179,6 +188,18 @@ public:
 	// Must be called before any function is compiled. Returns a negative value on failure
 	int AddAOTFunctions(const SJITAOTFunction *functions, asUINT count);
 
+	// Indexers. The registered methods that return a reference to an element of a
+	// container, like the opIndex of the arrays, are compiled in place as the loads of
+	// the element, with the layout of the container, instead of being called. The
+	// methods must be registered with asCALL_THISCALL for a template type with one
+	// subtype, take a uint, and return a reference to the element of the index in the
+	// buffer. The elements follow each other: the primitives with their size, the
+	// handles as pointers, and the other objects as pointers to them. The method is
+	// still called for a null buffer or an index out of range, to raise the exception.
+	// JIT_AddScriptArrayIndexers adds the opIndex methods of CScriptArray. Must be
+	// called before any function is compiled. Returns a negative value on failure
+	int AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexer);
+
 	SJITStatistics GetStatistics() const;
 
 	// Faster versions of asIScriptContext::Prepare and Execute, for the application
@@ -208,6 +229,13 @@ protected:
 
 	static int TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 };
+
+// Adds the indexers of the opIndex methods of CScriptArray to the compiler, see
+// CJITCompiler::AddIndexer. The layout of the arrays is found by creating some in
+// an engine of its own, which doesn't need the add-on to be changed. The function
+// is in jit_scriptarray.cpp, which links with the add-on. Must be called before
+// any function is compiled. Returns a negative value on failure
+int JIT_AddScriptArrayIndexers(CJITCompiler *jit);
 
 END_AS_NAMESPACE
 

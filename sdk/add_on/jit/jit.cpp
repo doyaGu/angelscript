@@ -96,6 +96,7 @@ struct CJITCompiler::SImpl
 	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
+	std::map<asFUNCTION_t, SJITIndexer> indexers; // the methods added with AddIndexer, by their function
 	asUINT                 callThreshold; // see SetCompileThresholds
 	asUINT                 loopThreshold;
 	std::set<asCScriptFunction*> compiling; // the functions being compiled, see TierUp, Recompile and CompileExact
@@ -285,6 +286,19 @@ int CJITCompiler::AddAOTFunctions(const SJITAOTFunction *functions, asUINT count
 	return asSUCCESS;
 }
 
+int CJITCompiler::AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexer)
+{
+	// The methods are found by the function that the engine keeps for them
+	if( method.flag != 3 || method.ptr.f.func == 0 || indexer.bufferOffset < 0 || indexer.lengthOffset < 0 || indexer.dataOffset < 0 )
+		return asINVALID_ARG;
+
+	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	if( m_impl->stats.functionsCompiled > 0 || m_impl->stats.functionsDeferred > 0 )
+		return asERROR;
+	m_impl->indexers[method.ptr.f.func] = indexer;
+	return asSUCCESS;
+}
+
 int CJITCompiler::Prepare(asIScriptContext *ctx, asIScriptFunction *func)
 {
 	return JIT_Prepare(ctx, func);
@@ -370,6 +384,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		}
 		if( instr.flags & JIT_INSTR_INLINE )
 			fprintf(file, "   ; inlined");
+		if( instr.flags & JIT_INSTR_INDEXER )
+			fprintf(file, "   ; indexer");
 		if( instr.flags & JIT_INSTR_PROFILE )
 			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? " for the class seen" : "   ; classes noted");
 		if( instr.flags & JIT_INSTR_BORROW )
@@ -587,6 +603,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 		profile->exact      = exact;
 	}
 	inlining.classes     = profile ? &profile->compiledWith : source;
+	inlining.indexers    = &indexers;
 	code.SetBailInstructions(bailOps);
 	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
 

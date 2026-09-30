@@ -4896,6 +4896,244 @@ static bool TestSuspendChecks()
 	return fail;
 }
 
+namespace Indexers
+{
+
+// A container of primitives laid out differently from CScriptArray, whose opIndex
+// counts its calls, which the indexers compiled in place don't make. get isn't
+// added as an indexer, and at takes an int, which the indexers can't
+static int g_calls = 0;
+
+struct SBuffer
+{
+	asQWORD reserved;
+	asUINT  length;
+	asUINT  reserved2;
+	asBYTE  data[8];
+};
+
+struct CBox
+{
+	int      refs;
+	SBuffer *buf;
+	int      elementSize;
+
+	void AddRef() { refs++; }
+	void Release()
+	{
+		if( --refs == 0 )
+		{
+			free(buf);
+			delete this;
+		}
+	}
+	void *At(asUINT index)
+	{
+		g_calls++;
+		if( buf == 0 || index >= buf->length )
+		{
+			asGetActiveContext()->SetException("Index out of bounds");
+			return 0;
+		}
+		return buf->data + index * elementSize;
+	}
+	void *Get(asUINT index) { return At(index); }
+	void *AtInt(int index) { return At(asUINT(index)); }
+};
+
+static bool TemplateCallback(asITypeInfo *ti, bool &dontGC)
+{
+	dontGC = true;
+	return (ti->GetSubTypeId() & asTYPEID_MASK_OBJECT) == 0;
+}
+
+static CBox *Factory(asITypeInfo *ti, asUINT length)
+{
+	CBox *box = new CBox;
+	box->refs = 1;
+	box->elementSize = ti->GetEngine()->GetSizeOfPrimitiveType(ti->GetSubTypeId());
+	box->buf = 0;
+	if( length )
+	{
+		box->buf = (SBuffer*)calloc(1, offsetof(SBuffer, data) + length * box->elementSize);
+		box->buf->length = length;
+	}
+	return box;
+}
+
+static void Register(asIScriptEngine *engine)
+{
+	int r;
+	r = engine->RegisterObjectType("box<class T>", 0, asOBJ_REF | asOBJ_TEMPLATE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("box<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(TemplateCallback), asCALL_CDECL); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("box<T>", asBEHAVE_FACTORY, "box<T> @f(int&in, uint)", asFUNCTION(Factory), asCALL_CDECL); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("box<T>", asBEHAVE_ADDREF, "void f()", asMETHOD(CBox, AddRef), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("box<T>", asBEHAVE_RELEASE, "void f()", asMETHOD(CBox, Release), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "T &opIndex(uint)", asMETHOD(CBox, At), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "const T &opIndex(uint) const", asMETHOD(CBox, At), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "T &get(uint)", asMETHOD(CBox, Get), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "T &at(int)", asMETHOD(CBox, AtInt), asCALL_THISCALL); assert( r >= 0 );
+	(void)r;
+}
+
+static const char *script =
+	"enum E { A = 1, B = 7 }                                                          \n"
+	"class Obj { int v; Obj() {} Obj(int a) { v = a; } }                                     \n"
+	"int sum(const array<int> &in a) { int s = 0; for( uint i = 0; i < a.length(); i++ ) s += a[i]; return s; } \n"
+	"int arrays() {                                                                   \n"
+	"  array<int> a = {1, 2, 3, 4};                                                   \n"
+	"  int s = sum(a);                                                                \n"
+	"  array<int8> i8 = {-1, 2}; array<int16> i16 = {-300, 5}; array<int64> i64 = {1, int64(1) << 40}; \n"
+	"  array<float> f = {0.5f, 1.5f}; array<double> d = {2.5, 3.5}; array<bool> b = {false, true, false}; \n"
+	"  array<E> e = {A, B};                                                           \n"
+	"  s += i8[0] + i16[0] + int(i64[1] >> 40) + int(f[1] * 2) + int(d[1] * 2) + (b[1] ? 1 : 0) + (b[2] ? 100 : 0) + e[1]; \n"
+	"  i8[1] += 3; i16[1] *= 2; f[0] += 1; d[0] = d[1]; b[0] = true;                  \n"
+	"  s += i8[1] + i16[1] + int(f[0] * 2) + int(d[0] * 4) + (b[0] ? 1000 : 0);       \n"
+	"  array<string> t = {'ab', 'cde'}; t[0] += 'x'; s += int(t[0].length() * 10 + t[1].length()); \n"
+	"  array<Obj@> h = {Obj(5), null}; @h[1] = h[0]; h[1].v += 1; s += h[0].v;        \n"
+	"  array<Obj> o = {Obj(3), Obj(4)}; o[1].v *= 10; s += o[0].v + o[1].v;           \n"
+	"  array<array<int>> m = {{1, 2}, {3, 4}}; m[1][0] = 9; s += m[1][0] * m[0][1];   \n"
+	"  return s;                                                                      \n"
+	"}                                                                                \n"
+	"int caught() {                                                                   \n"
+	"  array<int> a = {1, 2, 3};                                                      \n"
+	"  int s = 0;                                                                     \n"
+	"  try { for( uint i = 0; i < 10; i++ ) { s += int(i); s += a[i]; } } catch { s += 1000; } \n"
+	"  return s;                                                                      \n"
+	"}                                                                                \n"
+	"int uncaught() {                                                                 \n"
+	"  array<int> a = {1, 2, 3};                                                      \n"
+	"  int s = 0;                                                                     \n"
+	"  for( uint i = 0; i < 10; i++ ) { s += int(i); s += a[i]; }                     \n"
+	"  return s;                                                                      \n"
+	"}                                                                                \n"
+	"int nullArray() { array<int>@ a; int s = 5; s += a[0]; return s; }               \n"
+	"int divide() {                                                                   \n"
+	"  array<int> a = {1, 2, 3};                                                      \n"
+	"  int s = 0;                                                                     \n"
+	"  for( int i = 0; i < 10; i++ ) { s += i; s += a[0] / (i - 3); }                 \n"
+	"  return s;                                                                      \n"
+	"}                                                                                \n"
+	"int boxes() {                                                                    \n"
+	"  box<int> a(4); box<double> d(3); box<int8> c(5); box<int16> h(2); box<int64> l(2); box<bool> b(3); \n"
+	"  for( uint i = 0; i < 4; i++ ) a[i] = int(i) * 10;                              \n"
+	"  int s = 0;                                                                     \n"
+	"  for( uint i = 0; i < 4; i++ ) s += a[i];                                       \n"
+	"  d[2] = 1.5; d[0] = d[2] * 2; c[4] = -3; h[1] = -300; l[1] = int64(1) << 40; b[2] = true; \n"
+	"  s += int(d[0]) + c[4] + h[1] + int(l[1] >> 38) + (b[2] ? 1 : 0) + (b[1] ? 100 : 0); \n"
+	"  const box<int> @k = a;                                                         \n"
+	"  s += k[3] + a.get(1) + a.at(2);                                                \n"
+	"  return s;                                                                      \n"
+	"}                                                                                \n"
+	"int boxOut(uint i) { box<int> a(4); int s = 1; s += a[i]; return s; }            \n"
+	"int boxEmpty() { box<int> a(0); return a[0]; }                                   \n";
+
+// The results, the exceptions, and the variables s where they were raised, with the
+// calls of the opIndex of box made by each function
+static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, std::vector<int> &calls, bool &fail)
+{
+	COutStream out;
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+	RegisterStdString(engine);
+	RegisterScriptArray(engine, false);
+	Register(engine);
+	if( jit )
+	{
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+		engine->SetJITCompiler(jit);
+		asSFuncPtr at = asMETHOD(CBox, At);
+		SJITIndexer layout;
+		layout.bufferOffset = int(offsetof(CBox, buf));
+		layout.lengthOffset = int(offsetof(SBuffer, length));
+		layout.dataOffset   = int(offsetof(SBuffer, data));
+		if( JIT_AddScriptArrayIndexers(jit) < 0 || jit->AddIndexer(at, layout) < 0 || jit->AddIndexer(asMETHOD(CBox, AtInt), layout) < 0 )
+			TEST_FAILED;
+	}
+
+	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("test", script);
+	if( mod->Build() < 0 )
+	{
+		TEST_FAILED;
+		return "";
+	}
+
+	const char *decls[] = { "int arrays()", "int caught()", "int uncaught()", "int nullArray()", "int divide()", "int boxes()", "int boxOut(uint)", "int boxOut(uint)", "int boxEmpty()" };
+	asUINT args[] = { 0, 0, 0, 0, 0, 0, 4, 0xFFFFFFFF, 0 };
+	std::stringstream result;
+	asIScriptContext *ctx = engine->CreateContext();
+	for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+	{
+		g_calls = 0;
+		ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+		if( args[n] )
+			ctx->SetArgDWord(0, args[n]);
+		int r = ctx->Execute();
+		result << decls[n] << ": ";
+		if( r == asEXECUTION_FINISHED )
+			result << int(ctx->GetReturnDWord());
+		else if( r == asEXECUTION_EXCEPTION )
+		{
+			result << ctx->GetExceptionString() << " at " << ctx->GetExceptionLineNumber();
+			for( int v = 0; v < ctx->GetVarCount(); v++ )
+			{
+				const char *name = 0;
+				ctx->GetVar(asUINT(v), 0, &name);
+				if( name && std::string(name) == "s" && ctx->IsVarInScope(asUINT(v)) )
+					result << ", s = " << *(int*)ctx->GetAddressOfVar(asUINT(v));
+			}
+		}
+		else
+			result << "result " << r;
+		result << "\n";
+		calls.push_back(g_calls);
+	}
+	ctx->Release();
+	return result.str();
+}
+
+} // namespace Indexers
+
+// The indexers compiled in place must give the same results as calling them, also
+// where they leave the calls to the VM, which raises the exceptions, with the
+// variables cached in registers stored
+static bool TestIndexers()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	std::vector<int> vmCalls, jitCalls;
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Indexers::Run(engine, 0, vmCalls, fail);
+	engine->ShutDownAndRelease();
+
+	// The JIT compiler must outlive the engine
+	CJITCompiler jit(envFlags);
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = Indexers::Run(engine, &jit, jitCalls, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected )
+	{
+		PRINTF("indexers:\nVM:\n%sJIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+
+	// Only get and at are called, and the method for the indices out of range
+	int expectedCalls[] = { 0, 0, 0, 0, 0, 2, 1, 1, 1 };
+	for( asUINT n = 0; n < jitCalls.size() && n < sizeof(expectedCalls) / sizeof(expectedCalls[0]); n++ )
+		if( jitCalls[n] != expectedCalls[n] )
+		{
+			PRINTF("indexers: function %u called opIndex %d times instead of %d\n", n, jitCalls[n], expectedCalls[n]);
+			TEST_FAILED;
+		}
+	if( jitCalls.size() != sizeof(expectedCalls) / sizeof(expectedCalls[0]) || vmCalls[5] <= 2 )
+		TEST_FAILED;
+	return fail;
+}
+
 // as_powi from the engine isn't accessible so the same algorithm is repeated here
 int as_powi_test(int base, int exponent, bool &isOverflow)
 {
@@ -4991,6 +5229,7 @@ bool Test()
 	fail = TestTiered() || fail;
 	fail = TestProfiles() || fail;
 	fail = TestSuspendChecks() || fail;
+	fail = TestIndexers() || fail;
 
 	return fail;
 }
