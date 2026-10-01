@@ -17,8 +17,8 @@ BEGIN_AS_NAMESPACE
 //
 //  - 64bit Windows: an UNWIND_INFO appended to the code and registered with
 //    RtlAddFunctionTable.
-//  - 64bit x86 and AArch64 on Linux and macOS: a DWARF CIE and FDE registered
-//    with __register_frame.
+//  - 64bit x86 on Linux, and AArch64 on Linux and macOS: a DWARF CIE and FDE
+//    registered with __register_frame.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //

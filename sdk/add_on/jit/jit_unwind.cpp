@@ -6,7 +6,9 @@
 	#define JIT_UNWIND_WIN64
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
-#elif defined(__x86_64__) && (defined(__linux__) || defined(__APPLE__))
+#elif defined(__x86_64__) && defined(__linux__)
+	// The libunwind of macOS doesn't find the FDE registered for the generated code on
+	// x86-64, the exceptions terminate the application in the JIT job of the automated test
 	#define JIT_UNWIND_DWARF
 	#define JIT_UNWIND_X86
 #elif defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__)) && !defined(__arm64e__)

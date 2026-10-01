@@ -142,7 +142,7 @@ through their elements. A C++ exception thrown by a function called this way is
 still caught and turned into a script exception like with the VM. For that the
 exception must be able to pass through the generated code, which needs unwind
 information for it. The add-on registers the unwind information on 64bit Windows,
-and for x86-64 and AArch64 on Linux and macOS (except arm64e), and 32bit Windows
+and for x86-64 on Linux and AArch64 on Linux and macOS (except arm64e), and 32bit Windows
 with MSVC doesn't need any. On other platforms the direct calls are only made
 when the library is compiled with AS_NO_EXCEPTIONS, or when the
 \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is set, in which case a C++
@@ -539,8 +539,8 @@ RetObj.3       0.039    0.004      0.004    0.004     0.011
    uses the call stack of the VM, so these calls are not faster than with the
    interpreter.
  - Unwind information for the generated code is only registered on 64bit Windows,
-   and for x86-64 and AArch64 on Linux and macOS, but not for arm64e, the BSDs, or
-   64bit ARM Windows. On the other platforms besides 32bit Windows with MSVC, a C++
+   and for x86-64 on Linux and AArch64 on Linux and macOS, but not for x86-64 on macOS,
+   arm64e, the BSDs, or 64bit ARM Windows. On the other platforms besides 32bit Windows with MSVC, a C++
    exception that passes through the generated code terminates the application,
    which is why direct system calls are opt-in there unless the library is built
    with AS_NO_EXCEPTIONS.
