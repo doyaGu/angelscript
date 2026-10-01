@@ -4904,6 +4904,7 @@ namespace Indexers
 // added as an indexer, and at takes an int, which the indexers can't
 static int g_calls = 0;
 static int g_atInts = 0;
+static int g_gets = 0;
 
 struct SBuffer
 {
@@ -4938,7 +4939,8 @@ struct CBox
 		}
 		return buf->data + index * elementSize;
 	}
-	void *Get(asUINT index) { return At(index); }
+	// Counted apart from At and AtInt, as the linker folds the functions with the same code
+	void *Get(asUINT index) { g_gets++; return At(index); }
 	// Counted apart so that the linker can't fold it with Get, which has the same code,
 	// as the indexers are found by the address of the function
 	void *AtInt(int index) { g_atInts++; return At(asUINT(index)); }
