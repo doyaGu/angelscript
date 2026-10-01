@@ -1615,15 +1615,7 @@ namespace Inlining
 		if( a == -1 )
 			asGetActiveContext()->SetException("negative");
 		else if( a == -2 )
-		{
-#if defined(__APPLE__) && defined(__x86_64__)
-			// The engine doesn't catch the C++ exceptions of the registered functions on
-			// x86-64 macOS, where the automated test terminates
-			asGetActiveContext()->SetException("more negative");
-#else
 			throw std::runtime_error("more negative");
-#endif
-		}
 		return a * 3;
 	}
 
@@ -2632,8 +2624,8 @@ static bool TestCppExceptions()
 		return false;
 
 #if defined(__APPLE__) && defined(__x86_64__)
-	// The engine doesn't catch the C++ exceptions of the registered functions on x86-64
-	// macOS, and the JIT compiler doesn't register unwind information there either
+	// The JIT compiler doesn't register unwind information on x86-64 macOS, which the
+	// exceptions that pass through the generated code need
 	return false;
 #endif
 
