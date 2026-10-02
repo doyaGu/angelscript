@@ -152,12 +152,13 @@ bool CJITCodeGen::Generate()
 	{
 		// The native calls may push call states as long as the call stack doesn't
 		// have to grow, and up to the maximum depth. The capacity is a multiple of
-		// the size of a call state and doesn't shrink, see JITFunction
+		// the size of a call state and doesn't shrink, see JITFunction. The length
+		// is the same at every call of the function, see EmitNativeCall
 		asQWORD words = asQWORD(m_options.maxNativeCallDepth) * layout.callStackFrameSize;
 		Gp capacity = m_uc.new_gp32();
-		m_uc.load_u32(m_callLimit, ContextField(layout.callStackLength));
+		m_uc.load_u32(m_callStackLength, ContextField(layout.callStackLength));
 		m_uc.load_u32(capacity, ContextField(layout.callStackCapacity));
-		m_uc.add(m_callLimit, m_callLimit, Imm(int(words < 0x40000000 ? words : 0x40000000)));
+		m_uc.add(m_callLimit, m_callStackLength, Imm(int(words < 0x40000000 ? words : 0x40000000)));
 		m_uc.umin(m_callLimit, m_callLimit, capacity);
 	}
 	if( m_inlineRoom.is_valid() )
@@ -607,6 +608,21 @@ void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
 
 // Gives the cached variables in the mask, the most used first, home registers from
 // the ones passed as far as the calling convention preserves them whole
+// Gives the register the last callee-saved home register in the list, which the
+// cached variables don't get then. The last ones are those left over by the stack
+// pointer and the call limit, whose neighbours are saved anyway
+void CJITCodeGen::TakeHomeReg(const Gp &reg, const uint32_t *gpIds, asUINT &gpCount)
+{
+	const CallConv &conv = m_func->detail().call_conv();
+	for( asUINT n = gpCount; n > 0; n-- )
+		if( conv.preserved_regs(RegGroup::kGp) & (RegMask(1) << gpIds[n - 1]) )
+		{
+			m_uc.cc->virt_reg_by_reg(reg)->set_home_id_hint(gpIds[n - 1]);
+			gpCount = n - 1;
+			return;
+		}
+}
+
 void CJITCodeGen::SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount)
 {
 	const CallConv &conv = m_func->detail().call_conv();
@@ -687,6 +703,8 @@ void CJITCodeGen::CopyLiveArgs()
 bool CJITCodeGen::IsLiveThrough(const Reg &reg) const
 {
 	if( reg.id() == m_regs.id() || (m_callLimit.is_valid() && reg.id() == m_callLimit.id()) )
+		return true;
+	if( m_callStackLength.is_valid() && reg.id() == m_callStackLength.id() )
 		return true;
 	for( size_t n = 0; n < m_cached.size(); n++ )
 		if( reg.id() == (m_cached[n].gp.is_valid() ? m_cached[n].gp.id() : m_cached[n].vec.id()) )
@@ -966,6 +984,7 @@ void CJITCodeGen::EmitPrologue()
 		{
 			m_callLimit = m_uc.new_gp32("callLimit");
 			func->set_arg(2, m_callLimit);
+			m_callStackLength = m_uc.new_gp32("callStackLength");
 			break;
 		}
 	}

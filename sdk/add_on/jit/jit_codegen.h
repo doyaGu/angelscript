@@ -41,7 +41,8 @@ struct SJITCodeGenOptions
 // Register usage: the stack frame pointer, stack pointer, and value register
 // are kept in virtual registers while executing natively, except for the stack
 // pointer if the depth of the stack is static, and primitive variables that
-// are never accessed by address may be kept in registers too.
+// are never accessed by address may be kept in registers too. The functions
+// that call script functions hold the length of the call stack as well.
 // They are written back to the VM registers/stack before anything that can
 // observe them, and reloaded whenever execution comes back from the VM.
 class CJITCodeGen
@@ -133,6 +134,8 @@ protected:
 	void EmitDirectEntry();
 	void AssignHomeRegs(asUINT slotMask);
 	void SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount);
+	void TakeHomeReg(const Gp &reg, const uint32_t *gpIds, asUINT &gpCount);
+	void CallStackLength(const Gp &dst);
 	void CopyLiveArgs();
 	bool IsLiveThrough(const asmjit::Reg &reg) const;
 
@@ -322,6 +325,7 @@ protected:
 	Gp  m_arg;      // jitArg
 	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
+	Gp  m_callStackLength; // length of the call stack while the function executes, see EmitNativeCall, only with m_callLimit
 	Gp  m_inlineRoom; // words of room on the call stack for the inlined functions, only if some are called in loops, see EmitInlineRoom
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_this;     // object pointer of a method that doesn't modify it, see CJITByteCode::IsThisConstant

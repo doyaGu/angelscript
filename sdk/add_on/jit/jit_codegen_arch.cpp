@@ -41,6 +41,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 			gpIds[gpCount++] = x86::Gp::kIdBp;
 		if( !m_callLimit.is_valid() )
 			gpIds[gpCount++] = x86::Gp::kIdR12;
+		if( m_callStackLength.is_valid() )
+			TakeHomeReg(m_callStackLength, gpIds, gpCount);
 		SetSlotHomeHints(slotMask, gpIds, gpCount, vecIds, 10);
 	}
 	else
@@ -48,6 +50,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 		cc->virt_reg_by_reg(m_fp)->set_home_id_hint(x86::Gp::kIdSi);
 		if( !m_sp.is_valid() )
 			gpIds[gpCount++] = x86::Gp::kIdBp;
+		if( m_callStackLength.is_valid() )
+			TakeHomeReg(m_callStackLength, gpIds, gpCount);
 		SetSlotHomeHints(slotMask, gpIds, gpCount, 0, 0);
 	}
 }
@@ -289,6 +293,8 @@ void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
 		cc->virt_reg_by_reg(m_callLimit)->set_home_id_hint(22);
 	else
 		gpIds[gpCount++] = 22;
+	if( m_callStackLength.is_valid() )
+		TakeHomeReg(m_callStackLength, gpIds, gpCount);
 	SetSlotHomeHints(slotMask, gpIds, gpCount, 0, 0);
 }
 

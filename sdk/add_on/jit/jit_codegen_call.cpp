@@ -704,9 +704,15 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 		return false;
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	const SJITContextLayout &layout = JIT_GetContextLayout();
+	// The length of the call stack is the one the function was entered with, plus
+	// the frames of the inlined calls if they are on the call stack: the called
+	// functions and the helpers pop what they push, and the VM enters the function
+	// anew after it has executed anything else, see Generate. So the length is
+	// kept in a register all through the function instead of being loaded here and
+	// held across the call, where it would be saved and restored on the stack
 	Gp length = m_uc.new_gp_ptr();
 	Gp t      = m_uc.new_gp_ptr();
-	m_uc.load_u32(length, ContextField(layout.callStackLength));
+	CallStackLength(length.r32());
 	m_uc.j(slow, ucmp_ge(length.r32(), m_callLimit));
 	if( m_options.interop )
 	{
@@ -763,9 +769,23 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	EmitLeaveIf(result);
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
-		m_uc.store_u32(ContextField(layout.callStackLength), length);
+	{
+		Gp restored = m_uc.new_gp32();
+		CallStackLength(restored);
+		m_uc.store_u32(ContextField(layout.callStackLength), restored);
+	}
 #endif
 	return vrReturned;
+}
+
+// The length of the call stack at this point of the function, see EmitNativeCall
+void CJITCodeGen::CallStackLength(const Gp &dst)
+{
+	const SJITContextLayout &layout = JIT_GetContextLayout();
+	if( m_materialized )
+		m_uc.add(dst, m_callStackLength, Imm(m_materialDepth * int(layout.callStackFrameSize)));
+	else
+		m_uc.mov(dst, m_callStackLength);
 }
 
 // Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
@@ -808,6 +828,8 @@ void CJITCodeGen::EmitDirectEntry()
 
 	// Only what may be read before being written needs to be loaded, like in the entry stubs
 	m_uc.bind(ready);
+	if( m_callStackLength.is_valid() )
+		m_uc.load_u32(m_callStackLength, ContextField(layout.callStackLength));
 	ReloadThis();
 	if( m_inlineRoom.is_valid() )
 		EmitInlineRoom();
@@ -976,7 +998,10 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			Gp length = m_uc.new_gp_ptr();
 			Gp array  = m_uc.new_gp_ptr();
 			Gp t      = m_uc.new_gp_ptr();
-			m_uc.load_u32(length, ContextField(layout.callStackLength));
+			if( m_callStackLength.is_valid() )
+				CallStackLength(length.r32());
+			else
+				m_uc.load_u32(length, ContextField(layout.callStackLength));
 			m_uc.j(finish, sub_c(length, Imm(layout.callStackFrameSize)));
 			m_uc.load(array, ContextField(layout.callStackArray));
 			Mem state = PtrElement(array, length);
