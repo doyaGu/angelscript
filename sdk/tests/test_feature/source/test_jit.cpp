@@ -4304,6 +4304,76 @@ namespace Tiered
 	}
 }
 
+// The deferred functions compiled in a thread of their own while another executes
+// them, see CJITCompiler::CompileDeferred. The results must be the VM's
+static bool TestBackgroundCompilation(asDWORD envFlags, bool &fail)
+{
+	using namespace Tiered;
+	struct SCall { const char *decl; int arg; };
+	static const SCall calls[] = { { "int nested(int)", 20 }, { "int loop(int)", 1000 }, { "int late(int)", 40 }, { "int fact(int)", 10 }, { "int leaf(int)", 7 } };
+	long long sums[2] = { 0, 0 };
+	int compiled = -1, left = -1;
+	asUINT deferred = 0;
+	for( int pass = 0; pass < 2; pass++ )
+	{
+		// The first pass is the VM's, the second compiles in the background
+		CJITCompiler jit(envFlags);
+		jit.SetCompileFilter(NotWarm, 0);
+		if( jit.SetCompileThresholds(1000, 2000) < 0 )
+			TEST_FAILED;
+		asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, pass == 1);
+		if( pass == 1 )
+			engine->SetJITCompiler(&jit);
+		int r = engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL); assert( r >= 0 );
+		RegisterStdString(engine);
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			engine->ShutDownAndRelease();
+			return fail;
+		}
+		// The context and the functions are set up before the thread starts, as the
+		// memory manager of the tests isn't thread safe, and the compilation doesn't
+		// allocate through the engine
+		asIScriptContext *ctx = engine->CreateContext();
+		asIScriptFunction *funcs[sizeof(calls)/sizeof(calls[0])];
+		for( asUINT c = 0; c < sizeof(calls)/sizeof(calls[0]); c++ )
+			funcs[c] = mod->GetFunctionByDecl(calls[c].decl);
+		std::thread worker;
+		if( pass == 1 )
+			worker = std::thread([&jit, mod, &compiled]() { compiled = jit.CompileDeferred(mod); });
+		for( int n = 0; n < 300; n++ )
+			for( asUINT c = 0; c < sizeof(calls)/sizeof(calls[0]); c++ )
+			{
+				ctx->Prepare(funcs[c]);
+				ctx->SetArgDWord(0, calls[c].arg);
+				if( ctx->Execute() != asEXECUTION_FINISHED )
+					TEST_FAILED;
+				sums[pass] += int(ctx->GetReturnDWord());
+			}
+		if( pass == 1 )
+		{
+			worker.join();
+			left = jit.CompileDeferred(mod);
+			deferred = jit.GetStatistics().functionsDeferred;
+		}
+		ctx->Release();
+		engine->ShutDownAndRelease();
+	}
+	if( sums[0] != sums[1] || compiled <= 0 || left != 0 || deferred == 0 )
+	{
+		PRINTF("background: sums %lld %lld, compiled %d, left %d, deferred %u\n", sums[0], sums[1], compiled, left, deferred);
+		TEST_FAILED;
+	}
+	return fail;
+}
+
 static bool TestTiered()
 {
 	using namespace Tiered;
@@ -4348,6 +4418,7 @@ static bool TestTiered()
 		}
 	}
 
+	TestBackgroundCompilation(envFlags, fail);
 	return fail;
 }
 

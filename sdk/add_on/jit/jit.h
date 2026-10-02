@@ -157,6 +157,16 @@ public:
 	// function is compiled. Returns a negative value on failure
 	int SetCompileThresholds(asUINT calls, asUINT iterations);
 
+	// Compiles the functions of the module that the tiered compilation has deferred,
+	// which haven't reached their thresholds yet. Meant to be called from a thread of
+	// its own while the application executes the scripts, so that the functions are
+	// compiled in the background instead of at their first calls: the calls go on in
+	// the VM until the code of a function is installed, and continue in it at the next
+	// call or loop iteration, like when a threshold is reached. The module must not be
+	// built again or discarded meanwhile. Returns the number of functions compiled, or
+	// a negative value if the module is null
+	int CompileDeferred(asIScriptModule *module);
+
 	// Profiles. The virtual and interface calls whose method several classes of the
 	// module implement note the classes of their objects, up to three, and when the
 	// calls of a function have been made that many times, the function is compiled

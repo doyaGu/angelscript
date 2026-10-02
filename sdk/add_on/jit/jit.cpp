@@ -10,6 +10,7 @@
 #include "as_context.h"
 #include "as_scriptengine.h"
 #include "as_scriptfunction.h"
+#include "as_module.h"
 
 #include <asmjit/ujit.h>
 #include <algorithm>
@@ -28,9 +29,8 @@
 //  - Inline the methods that several classes implement for the type of the handle, which
 //    the bytecode doesn't tell for the methods overridden by derived classes
 //    (jit_bytecode.cpp, FindInlinees).
-//  - Compile the functions in a background thread while the VM or the code compiled
-//    before goes on, and note the classes that the calls see while the VM executes the
-//    deferred functions too (TieredEntry below).
+//  - Note the classes that the calls see while the VM executes the deferred functions
+//    too, so that their first code inlines the methods (TieredEntry below).
 //  - Inline calls in the code generated ahead of time, and borrow the references of the
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
@@ -482,6 +482,30 @@ static bool SetTieredEntryArgs(asCScriptFunction *func, const CJITByteCode &code
 	return true;
 }
 
+// The functions are taken from the module, whose list only changes when it is built
+// again or discarded. Each is compiled like when its threshold is reached, so the
+// threads that execute it meanwhile go on in the VM until the code is installed
+int CJITCompiler::CompileDeferred(asIScriptModule *module)
+{
+	if( module == 0 )
+		return asINVALID_ARG;
+	asCModule *mod = static_cast<asCModule*>(module);
+	std::vector<asCScriptFunction*> funcs;
+	for( asUINT n = 0; n < mod->m_scriptFunctions.GetLength(); n++ )
+		funcs.push_back(mod->m_scriptFunctions[n]);
+
+	asJITFunction stub = reinterpret_cast<asJITFunction>(TieredEntry);
+	int compiled = 0;
+	for( size_t n = 0; n < funcs.size(); n++ )
+	{
+		asCScriptFunction *func = funcs[n];
+		if( func && func->funcType == asFUNC_SCRIPT && func->scriptData && func->scriptData->jitFunction == stub )
+			if( m_impl->TierUp(func, false) )
+				compiled++;
+	}
+	return compiled;
+}
+
 int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *output)
 {
 	*output = 0;
@@ -913,8 +937,6 @@ int CJITCompiler::SImpl::ExactEntry(void *impl, asSVMRegisters *regs, asPWORD ji
 // TODO: runtime optimize: The classes of the objects that the virtual and interface
 //                         calls see until the function is compiled could be noted too,
 //                         so that the first code inlines their methods, see SJITProfile.
-//                         The functions could be compiled in a background thread, while
-//                         the VM goes on.
 int CJITCompiler::TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer)
 {
 	asCContext *ctx = static_cast<asCContext*>(regs->ctx);
