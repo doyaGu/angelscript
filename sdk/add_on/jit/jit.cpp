@@ -22,8 +22,9 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Inline calls of imported functions and delegates. They still go through
-//    JIT_CallScript (jit_codegen_call.cpp, EmitScriptCall).
+//  - Call imported functions natively, and the delegates of interface methods like
+//    those of the other script methods. They still go through JIT_CallScript
+//    (jit_codegen_call.cpp, EmitScriptCall).
 //  - Inline the methods of the two or three classes that a call has seen, each checked
 //    for, and those that several classes implement for the type of the handle, which the
 //    bytecode doesn't tell for the methods overridden by derived classes (jit_bytecode.cpp,

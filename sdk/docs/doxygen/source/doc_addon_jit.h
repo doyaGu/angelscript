@@ -535,9 +535,11 @@ RetObj.3       0.040    0.003      0.004    0.003     0.011
 
 \section doc_addon_jit_limits Known limitations
 
- - Imported functions and delegates are called through a helper function that
-   uses the call stack of the VM, so these calls are not faster than with the
-   interpreter.
+ - Imported functions, and the delegates of interface methods and of registered
+   functions, are called through a helper function that uses the call stack of the
+   VM, so these calls are not faster than with the interpreter. The delegates of
+   the other script methods are called natively by the JIT compiled functions, but
+   not by the code generated ahead of time.
  - Unwind information for the generated code is only registered on 64bit Windows,
    and for x86-64 on Linux and AArch64 on Linux and macOS, but not for x86-64 on macOS,
    arm64e, the BSDs, or 64bit ARM Windows. On the other platforms besides 32bit Windows with MSVC, a C++

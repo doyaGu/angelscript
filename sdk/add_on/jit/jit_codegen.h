@@ -178,7 +178,8 @@ protected:
 	void EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj);
 	void EmitScriptAddRef(asUINT idx, const Gp &obj);
 	void EmitScriptRelease(asUINT idx, const Gp &obj);
-	void EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm);
+	void EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra);
+	void EmitDelegateCall(asUINT idx, int funcVar, const Label &delegate, const Label &slow, const Gp &result, bool mark, bool vrInReg);
 	void EmitInlineCall(asUINT idx);
 	void EmitInlineExit(int frame);
 	void EmitMaterialize();
@@ -191,7 +192,7 @@ protected:
 	asCObjectType **ProfileCell(asUINT idx);
 	Gp   EmitCountDown();
 	void EmitRecompile(asUINT idx);
-	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg);
+	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, const Gp *stackPointer = 0);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
 

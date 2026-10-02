@@ -90,6 +90,9 @@ struct SJITObjectLayout
 	int funcType;             // asEFuncType in asCScriptFunction
 	int scriptData;           // ScriptFunctionData* in asCScriptFunction
 	int jitFunction;          // asJITFunction in ScriptFunctionData
+	int objForDelegate;       // void* in asCScriptFunction, the object of a delegate
+	int funcForDelegate;      // asCScriptFunction* in asCScriptFunction, the method of a delegate
+	int vfTableIdx;           // int in asCScriptFunction, where a virtual method is in the virtual function table
 	int refCount;             // asCAtomic in asCScriptObject
 	int gcFlag;               // byte of the gcFlag bit field in asCScriptObject
 	int gcFlagMask;

@@ -89,8 +89,10 @@ void CJITCodeGen::EmitReloadAfterCall(asUINT idx, bool reloadVR)
 // called function natively when possible. Calls of script functions, methods,
 // function pointers, and the constructors of script classes push the call state
 // inline and call the compiled function directly instead, unless it hasn't been
-// compiled or the call stack has reached the call limit
-void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *extra, asPWORD extraImm)
+// compiled or the call stack has reached the call limit. extra is the type of the
+// object for JIT_CALL_ALLOC, and the variable that holds the function pointer for
+// JIT_CALL_PTR
+void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	asCScriptFunction *func = m_code->GetFunction();
@@ -115,7 +117,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		SyncForCall(idx);
 		InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
 		Gp obj = m_uc.new_gp_ptr();
-		alloc->set_arg(0, Imm(int64_t(extraImm)));
+		alloc->set_arg(0, Imm(int64_t(extra)));
 		alloc->set_ret(0, obj);
 
 		Gp var = m_uc.new_gp_ptr();
@@ -154,6 +156,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		// called function itself is only needed in interop mode
 		Gp target;
 		Gp method;
+		Label delegate;
 		if( (kind == JIT_CALL_SCRIPT || kind == JIT_CALL_CONSTRUCT) && callee != m_frames[0].code->GetFunction() )
 		{
 			target = m_uc.new_gp_ptr();
@@ -168,15 +171,25 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		}
 		else if( kind == JIT_CALL_PTR )
 		{
-			// Everything but script functions is left to the helper
+			// The function pointer is loaded from its variable wherever it is needed,
+			// so that no register holds it across the call. Script functions are
+			// called here, and the delegates of script methods by the cold code of
+			// EmitDelegateCall, where the stack is static and passed to the callee.
+			// Everything else is left to the helper
+			Gp func = LoadPtr(int(extra));
 			Gp type = m_uc.new_gp32();
-			m_uc.j(slow, test_z(*extra));
-			m_uc.load_u32(type, Addr(*extra, layout.funcType));
+			m_uc.j(slow, test_z(func));
+			m_uc.load_u32(type, Addr(func, layout.funcType));
+			if( m_staticStack && m_spInArg )
+			{
+				delegate = m_uc.new_label();
+				m_uc.j(delegate, cmp_eq(type, Imm(int(asFUNC_DELEGATE))));
+			}
 			m_uc.j(slow, cmp_ne(type, Imm(int(asFUNC_SCRIPT))));
 			target = m_uc.new_gp_ptr();
-			m_uc.load(target, Addr(*extra, layout.scriptData));
+			m_uc.load(target, Addr(func, layout.scriptData));
 			m_uc.load(target, Addr(target, layout.jitFunction));
-			method = *extra;
+			method = func;
 		}
 		if( target.is_valid() )
 		{
@@ -196,6 +209,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
 		bool vrInReg = !callee || kind == JIT_CALL_PTR || CJITByteCode::ReturnsInVR(callee);
 		vrReturned = EmitNativeCall(idx, target, method, r, slow, !reload, vrInReg);
+		if( delegate.is_valid() )
+			EmitDelegateCall(idx, int(extra), delegate, slow, r, !reload, vrInReg);
 		if( reload || m_staticStack )
 			ReloadStackAfter(idx);
 		else
@@ -214,14 +229,18 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 			StoreFrame();
 		SetPC(instr.pos);
 	}
+	// The function pointer is loaded again here, see above
+	Gp funcPtr;
+	if( kind == JIT_CALL_PTR )
+		funcPtr = LoadPtr(int(extra));
 	InvokeNode *call = Invoke((const void*)JIT_CallScript, FuncSignature::build<int, asSVMRegisters*, int, int, asPWORD, asUINT>());
 	SetRegsArg(call, 0);
 	call->set_arg(1, Imm(kind));
 	call->set_arg(2, Imm(funcId));
-	if( extra )
-		call->set_arg(3, *extra);
+	if( kind == JIT_CALL_PTR )
+		call->set_arg(3, funcPtr);
 	else
-		call->set_arg(3, Imm(int64_t(extraImm)));
+		call->set_arg(3, Imm(int64_t(extra)));
 	call->set_arg(4, m_callLimit);
 	call->set_ret(0, r);
 	EmitLeaveIf(r);
@@ -234,6 +253,49 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, const Gp *ext
 	m_uc.bind(done);
 	EmitDematerialize();
 	EmitReloadAfterCall(idx, !vrReturned);
+}
+
+// Calls the method of a delegate natively, like the VM does for asBC_CallPtr: the
+// object of the delegate is pushed below the arguments, and a virtual method is
+// looked up in the virtual function table of the object. The delegates of interface
+// methods and of registered functions are left to the helper. This is cold code
+// after the call of a plain function pointer, which it rejoins
+void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegate, const Label &slow, const Gp &result, bool mark, bool vrInReg)
+{
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Label done       = m_uc.new_label();
+	Label notVirtual = m_uc.new_label();
+	BaseNode *cold = BeginCold(delegate);
+	Gp func   = LoadPtr(funcVar);
+	Gp obj    = m_uc.new_gp_ptr();
+	Gp method = m_uc.new_gp_ptr();
+	Gp type   = m_uc.new_gp32();
+	m_uc.load(obj, Addr(func, layout.objForDelegate));
+	m_uc.load(method, Addr(func, layout.funcForDelegate));
+	m_uc.j(slow, test_z(obj));
+	m_uc.load_u32(type, Addr(method, layout.funcType));
+	m_uc.j(notVirtual, cmp_ne(type, Imm(int(asFUNC_VIRTUAL))));
+	Gp table = m_uc.new_gp_ptr();
+	Gp index = m_uc.new_gp_ptr();
+	m_uc.load(table, Addr(obj, layout.objectType));
+	m_uc.load(table, Addr(table, layout.virtualFunctionTable));
+	m_uc.load_u32(index, Addr(method, layout.vfTableIdx));
+	m_uc.load(method, PtrElement(table, index));
+	m_uc.load_u32(type, Addr(method, layout.funcType));
+	m_uc.bind(notVirtual);
+	m_uc.j(slow, cmp_ne(type, Imm(int(asFUNC_SCRIPT))));
+	Gp target = m_uc.new_gp_ptr();
+	m_uc.load(target, Addr(method, layout.scriptData));
+	m_uc.load(target, Addr(target, layout.jitFunction));
+	m_uc.j(slow, test_z(target));
+	if( m_options.tieredEntry && !m_options.interop )
+		m_uc.j(slow, cmp_eq(target, PtrConst(asPWORD(m_options.tieredEntry))));
+	Gp sp = m_uc.new_gp_ptr();
+	m_uc.sub(sp, StackPointer(), Imm(PTR_BYTES));
+	m_uc.store(mem_ptr(sp), obj);
+	EmitNativeCall(idx, target, method, result, slow, mark, vrInReg, &sp);
+	EndCold(cold, done);
+	m_uc.bind(done);
 }
 
 // Emits the code of the called function in place, in a frame of its own that starts
@@ -388,9 +450,9 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		BaseNode *cold = BeginCold(call);
 		m_spOffset = StackOffset(idx);
 		if( virtualCall )
-			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0, 0);
+			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0);
 		else
-			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0, 0);
+			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0);
 
 		// The VM goes on after the call if the function has set a line callback, so
 		// that both paths continue where the suspend requests are checked
@@ -701,7 +763,7 @@ void CJITCodeGen::EmitRecompile(asUINT idx)
 // value register is live, and true is returned then. In interop mode the current
 // function of the context is set to callee, and the call state isn't marked, see
 // JITFunction
-bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg)
+bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, const Gp *stackPointer)
 {
 	if( FailIfHidden() )
 		return false;
@@ -728,7 +790,9 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	m_uc.store(state, FramePointer(m_frameBase));
 	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code->GetFunction())));
 	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code->GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
-	Gp sp = StackPointer();
+	// The stack pointer passed to the callee is the current one, unless the caller
+	// has pushed something below it, see EmitDelegateCall
+	Gp sp = stackPointer ? *stackPointer : StackPointer();
 	m_uc.store(PtrAt(state, 3), sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
 #ifdef JIT_NATIVE_RETURN
@@ -929,7 +993,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		else if( instr.flags & JIT_INSTR_INLINE )
 			EmitInlineCall(idx);
 		else
-			EmitScriptCall(idx, JIT_CALL_SCRIPT, asBC_INTARG(bc), 0, 0);
+			EmitScriptCall(idx, JIT_CALL_SCRIPT, asBC_INTARG(bc), 0);
 		break;
 
 	case asBC_CALLINTF:
@@ -951,7 +1015,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 				m_uc.bind(cont);
 				m_callsProfiled++;
 			}
-			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(bc), 0, 0);
+			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(bc), 0);
 		}
 		break;
 
@@ -959,7 +1023,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		if( m_options.noScriptCalls )
 			Bail(idx);
 		else
-			EmitScriptCall(idx, JIT_CALL_BOUND, asBC_INTARG(bc), 0, 0);
+			EmitScriptCall(idx, JIT_CALL_BOUND, asBC_INTARG(bc), 0);
 		break;
 
 	case asBC_CallPtr:
@@ -967,8 +1031,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			Bail(idx);
 		else
 		{
-			Gp func = LoadPtr(asBC_SWORDARG1(bc));
-			EmitScriptCall(idx, JIT_CALL_PTR, 0, &func, 0);
+			EmitScriptCall(idx, JIT_CALL_PTR, 0, asBC_SWORDARG1(bc));
 		}
 		break;
 
@@ -1733,7 +1796,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				if( m_options.noScriptCalls )
 					Bail(idx);
 				else
-					EmitScriptCall(idx, JIT_CALL_ALLOC, func, 0, asPWORD(objType));
+					EmitScriptCall(idx, JIT_CALL_ALLOC, func, asPWORD(objType));
 			}
 			else
 			{
