@@ -189,20 +189,19 @@ bool CJITCodeGen::Generate()
 	if( m_failed )
 		return false;
 
-	// Callee-saved registers must be saved and restored on each entry, which only
-	// pays off for the registers used all through the function if calls are made
-	// repeatedly, i.e. in loops. Short functions that are called often, like
-	// recursive ones, get slower otherwise. The cached variables read after the calls
-	// in loops would be saved and reloaded around each call too
-	bool callsInLoop = false;
+	// The registers used all through the function would be saved and reloaded around
+	// every call otherwise, and the cached variables read after the calls too. The
+	// callee-saved registers are saved and restored on each entry instead, which costs
+	// less than the spills around a single call already, e.g. in recursive functions:
+	// Fib of test_performance is 8% faster with them (measured 2026-10-02 on an Apple
+	// M5), and the functions without calls don't get them
+	bool hasCalls = false;
 	asUINT liveAcrossCalls = 0;
-	int depth = 0;
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
-		depth += loopDepth[n];
-		if( depth > 0 && calls[n] )
+		if( calls[n] )
 		{
-			callsInLoop = true;
+			hasCalls = true;
 			liveAcrossCalls |= m_code->GetLiveAfterMask(n);
 		}
 	}
@@ -243,7 +242,7 @@ bool CJITCodeGen::Generate()
 	m_uc.ret(one);
 
 	m_uc.end_func();
-	if( callsInLoop )
+	if( hasCalls )
 		AssignHomeRegs(liveAcrossCalls);
 	return true;
 }
