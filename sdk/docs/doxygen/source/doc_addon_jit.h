@@ -290,15 +290,16 @@ class of the module that implements them, or all the classes that inherit a virt
 method, have the same implementation, see \ref doc_addon_jit_4. Where several classes
 of the module implement a method differently, the bytecode doesn't tell which of
 them the objects at a call are of, but most calls only ever see objects of one class,
-which is what HotSpot builds on too. Such calls note the classes of their objects in
-a profile of the compiled code if one of the implementations is small enough to be
-compiled in place, and the compiled code counts down their calls. When they have
-been made the number of times set with
+which is what HotSpot builds on too, and few see more than two or three. Such calls
+note the classes of their objects, up to three, in a profile of the compiled code if
+one of the implementations is small enough to be compiled in place, and the compiled
+code counts down their calls. When they have been made the number of times set with
 \ref CJITCompiler::SetProfileThreshold "SetProfileThreshold", 10000 by default, the
-function is compiled again if a call has seen only one class since the code was
-compiled, with the method of that class compiled in place of the call, which the
-object is checked for. The calls are counted again otherwise, and a threshold of 0
-doesn't note the classes.
+function is compiled again if a call has seen a class since the code was compiled,
+with the methods of the classes seen compiled in place of the call, each after a
+check of the class of the object, and once for the classes that share an
+implementation. The calls are counted again otherwise, and a threshold of 0 doesn't
+note the classes.
 
 \code
 jit->SetProfileThreshold(1000);
@@ -307,9 +308,8 @@ jit->SetProfileThreshold(1000);
 The objects of other classes call the method as usual. The calls that haven't seen
 an object yet, e.g. those of a later loop, go on noting their classes in the new
 code, so that the function can be compiled again for them, 3 times at most. The calls
-compiled in place note the objects of other classes too, and if the function is
-compiled again for another call, they call the method then, as they have seen
-several classes. Only the classes of the module of the function are
+compiled in place note the objects of other classes too, which are compiled in place
+as well if the function is compiled again. Only the classes of the module of the function are
 compared with, as the other modules and their classes may be discarded while the
 function still exists. The thread whose call has counted down compiles the function
 again, leaves that call to the VM, and goes on in the new code after it, as do the
@@ -322,10 +322,13 @@ note the classes once they are compiled, not while the VM executes them.
 Calling a method that 2 classes override 10 million times in two loops, each with
 the objects of one class, took 0.011 seconds instead of 0.025 with the profiles, and
 calling an interface method of 2 classes the same way 0.009 seconds instead of 0.027.
-The function is compiled 3 times in each, once more for the second loop. None of the
+The function is compiled 3 times in each, once more for the second loop. Calling an
+interface method on the objects of 3 classes in turn 12 million times took 0.084
+seconds instead of 0.19 on an Apple M5 Pro once the function was compiled again with
+the three methods in place, the same as with the objects of one class. None of the
 other tests of the test_performance project make such calls, so their times don't
 change, and with the threshold 2 the feature tests of the library compile 6 of their
-8756 functions again.
+8820 functions again.
 
 \section doc_addon_jit_indexers Indexers
 
@@ -599,8 +602,8 @@ RetObj.3       0.040    0.003      0.004    0.003     0.011
    \ref doc_addon_jit_profiles "profiles". The VM doesn't note the classes of the
    objects whose methods the functions call while it executes them, so the first
    code of the deferred functions compiles none of those methods in place.
- - The profiles only lead to the methods of one class being compiled in place at a
-   call. The calls that see objects of two or three classes call the methods.
+ - The profiles note up to three classes at a call. The objects of further classes
+   call the methods.
  - Only x86-64, AArch64, and 32bit x86 are supported, as those are the
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
@@ -655,13 +658,13 @@ the class of the object is checked for the method. The objects of other classes,
 such as those of other modules that derive from shared classes, call the methods
 as usual. Calling a method that 3 classes inherit in a loop took 0.007 seconds
 instead of 0.026 for 10 million calls when it is compiled in place. The methods that
-several classes implement differently are compiled in place for the class that the
+several classes implement differently are compiled in place for the classes that the
 \ref doc_addon_jit_profiles "profile" has seen, once the function is compiled again.
-Until then each such call compares the class of the object with the one it has
-noted, and notes the class if there is none, or that it has seen several otherwise,
-and counts down the count that all the calls of the code share. The call compiled in
-place for the class compares the class of the object with it, and only the objects
-of other classes are noted and count down. The function is compiled again by a call
+Until then each such call compares the class of the object with those it has noted,
+and notes the class if there is room, and counts down the count that all the calls
+of the code share. The call compiled in place for the classes compares the class of
+the object with each of them, and only the objects of other classes are noted and
+count down. The function is compiled again by a call
 of the add-on, which the code makes when the count runs out. Recursive
 functions and functions with catch blocks are always called. The code
 compiled in place works on the stack frame that the function would have if it was

@@ -188,8 +188,9 @@ protected:
 	void EmitInlineRoom();
 	void EmitStackBlockCheck(int extent, const Label &none);
 	void GetInlineRoom(asUINT idx, int &extent, int &depth) const;
-	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow, asCObjectType **seen);
-	asCObjectType **ProfileCell(asUINT idx);
+	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow, SJITSeenClasses *seen);
+	void EmitNoteClass(SJITSeenClasses *seen, const Gp &type);
+	SJITSeenClasses *ProfileCell(asUINT idx);
 	Gp   EmitCountDown();
 	void EmitRecompile(asUINT idx);
 	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, const Gp *stackPointer = 0);

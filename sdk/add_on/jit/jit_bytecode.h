@@ -27,7 +27,7 @@ enum EJITInstrFlags
 	JIT_INSTR_BAIL        = 0x08, // the instruction must always return control to the VM
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
-	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinee
+	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinees
 	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
@@ -133,29 +133,43 @@ static const asUINT JIT_FRAME_BIT = 0x80000000u;
 #define JIT_INPLACE_REFCOUNT
 #endif
 
-// The classes of the objects that the virtual and interface calls marked with
-// JIT_INSTR_PROFILE have seen, by the function and the index of the call, for the
-// calls whose method several classes implement. The calls that have seen several
-// note JIT_PROFILE_MANY, and so do those inlined for the class seen before when they
-// see another. The compiled code counts down the calls, and compiles the function
-// again with the classes seen when the count runs out, if a call has seen a new one,
-// see SJITCodeGenOptions. The code may note the classes in several threads at once,
-// which only loses counts or classes, as the classes are only compared with those of
-// the module of the call. The count runs out when it isn't positive, so a count that
-// a thread takes below 0 while another starts it again runs out at the next call
-struct SJITProfile
+// The classes that a call has seen, in the order seen, null after the last. The calls
+// that see more classes than there is room for don't note them
+static const asUINT JIT_PROFILE_CLASSES = 3;
+struct SJITSeenClasses
 {
-	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*> classes;
-	int countdown;
+	asCObjectType *types[JIT_PROFILE_CLASSES];
 
-	// Returns the class noted for the call, or null
-	asCObjectType *Find(asCScriptFunction *func, asUINT instrIdx) const;
-	// Returns true if a call has seen only one class of the module of its function,
-	// which it hadn't in the profile that the code was compiled with
-	bool HasNewClass(const SJITProfile &compiledWith) const;
+	bool Has(const asCObjectType *type) const
+	{
+		for( asUINT n = 0; n < JIT_PROFILE_CLASSES; n++ )
+			if( types[n] == type )
+				return true;
+		return false;
+	}
 };
 
-static asCObjectType *const JIT_PROFILE_MANY = reinterpret_cast<asCObjectType*>(asPWORD(1));
+// The classes of the objects that the virtual and interface calls marked with
+// JIT_INSTR_PROFILE have seen, by the function and the index of the call, for the
+// calls whose method several classes implement. The calls inlined for the classes seen
+// before note the others. The compiled code counts down the calls, and compiles the
+// function again with the classes seen when the count runs out, if a call has seen a
+// new one, see SJITCodeGenOptions. The code may note the classes in several threads
+// at once, which only loses counts or classes, as the classes are only compared with
+// those of the module of the call. The count runs out when it isn't positive, so a
+// count that a thread takes below 0 while another starts it again runs out at the
+// next call
+struct SJITProfile
+{
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses> classes;
+	int countdown;
+
+	// Returns the classes noted for the call, or null
+	const SJITSeenClasses *Find(asCScriptFunction *func, asUINT instrIdx) const;
+	// Returns true if a call has seen a class of the module of its function that it
+	// hadn't in the profile that the code was compiled with
+	bool HasNewClass(const SJITProfile &compiledWith) const;
+};
 
 // The functions that Analyse lets the code generator emit in place of their calls
 struct SJITInlineOptions
@@ -166,6 +180,18 @@ struct SJITInlineOptions
 	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
 	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
 	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
+};
+
+class CJITByteCode;
+
+// A function emitted in place of a call, see CJITByteCode::GetInlinees, and the
+// classes that the object of an asBC_CALLINTF must be of for it. Empty for asBC_CALL,
+// and for the virtual methods that several classes inherit, for which the class of
+// the object must have the inlined method in its table
+struct SJITInlinee
+{
+	std::shared_ptr<CJITByteCode> code;
+	std::vector<asCObjectType*>   types;
 };
 
 // A call of an indexer that is compiled in place, see CJITCompiler::AddIndexer
@@ -292,16 +318,16 @@ public:
 	// Returns the instruction indices targeted by a JMPP instruction, in case order
 	const std::vector<int> &GetSwitchTargets(asUINT instrIdx) const;
 
-	// Returns the analysis of the function called by an instruction marked with
-	// JIT_INSTR_INLINE
-	const CJITByteCode *GetInlinee(asUINT instrIdx) const;
+	// Returns the functions emitted in place of an instruction marked with
+	// JIT_INSTR_INLINE: one for asBC_CALL, and for asBC_CALLINTF one for each
+	// implementation of the method among the classes that the object is checked for,
+	// which are the only class of the module that can call it, or those that the
+	// profile has seen
+	const std::vector<SJITInlinee> &GetInlinees(asUINT instrIdx) const;
 
-	// Returns the class that the object must be of for an inlined asBC_CALLINTF to
-	// call the inlined method, which is the only class of the module that can, or the
-	// one that the profile has seen. Null for asBC_CALL, and for the virtual methods
-	// that several classes inherit, for which the class of the object must have the
-	// inlined method in its table
-	asCObjectType *GetInlineObjectType(asUINT instrIdx) const;
+	// True if one of the functions emitted in place of the instruction has sync points
+	// with the arguments borrowed from the caller, see HasSyncPoints
+	bool InlineesHaveSyncPoints(asUINT instrIdx) const;
 
 	// Returns the indexer called by an instruction marked with JIT_INSTR_INDEXER
 	const SJITIndexerCall *GetIndexer(asUINT instrIdx) const;
@@ -360,6 +386,7 @@ protected:
 	void AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots);
 	struct SInlineSearch;
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
+	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
 	void FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 	void AnalyseBorrows();
@@ -402,8 +429,7 @@ protected:
 	std::vector<int>        m_fieldAccess; // per instruction the field read or written, or -1
 	std::vector<asUINT>     m_fieldMask;   // per instruction mask of the fields held in registers, and JIT_THIS_HELD
 	std::vector<int>        m_stackDepth;  // per instruction dwords on the stack above the variables, or -1
-	std::map<asUINT, std::shared_ptr<CJITByteCode> > m_inlinees; // by instruction, shared by the calls of a function
-	std::map<asUINT, asCObjectType*> m_inlineObjTypes; // by instruction, for the inlined asBC_CALLINTF
+	std::map<asUINT, std::vector<SJITInlinee> > m_inlinees; // by instruction, see GetInlinees
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
 	std::map<asUINT, SJITIndexerCall> m_indexers; // by instruction, see GetIndexer
 	asUINT                  m_borrowableParams; // see GetBorrowableParams

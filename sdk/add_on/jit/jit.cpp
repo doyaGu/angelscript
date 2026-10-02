@@ -25,10 +25,9 @@
 //  - Call imported functions natively, and the delegates of interface methods like
 //    those of the other script methods. They still go through JIT_CallScript
 //    (jit_codegen_call.cpp, EmitScriptCall).
-//  - Inline the methods of the two or three classes that a call has seen, each checked
-//    for, and those that several classes implement for the type of the handle, which the
-//    bytecode doesn't tell for the methods overridden by derived classes (jit_bytecode.cpp,
-//    FindInlinees).
+//  - Inline the methods that several classes implement for the type of the handle, which
+//    the bytecode doesn't tell for the methods overridden by derived classes
+//    (jit_bytecode.cpp, FindInlinees).
 //  - Compile the functions in a background thread while the VM or the code compiled
 //    before goes on, and note the classes that the calls see while the VM executes the
 //    deferred functions too (TieredEntry below).

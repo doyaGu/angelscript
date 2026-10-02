@@ -305,19 +305,22 @@ void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegat
 // to do. The function is called otherwise. Where it must return to the VM, the exit
 // of its frame pushes the call state, see EmitInlineExit, and where it calls
 // functions, its frame is materialized, see EmitMaterialize. A method called through
-// asBC_CALLINTF is inlined for objects of one class, or of the classes that inherit
-// the method, and the others call the method. If the class is the one seen before by
-// the call, the others are noted in the profile, and count down its calls.
-// The calls in the inlined functions only check the class, as the outermost call
-// has checked the room for them, and that the VM has nothing to do if the functions
-// called before may have given it something. The VM makes the call otherwise
+// asBC_CALLINTF is inlined for the objects of the classes that implement it the same
+// way, or that the call has seen, each checked for and emitted once per
+// implementation, or of the classes that inherit the method, and the others call the
+// method. The objects of other classes than those seen are noted in the profile, and
+// count down its calls. The calls in the inlined functions only check the class, as
+// the outermost call has checked the room for them, and that the VM has nothing to
+// do if the functions called before may have given it something. The VM makes the
+// call otherwise
 void CJITCodeGen::EmitInlineCall(asUINT idx)
 {
-	const CJITByteCode *code = m_code->GetInlinee(idx);
-	asCScriptFunction *func = code->GetFunction();
+	const std::vector<SJITInlinee> &inlinees = m_code->GetInlinees(idx);
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	bool virtualCall = instr.op == asBC_CALLINTF;
-	asCObjectType *objType = m_code->GetInlineObjectType(idx);
+	// The implementations of a method take the same arguments, which is all that is
+	// needed of the function until one is chosen
+	asCScriptFunction *func = inlinees[0].code->GetFunction();
 	int base = -StackOffset(idx) / 4;
 	int caller = m_frame;
 	asUINT borrowed = m_code->GetBorrowedArgs(idx);
@@ -335,39 +338,15 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	// borrow them, see CJITByteCode::AnalyseBorrows
 	bool ownArgs = borrowed && call.is_valid();
 	Label own = ownArgs ? m_uc.new_label() : call;
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Gp type;
 	if( virtualCall )
 	{
 		// The call raises the exception for a null object
-		const SJITObjectLayout &layout = JIT_GetObjectLayout();
-		Gp type = m_uc.new_gp_ptr();
+		type = m_uc.new_gp_ptr();
 		m_uc.load(type, Stack(0));
 		m_uc.j(own, test_z(type));
 		m_uc.load(type, Addr(type, layout.objectType));
-		asCObjectType **seen = objType ? ProfileCell(idx) : 0;
-		if( seen )
-		{
-			Label other = m_uc.new_label();
-			m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(objType))));
-			BaseNode *cold = BeginCold(other);
-			Gp many = m_uc.new_gp_ptr();
-			m_uc.mov(many, Imm(int64_t(asPWORD(JIT_PROFILE_MANY))));
-			m_uc.store(mem_ptr(PtrConst(asPWORD(seen))), many);
-			m_uc.j(own, scmp_gt(EmitCountDown(), Imm(0)));
-			EmitRecompile(idx);
-			EndCold(cold, own);
-			m_callsProfiled++;
-		}
-		else if( objType )
-			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(objType))));
-		else
-		{
-			// The classes that inherit the method have it in the same place of their
-			// tables as the class declaring it
-			asCScriptFunction *method = func->engine->scriptFunctions[asBC_INTARG(instr.bc)];
-			m_uc.load(type, Addr(type, layout.virtualFunctionTable));
-			m_uc.load(type, Addr(type, method->vfTableIdx * PTR_BYTES));
-			m_uc.j(own, cmp_ne(type, PtrConst(asPWORD(func))));
-		}
 	}
 	if( checkVM )
 	{
@@ -379,21 +358,69 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	if( caller == 0 )
 	{
 		// The exits push a call state for each level of inlined calls
-		const SJITContextLayout &layout = JIT_GetContextLayout();
+		const SJITContextLayout &ctxLayout = JIT_GetContextLayout();
 		int extent, depth;
 		GetInlineRoom(idx, extent, depth);
-		Imm words = Imm(depth * int(layout.callStackFrameSize));
+		Imm words = Imm(depth * int(ctxLayout.callStackFrameSize));
 		if( m_inlineRoom.is_valid() )
 			m_uc.j(own, ucmp_lt(m_inlineRoom, words));
 		else
 		{
 			Gp length = m_uc.new_gp32();
 			Gp room   = m_uc.new_gp32();
-			m_uc.load_u32(length, ContextField(layout.callStackLength));
-			m_uc.load_u32(room, ContextField(layout.callStackCapacity));
+			m_uc.load_u32(length, ContextField(ctxLayout.callStackLength));
+			m_uc.load_u32(room, ContextField(ctxLayout.callStackCapacity));
 			m_uc.sub(room, room, length);
 			m_uc.j(own, ucmp_lt(room, words));
 			EmitStackBlockCheck(extent, own);
+		}
+	}
+
+	// Which implementation the object calls. The first class of the first one falls
+	// through to its code, the others jump to theirs
+	std::vector<Label> bodies(inlinees.size());
+	if( virtualCall )
+	{
+		if( inlinees.size() == 1 && inlinees[0].types.empty() )
+		{
+			// The classes that inherit the method have it in the same place of their
+			// tables as the class declaring it
+			asCScriptFunction *method = func->engine->scriptFunctions[asBC_INTARG(instr.bc)];
+			Gp impl = m_uc.new_gp_ptr();
+			m_uc.load(impl, Addr(type, layout.virtualFunctionTable));
+			m_uc.load(impl, Addr(impl, method->vfTableIdx * PTR_BYTES));
+			m_uc.j(own, cmp_ne(impl, PtrConst(asPWORD(func))));
+		}
+		else
+		{
+			for( asUINT k = 1; k < inlinees.size(); k++ )
+			{
+				bodies[k] = m_uc.new_label();
+				for( asUINT t = 0; t < inlinees[k].types.size(); t++ )
+					m_uc.j(bodies[k], cmp_eq(type, PtrConst(asPWORD(inlinees[k].types[t]))));
+			}
+			const std::vector<asCObjectType*> &first = inlinees[0].types;
+			if( first.size() > 1 )
+			{
+				bodies[0] = m_uc.new_label();
+				for( asUINT t = 0; t + 1 < first.size(); t++ )
+					m_uc.j(bodies[0], cmp_eq(type, PtrConst(asPWORD(first[t]))));
+			}
+			Label other = m_uc.new_label();
+			m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(first.back()))));
+
+			// An object of another class calls the method, and is noted if the call
+			// keeps a profile, which counts down its calls then
+			BaseNode *cold = BeginCold(other);
+			SJITSeenClasses *seen = ProfileCell(idx);
+			if( seen )
+			{
+				EmitNoteClass(seen, type);
+				m_uc.j(own, scmp_gt(EmitCountDown(), Imm(0)));
+				EmitRecompile(idx);
+				m_callsProfiled++;
+			}
+			EndCold(cold, own);
 		}
 	}
 	if( ownArgs )
@@ -407,41 +434,56 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		EndCold(cold, call);
 	}
 
-	SFrame frame;
-	frame.code     = code;
-	frame.base     = base;
-	frame.caller   = caller;
-	frame.callIdx  = idx;
-	frame.ret      = m_uc.new_label();
-	frame.exit     = m_uc.new_label();
-	frame.exitUsed = false;
-	frame.borrowed = borrowed;
-	frame.retChecked = true;
-	m_frames.push_back(frame);
-	int inlined = int(m_frames.size()) - 1;
-	SwitchFrame(inlined);
-	CreateCachedSlots();
-	CreateBlockLabels();
+	// The code of each implementation, which continue together
+	Label join = m_uc.new_label();
+	bool suspendBefore = m_suspendChecked;
+	bool retChecked = true;
+	bool inlineCalls = false;
+	for( asUINT k = 0; k < inlinees.size(); k++ )
+	{
+		if( bodies[k].is_valid() )
+			m_uc.bind(bodies[k]);
+		const CJITByteCode *code = inlinees[k].code.get();
+		asCScriptFunction *impl = code->GetFunction();
 
-	// Only the object variables on the heap are cleared, like in EmitDirectEntry
-	const asCArray<asSScriptVariable*> &vars = func->scriptData->variables;
-	for( asUINT n = 0; n < vars.GetLength(); n++ )
-		if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
-			m_uc.store_zero_reg(Var(vars[n]->stackOffset));
-	ReloadSlots(code->GetLiveInMask(0));
+		SFrame frame;
+		frame.code     = code;
+		frame.base     = base;
+		frame.caller   = caller;
+		frame.callIdx  = idx;
+		frame.ret      = m_uc.new_label();
+		frame.exit     = m_uc.new_label();
+		frame.exitUsed = false;
+		frame.borrowed = borrowed;
+		frame.retChecked = true;
+		m_frames.push_back(frame);
+		int inlined = int(m_frames.size()) - 1;
+		SwitchFrame(inlined);
+		CreateCachedSlots();
+		CreateBlockLabels();
 
-	// The function starts where the suspend requests are checked, if they may have
-	// been made, see EmitBody
-	if( checkVM )
-		m_suspendChecked = true;
-	std::vector<bool> calls(code->GetInstructions().size());
-	EmitBody(calls);
-	m_uc.bind(m_frames[inlined].ret);
-	SwitchFrame(caller);
-	bool retChecked = m_frames[inlined].retChecked;
-	m_inlineCalls = false;
-	for( asUINT n = 0; n < calls.size(); n++ )
-		m_inlineCalls = m_inlineCalls || calls[n];
+		// Only the object variables on the heap are cleared, like in EmitDirectEntry
+		const asCArray<asSScriptVariable*> &vars = impl->scriptData->variables;
+		for( asUINT n = 0; n < vars.GetLength(); n++ )
+			if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
+				m_uc.store_zero_reg(Var(vars[n]->stackOffset));
+		ReloadSlots(code->GetLiveInMask(0));
+
+		// The function starts where the suspend requests are checked, if they may have
+		// been made, see EmitBody
+		m_suspendChecked = checkVM || suspendBefore;
+		std::vector<bool> calls(code->GetInstructions().size());
+		EmitBody(calls);
+		m_uc.bind(m_frames[inlined].ret);
+		SwitchFrame(caller);
+		retChecked = retChecked && m_frames[inlined].retChecked;
+		for( asUINT n = 0; n < calls.size(); n++ )
+			inlineCalls = inlineCalls || calls[n];
+		if( k + 1 < inlinees.size() )
+			m_uc.j(join);
+	}
+	m_uc.bind(join);
+	m_inlineCalls = inlineCalls;
 	m_callsInlined++;
 
 	if( caller == 0 )
@@ -514,7 +556,11 @@ static void AddInlineRoom(const CJITByteCode *code, int base, int level, int &ex
 	const std::vector<SJITInstr> &instrs = code->GetInstructions();
 	for( asUINT n = 0; n < instrs.size(); n++ )
 		if( instrs[n].flags & JIT_INSTR_INLINE )
-			AddInlineRoom(code->GetInlinee(n), base + int(func->scriptData->variableSpace) + code->GetStackDepth(n), level + 1, extent, depth);
+		{
+			const std::vector<SJITInlinee> &inlinees = code->GetInlinees(n);
+			for( asUINT k = 0; k < inlinees.size(); k++ )
+				AddInlineRoom(inlinees[k].code.get(), base + int(func->scriptData->variableSpace) + code->GetStackDepth(n), level + 1, extent, depth);
+		}
 }
 
 // The dwords below the frame pointer that the frames of the function inlined by the
@@ -524,7 +570,9 @@ void CJITCodeGen::GetInlineRoom(asUINT idx, int &extent, int &depth) const
 {
 	extent = 0;
 	depth  = 0;
-	AddInlineRoom(m_code->GetInlinee(idx), -StackOffset(idx) / 4, 1, extent, depth);
+	const std::vector<SJITInlinee> &inlinees = m_code->GetInlinees(idx);
+	for( asUINT k = 0; k < inlinees.size(); k++ )
+		AddInlineRoom(inlinees[k].code.get(), -StackOffset(idx) / 4, 1, extent, depth);
 }
 
 // Hands an inlined function to the VM at the program pointer in m_bailPC, with the
@@ -655,7 +703,7 @@ CJITCodeGen::Gp CJITCodeGen::FramePointer(int base)
 // stack, like asCContext::CallInterfaceMethod. Jumps to slow if there is no object
 // or it doesn't implement the interface, for the VM to raise the exception. The class
 // of the object is noted in seen unless it is null, see SJITProfile
-CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Label &slow, asCObjectType **seen)
+CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Label &slow, SJITSeenClasses *seen)
 {
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
 	const uint32_t ptrShift = Is64Bit() ? 3 : 2;
@@ -665,23 +713,13 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	m_uc.load(type, Addr(type, layout.objectType));
 	if( seen )
 	{
-		// The first class is noted, and JIT_PROFILE_MANY once another one comes.
-		// Another thread may have noted the same class since the compare
+		// Most calls see the class noted first
 		Gp cell = PtrConst(asPWORD(seen));
-		Gp noted = m_uc.new_gp_ptr();
 		Label other = m_uc.new_label();
-		Label first = m_uc.new_label();
 		Label cont  = m_uc.new_label();
 		m_uc.j(other, cmp_ne(type, mem_ptr(cell)));
 		BaseNode *cold = BeginCold(other);
-		m_uc.load(noted, mem_ptr(cell));
-		m_uc.j(first, test_z(noted));
-		m_uc.j(cont, cmp_eq(noted, type));
-		m_uc.mov(noted, Imm(int64_t(asPWORD(JIT_PROFILE_MANY))));
-		m_uc.store(mem_ptr(cell), noted);
-		m_uc.j(cont);
-		m_uc.bind(first);
-		m_uc.store(mem_ptr(cell), type);
+		EmitNoteClass(seen, type);
 		EndCold(cold, cont);
 		m_uc.bind(cont);
 	}
@@ -718,9 +756,30 @@ CJITCodeGen::Gp CJITCodeGen::EmitFindMethod(asCScriptFunction *method, const Lab
 	return found;
 }
 
+// Notes the class of the object in the classes seen by the call, in the first place
+// that is free, unless it is noted already or there is no place left. Another thread
+// may note a class in the same place at the same time, which loses one of them
+void CJITCodeGen::EmitNoteClass(SJITSeenClasses *seen, const Gp &type)
+{
+	Gp cell  = PtrConst(asPWORD(seen));
+	Gp noted = m_uc.new_gp_ptr();
+	Label done = m_uc.new_label();
+	for( asUINT n = 0; n < JIT_PROFILE_CLASSES; n++ )
+	{
+		Label next = m_uc.new_label();
+		m_uc.load(noted, Addr(cell, int(n * PTR_BYTES)));
+		m_uc.j(done, cmp_eq(noted, type));
+		m_uc.j(next, test_nz(noted));
+		m_uc.store(Addr(cell, int(n * PTR_BYTES)), type);
+		m_uc.j(done);
+		m_uc.bind(next);
+	}
+	m_uc.bind(done);
+}
+
 // Returns where the call notes the classes that it sees, if it is marked with
 // JIT_INSTR_PROFILE and the code has a profile, else null
-asCObjectType **CJITCodeGen::ProfileCell(asUINT idx)
+SJITSeenClasses *CJITCodeGen::ProfileCell(asUINT idx)
 {
 	if( m_options.profile == 0 || !(m_code->GetInstructions()[idx].flags & JIT_INSTR_PROFILE) )
 		return 0;

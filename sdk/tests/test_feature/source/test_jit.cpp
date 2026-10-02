@@ -4385,7 +4385,7 @@ namespace Profiles
 		"  for( int i = 0; i < n; i++ ) r += s.area(i);                                    \n"
 		"  return r;                                                                       \n"
 		"}                                                                                 \n"
-		// The call sees several classes, which gains nothing from compiling it again
+		// The call sees three classes, which are all compiled in place for it
 		"int poly(int n) {                                                                 \n"
 		"  Shape@ a = Sq(2), b = Rect(2, 3), c = Tri(4, 5);                                \n"
 		"  int r = 0;                                                                      \n"
@@ -4397,7 +4397,8 @@ namespace Profiles
 		"  }                                                                               \n"
 		"  return r;                                                                       \n"
 		"}                                                                                 \n"
-		// Another class comes after the method has been inlined for the first
+		// Another class comes after the method has been inlined for the first, and the
+		// function is compiled again for both
 		"int turn(int n) {                                                                 \n"
 		"  Shape@ s = Sq(3);                                                               \n"
 		"  int r = 0;                                                                      \n"
@@ -4487,7 +4488,8 @@ namespace Profiles
 
 	// The number of functions that each step compiles again in each configuration,
 	// or -1 where it depends on when the functions compiled in place are compiled.
-	// After one call the calls of poly have only seen one class
+	// After one call the calls of poly have only seen one class, and the function is
+	// compiled again for the others after another
 	struct SStep
 	{
 		const char *decl;
@@ -4499,8 +4501,8 @@ namespace Profiles
 	{
 		{ "int mono(int)",      100, LINES, { 1, 1, 0, 1 } },
 		{ "int mono(int)",      100, CTX,   { 0, 0, 0, 0 } },
-		{ "int poly(int)",      100, CTX,   { 0, 0, 0, 1 } },
-		{ "int turn(int)",      100, CTX,   { 1, 1, 0, 1 } },
+		{ "int poly(int)",      100, CTX,   { 1, 1, 0, 2 } },
+		{ "int turn(int)",      100, CTX,   { 2, 2, 0, 2 } },
 		{ "int turn(int)",      100, LINES, { 0, 0, 0, 0 } },
 		{ "int late(int)",      100, CTX,   { 2, 2, 0, 2 } },
 		{ "int late(int)",      100, CTX,   { 0, 0, 0, 0 } },

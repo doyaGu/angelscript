@@ -344,17 +344,23 @@ void CJITByteCode::SetBailInstructions(const bool bail[asBC_MAXBYTECODE])
 			m_instrs[n].flags |= JIT_INSTR_BAIL;
 }
 
-const CJITByteCode *CJITByteCode::GetInlinee(asUINT instrIdx) const
+const std::vector<SJITInlinee> &CJITByteCode::GetInlinees(asUINT instrIdx) const
 {
-	std::map<asUINT, std::shared_ptr<CJITByteCode> >::const_iterator it = m_inlinees.find(instrIdx);
-	return it == m_inlinees.end() ? 0 : it->second.get();
+	static const std::vector<SJITInlinee> none;
+	std::map<asUINT, std::vector<SJITInlinee> >::const_iterator it = m_inlinees.find(instrIdx);
+	return it == m_inlinees.end() ? none : it->second;
 }
 
-asCObjectType *CJITByteCode::GetInlineObjectType(asUINT instrIdx) const
+bool CJITByteCode::InlineesHaveSyncPoints(asUINT instrIdx) const
 {
-	std::map<asUINT, asCObjectType*>::const_iterator it = m_inlineObjTypes.find(instrIdx);
-	return it == m_inlineObjTypes.end() ? 0 : it->second;
+	const std::vector<SJITInlinee> &inlinees = GetInlinees(instrIdx);
+	asUINT borrowed = GetBorrowedArgs(instrIdx);
+	for( asUINT n = 0; n < inlinees.size(); n++ )
+		if( inlinees[n].code->HasSyncPoints(borrowed) )
+			return true;
+	return false;
 }
+
 
 const SJITIndexerCall *CJITByteCode::GetIndexer(asUINT instrIdx) const
 {
@@ -653,23 +659,26 @@ static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction 
 	return false;
 }
 
-asCObjectType *SJITProfile::Find(asCScriptFunction *func, asUINT instrIdx) const
+const SJITSeenClasses *SJITProfile::Find(asCScriptFunction *func, asUINT instrIdx) const
 {
-	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*>::const_iterator it = classes.find(std::make_pair(func, instrIdx));
-	return it == classes.end() ? 0 : it->second;
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses>::const_iterator it = classes.find(std::make_pair(func, instrIdx));
+	return it == classes.end() ? 0 : &it->second;
 }
 
-// The calls that have seen several classes, or those of other modules, or none, gain
-// nothing from compiling the function again, and neither do those that were inlined
-// for the class, or couldn't be
+// The calls that have seen only the classes they were compiled with, or those of
+// other modules, or none, gain nothing from compiling the function again
 bool SJITProfile::HasNewClass(const SJITProfile &compiledWith) const
 {
-	std::map<std::pair<asCScriptFunction*, asUINT>, asCObjectType*>::const_iterator it;
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses>::const_iterator it;
 	for( it = classes.begin(); it != classes.end(); ++it )
 	{
-		asCObjectType *seen = it->second;
-		if( seen != compiledWith.Find(it->first.first, it->first.second) && IsModuleClass(it->first.first, seen) )
-			return true;
+		const SJITSeenClasses *before = compiledWith.Find(it->first.first, it->first.second);
+		for( asUINT n = 0; n < JIT_PROFILE_CLASSES; n++ )
+		{
+			asCObjectType *seen = it->second.types[n];
+			if( seen && !(before && before->Has(seen)) && IsModuleClass(it->first.first, seen) )
+				return true;
+		}
 	}
 	return false;
 }
@@ -684,6 +693,50 @@ struct CJITByteCode::SInlineSearch
 	std::map<std::pair<int, asUINT>, std::shared_ptr<CJITByteCode> > analysed; // by function id and levels left to it, null if it can't be inlined
 };
 
+// Analyses the function for being emitted in place, or returns null if it can't be,
+// see FindInlinees. The analyses are shared by the calls of the same function at the
+// same level
+std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels)
+{
+	const SJITInlineOptions &inlining = *search.options;
+	std::pair<int, asUINT> key(func->GetId(), levels - 1);
+	std::map<std::pair<int, asUINT>, std::shared_ptr<CJITByteCode> >::iterator it = search.analysed.find(key);
+	if( it != search.analysed.end() )
+		return it->second;
+
+	std::shared_ptr<CJITByteCode> callee;
+	if( func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
+	    func->scriptData->tryCatchInfo.GetLength() == 0 && func->scriptData->byteCode.GetLength() <= inlining.maxSize &&
+	    (inlining.filter == 0 || inlining.filter(func, inlining.filterParam)) )
+	{
+		// The functions it calls are inlined into it with a quarter of the
+		// budget of the function being compiled
+		callee = std::make_shared<CJITByteCode>();
+		if( callee->Decode(func) < 0 || !callee->CanBeInlined() )
+			callee.reset();
+		else
+		{
+			if( m_bail )
+				callee->SetBailInstructions(m_bail);
+			callee->MarkUnreachable(true);
+			callee->AnalyseStackDepth();
+			if( !callee->HasStaticStack() )
+				callee.reset();
+			else
+			{
+				search.path.push_back(func->GetId());
+				callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
+				search.path.pop_back();
+				callee->FindIndexers(inlining.indexers);
+				callee->AnalyseBorrows();
+				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
+			}
+		}
+	}
+	search.analysed.insert(std::make_pair(key, callee));
+	return callee;
+}
+
 // Finds the calls whose function can be emitted in place, which is analysed on its
 // own then. Its frame starts at the stack pointer of the call, so the depth of the
 // stack must be known. The function can have the functions that it calls emitted in
@@ -693,12 +746,12 @@ struct CJITByteCode::SInlineSearch
 // virtual and interface methods are inlined if the classes that can implement them
 // all have the same implementation, which the object is checked for, see
 // FindImplementation. Otherwise the calls note the classes that they see in the
-// profile, and the methods are inlined for the class that a call has seen when the
-// function is compiled again with it, where the call notes the others then
+// profile, and the methods are inlined for the classes that a call has seen when the
+// function is compiled again with it, each checked for, where the call notes the
+// others then. The classes that share an implementation share its code
 void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
-	m_inlineObjTypes.clear();
 	m_inlinedLength = 0;
 	const SJITInlineOptions &inlining = *search.options;
 	if( inlining.maxSize == 0 || !m_staticStack || levels == 0 )
@@ -711,80 +764,74 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF) || (instr.flags & JIT_INSTR_DEAD) )
 			continue;
 
-		asCScriptFunction *func = 0;
-		asCObjectType *objType = 0;
+		// The implementations to emit, and the class whose objects call each, or null
+		// for the only one, which is checked for in the table of the class
+		std::vector<std::pair<asCScriptFunction*, asCObjectType*> > impls;
 		bool profiled = false;
 		int id = asBC_INTARG(instr.bc);
-		if( id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
-			func = engine->scriptFunctions[id];
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
 		if( func && instr.op == asBC_CALLINTF )
 		{
 			asCScriptFunction *method = func;
-			func = 0;
 			if( method->funcType == asFUNC_VIRTUAL || method->funcType == asFUNC_INTERFACE )
 			{
-				func = FindImplementation(m_func, method, objType);
-				asCObjectType *seen = func == 0 && inlining.classes ? inlining.classes->Find(m_func, n) : 0;
-				if( seen )
-				{
-					func = FindSeenImplementation(m_func, method, seen, objType);
-					profiled = inlining.profile && func;
-				}
-				else if( func == 0 && inlining.profile && HasSmallImplementation(m_func, method, inlining.maxSize) )
-					instr.flags |= JIT_INSTR_PROFILE;
-			}
-		}
-		if( func == 0 || std::find(search.path.begin(), search.path.end(), func->GetId()) != search.path.end() )
-			continue;
-
-		std::pair<int, asUINT> key(func->GetId(), levels - 1);
-		std::map<std::pair<int, asUINT>, std::shared_ptr<CJITByteCode> >::iterator it = search.analysed.find(key);
-		if( it == search.analysed.end() )
-		{
-			std::shared_ptr<CJITByteCode> callee;
-			if( func->funcType == asFUNC_SCRIPT && func->scriptData && !func->IsVariadic() &&
-			    func->scriptData->tryCatchInfo.GetLength() == 0 && func->scriptData->byteCode.GetLength() <= inlining.maxSize &&
-			    (inlining.filter == 0 || inlining.filter(func, inlining.filterParam)) )
-			{
-				// The functions it calls are inlined into it with a quarter of the
-				// budget of the function being compiled
-				callee = std::make_shared<CJITByteCode>();
-				if( callee->Decode(func) < 0 || !callee->CanBeInlined() )
-					callee.reset();
+				asCObjectType *objType = 0;
+				asCScriptFunction *impl = FindImplementation(m_func, method, objType);
+				if( impl )
+					impls.push_back(std::make_pair(impl, objType));
 				else
 				{
-					if( m_bail )
-						callee->SetBailInstructions(m_bail);
-					callee->MarkUnreachable(true);
-					callee->AnalyseStackDepth();
-					if( !callee->HasStaticStack() )
-						callee.reset();
-					else
+					const SJITSeenClasses *seen = inlining.classes ? inlining.classes->Find(m_func, n) : 0;
+					for( asUINT c = 0; seen && c < JIT_PROFILE_CLASSES && seen->types[c]; c++ )
 					{
-						search.path.push_back(func->GetId());
-						callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
-						search.path.pop_back();
-						callee->FindIndexers(inlining.indexers);
-						callee->AnalyseBorrows();
-						callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
+						impl = FindSeenImplementation(m_func, method, seen->types[c], objType);
+						if( impl )
+							impls.push_back(std::make_pair(impl, objType));
 					}
+					if( !impls.empty() )
+						profiled = inlining.profile;
+					else if( inlining.profile && HasSmallImplementation(m_func, method, inlining.maxSize) )
+						instr.flags |= JIT_INSTR_PROFILE;
 				}
 			}
-			it = search.analysed.insert(std::make_pair(key, callee)).first;
 		}
+		else if( func )
+			impls.push_back(std::make_pair(func, (asCObjectType*)0));
 
-		asUINT size = it->second ? it->second->GetLength() + it->second->m_inlinedLength : 0;
-		if( it->second && size <= budget )
+		// The implementations that can't be emitted, or don't fit, are called
+		std::vector<SJITInlinee> inlinees;
+		asUINT size = 0;
+		for( asUINT i = 0; i < impls.size(); i++ )
 		{
-			budget -= size;
-			m_inlinedLength += size;
-			instr.flags |= JIT_INSTR_INLINE;
-			if( profiled )
-				instr.flags |= JIT_INSTR_PROFILE;
-			m_inlinees[n] = it->second;
-			if( objType )
-				m_inlineObjTypes[n] = objType;
+			asCScriptFunction *impl = impls[i].first;
+			asUINT k = 0;
+			while( k < inlinees.size() && inlinees[k].code->GetFunction() != impl )
+				k++;
+			if( k == inlinees.size() )
+			{
+				if( std::find(search.path.begin(), search.path.end(), impl->GetId()) != search.path.end() )
+					continue;
+				std::shared_ptr<CJITByteCode> callee = AnalyseInlinee(search, impl, levels);
+				asUINT calleeSize = callee ? callee->GetLength() + callee->m_inlinedLength : 0;
+				if( !callee || size + calleeSize > budget )
+					continue;
+				size += calleeSize;
+				SJITInlinee inlinee;
+				inlinee.code = callee;
+				inlinees.push_back(inlinee);
+			}
+			if( impls[i].second )
+				inlinees[k].types.push_back(impls[i].second);
 		}
+		if( inlinees.empty() )
+			continue;
+
+		budget -= size;
+		m_inlinedLength += size;
+		instr.flags |= JIT_INSTR_INLINE;
+		if( profiled )
+			instr.flags |= JIT_INSTR_PROFILE;
+		m_inlinees[n] = inlinees;
 	}
 }
 
@@ -795,7 +842,6 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	m_aot = false;
 	AnalyseStackDepth();
 	m_inlinees.clear();
-	m_inlineObjTypes.clear();
 	m_inlinedLength = 0;
 	if( inlining )
 	{
@@ -874,7 +920,6 @@ void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTIO
 	m_staticStack = false;
 	m_stackDepth.assign(m_instrs.size(), -1);
 	m_inlinees.clear();
-	m_inlineObjTypes.clear();
 	m_inlinedLength = 0;
 	FindIndexers(indexers);
 	ClearBorrows();
@@ -1173,12 +1218,16 @@ void CJITByteCode::FindBorrowedArgs()
 	};
 
 	std::vector<SCandidate> found;
-	for( std::map<asUINT, std::shared_ptr<CJITByteCode> >::iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
+	for( std::map<asUINT, std::vector<SJITInlinee> >::iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
 	{
 		asUINT call = it->first;
-		const CJITByteCode *callee = it->second.get();
-		asCScriptFunction *func = callee->GetFunction();
-		asUINT params = callee->GetBorrowableParams();
+		const std::vector<SJITInlinee> &inlinees = it->second;
+		// The implementations of a method have the same parameters, and an argument is
+		// borrowed if all of them can
+		asCScriptFunction *func = inlinees[0].code->GetFunction();
+		asUINT params = ~asUINT(0);
+		for( asUINT i = 0; i < inlinees.size(); i++ )
+			params &= inlinees[i].code->GetBorrowableParams();
 		found.clear();
 
 		// The argument for the parameter at k dwords above the frame of the function
@@ -1409,7 +1458,7 @@ void CJITByteCode::AnalyseBody(bool allowRegisterCache, asUINT maxCachedSlots)
 		if( instr.flags & JIT_INSTR_DEAD )
 			continue;
 		if( instr.flags & JIT_INSTR_INLINE )
-			m_hasSyncPoints = GetInlinee(n)->HasSyncPoints(GetBorrowedArgs(n));
+			m_hasSyncPoints = InlineesHaveSyncPoints(n);
 		else if( instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_FREE_LIST) )
 			continue;
 		else if( instr.op == asBC_FREE )
@@ -1474,7 +1523,7 @@ bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 	const SJITInstr &instr = m_instrs[instrIdx];
 	if( m_aot )
 		return instr.op == asBC_CALL || instr.op == asBC_CALLINTF || instr.op == asBC_ALLOC;
-	if( (instr.flags & JIT_INSTR_INLINE) && GetInlinee(instrIdx)->HasSyncPoints(GetBorrowedArgs(instrIdx)) )
+	if( (instr.flags & JIT_INSTR_INLINE) && InlineesHaveSyncPoints(instrIdx) )
 		return true;
 #ifdef JIT_NATIVE_RETURN
 	asEBCInstr op = instr.op;
@@ -1816,7 +1865,7 @@ void CJITByteCode::AnalyseDirtySlots()
 			if( LeavesFrameDirty(k) )
 				written |= JIT_FRAME_BIT;
 			if( m_instrs[k].flags & JIT_INSTR_INLINE )
-				calls = calls || GetInlinee(k)->HasSyncPoints(GetBorrowedArgs(k));
+				calls = calls || InlineesHaveSyncPoints(k);
 			else
 				calls = calls || IsSyncPointAt(k);
 		}
