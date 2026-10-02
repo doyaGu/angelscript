@@ -92,6 +92,7 @@ struct CJITCompiler::SImpl
 	bool                   bailOps[asBC_MAXBYTECODE];
 	SJITStatistics         stats;
 	std::map<asJITFunction, void*> unwindInfo; // registered unwind information by function
+	std::map<asJITFunction, size_t> codeSizes; // the sizes of the current and retired code
 	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
@@ -754,7 +755,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 			stats.instructionsCompiled += gen.GetInstructionCount();
 			stats.instructionsBailed   += gen.GetBailCount();
 			stats.callsInlined         += gen.GetInlinedCallCount();
-			stats.codeSize             += holder.code_size();
+			codeSizes[jitFunc] = holder.code_size();
+			stats.codeSize += codeSizes[jitFunc];
 		}
 	}
 
@@ -1017,7 +1019,15 @@ void CJITCompiler::SImpl::Release(asJITFunction code)
 		CJITUnwindInfo::Unregister(it->second);
 		unwindInfo.erase(it);
 	}
-	runtime.release(code);
+	if( runtime.release(code) == asmjit::Error::kOk )
+	{
+		std::map<asJITFunction, size_t>::iterator size = codeSizes.find(code);
+		if( size != codeSizes.end() )
+		{
+			stats.codeSize -= size->second;
+			codeSizes.erase(size);
+		}
+	}
 }
 
 END_AS_NAMESPACE

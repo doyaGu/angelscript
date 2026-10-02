@@ -4777,6 +4777,11 @@ static bool TestProfiles()
 		engine->ShutDownAndRelease();
 
 		SJITStatistics stats = jit.GetStatistics();
+		if( stats.codeSize != 0 )
+		{
+			PRINTF("profiles %s: %zu bytes remain after releasing the functions\n", configs[c].name, stats.codeSize);
+			TEST_FAILED;
+		}
 		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
 		{
 			PRINTF("profiles %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
@@ -4999,6 +5004,11 @@ static bool TestSuspendChecks()
 		engine->ShutDownAndRelease();
 
 		SJITStatistics stats = jit.GetStatistics();
+		if( stats.codeSize != 0 )
+		{
+			PRINTF("suspend checks %s: %zu bytes remain after releasing the functions\n", configs[c].name, stats.codeSize);
+			TEST_FAILED;
+		}
 		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
 		{
 			PRINTF("suspend checks %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
@@ -5306,6 +5316,59 @@ int as_powi_test(int base, int exponent, bool &isOverflow)
 	return int(result);
 }
 
+// Code size counts the code still held, including the old versions retained by
+// recompilation, rather than the total compiled over the compiler's lifetime.
+static bool TestCodeSizeStatistics()
+{
+	bool fail = false;
+	CJITCompiler jit;
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	CBufferedOutStream msgs;
+	engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+	engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, true);
+	engine->SetJITCompiler(&jit);
+
+	const char *names[] = { "first", "second" };
+	size_t firstSize = 0;
+	for( asUINT n = 0; n < 2; n++ )
+	{
+		asIScriptModule *mod = engine->GetModule(names[n], asGM_ALWAYS_CREATE);
+		int r = mod->AddScriptSection("test", "int run(int n) { return n + 1; }");
+		if( r >= 0 )
+			r = mod->Build();
+		if( r < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			engine->ShutDownAndRelease();
+			return fail;
+		}
+		if( n == 0 )
+			firstSize = jit.GetStatistics().codeSize;
+	}
+	SJITStatistics stats = jit.GetStatistics();
+	if( firstSize == 0 || stats.codeSize <= firstSize || stats.functionsCompiled != 2 || stats.functionsFailed != 0 )
+		TEST_FAILED;
+
+	if( engine->DiscardModule("second") < 0 )
+		TEST_FAILED;
+	stats = jit.GetStatistics();
+	if( stats.codeSize != firstSize || stats.functionsReleased != 1 )
+	{
+		PRINTF("code size: %zu bytes after discarding one module, expected %zu\n", stats.codeSize, firstSize);
+		TEST_FAILED;
+	}
+
+	engine->ShutDownAndRelease();
+	stats = jit.GetStatistics();
+	if( stats.codeSize != 0 || stats.functionsReleased != 2 )
+	{
+		PRINTF("code size: %zu bytes after releasing the engine, expected 0\n", stats.codeSize);
+		TEST_FAILED;
+	}
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -5374,6 +5437,7 @@ bool Test()
 	fail = TestProfiles() || fail;
 	fail = TestSuspendChecks() || fail;
 	fail = TestIndexers() || fail;
+	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;
 }
