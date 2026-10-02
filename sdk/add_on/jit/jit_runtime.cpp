@@ -634,8 +634,11 @@ void JIT_AddRefScriptObject(void *obj) noexcept
 // cheaper than caching it, as the user data of the types is read under a lock
 static bool IsPlainScriptType(const asCObjectType *type)
 {
-	if( type->beh.destruct || (type->flags & asOBJ_GC) )
+	if( type->flags & asOBJ_GC )
 		return false;
+	for( const asCObjectType *base = type; base; base = base->derivedFrom )
+		if( base->beh.destruct )
+			return false;
 	for( asUINT n = 0; n < type->properties.GetLength(); n++ )
 	{
 		const asCTypeInfo *member = type->properties[n]->type.GetTypeInfo();

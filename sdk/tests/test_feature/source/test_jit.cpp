@@ -2993,6 +2993,12 @@ namespace ScriptRefCounts
 	static void Unexpose() { *g_dying = 0; }
 
 	static const char *script =
+		// Classes without their own destructor must still run the destructors of
+		// their base classes when their last reference is released.
+		"class DtorBase { int id; DtorBase(int i) { id = i; } ~DtorBase() { Mark(-id); } } \n"
+		"class DtorMid : DtorBase { DtorMid(int i) { super(i); } }                  \n"
+		"class DtorLeaf : DtorMid { DtorLeaf(int i) { super(i); } }                 \n"
+		"void inheritedDtors() { { DtorMid d(8); } Mark(0); { DtorLeaf d(9); } Mark(0); } \n"
 		"class Node                                                               \n"
 		"{                                                                        \n"
 		"  int id;                                                                \n"
@@ -3114,6 +3120,14 @@ namespace ScriptRefCounts
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
 
+		g_trace.str("");
+		r = ctx->Prepare(mod->GetFunctionByDecl("void inheritedDtors()"));
+		if( r >= 0 )
+			r = ctx->Execute();
+		if( r != asEXECUTION_FINISHED )
+			TEST_FAILED;
+		s << "inherited destructors " << g_trace.str() << "\n";
+
 		// The GC counts the references of the objects of the cycle in separate steps,
 		// and the flips in between must keep them alive. Once or twice per step, so
 		// that the steps see either object referenced from outside
@@ -3201,6 +3215,8 @@ static bool TestScriptRefCounts()
 	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string expected = Run(engine, 0, fail);
 	engine->ShutDownAndRelease();
+	if( expected.find("inherited destructors -8 0 -9 0 \n") == std::string::npos )
+		TEST_FAILED;
 	if( expected.find("resurrect 0 -7 7 0  (0, 0) : Error   : The script object of type 'Parent' is being resurrected illegally during destruction") == std::string::npos )
 		TEST_FAILED;
 
