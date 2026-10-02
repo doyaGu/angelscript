@@ -37,13 +37,16 @@ static Mem PtrAt(const Mem &mem, int n)
 // allows the direct calls to pass it like an ordinary argument. It is the first
 // argument, except that MSVC passes it after the object pointer of class methods.
 // Other compilers for 32bit x86 let the called function pop it off the stack,
-// which the generated calls can't express, and AArch64 passes it in a register
-// that isn't used for arguments
+// which the generated calls can't express. AArch64 passes it in x8, which isn't
+// used for arguments, so the generated calls add it as the last argument and
+// assign that argument the register, see EmitDirectSystemCall
 #if defined(AS_X64_MSVC) || defined(AS_X64_GCC) || defined(AS_X64_MINGW) || (defined(AS_X86) && defined(_MSC_VER))
 #define JIT_HIDDEN_RETURN_POINTER
 #if defined(_MSC_VER)
 #define JIT_HIDDEN_RETURN_POINTER_AFTER_THIS
 #endif
+#elif defined(AS_ARM64)
+#define JIT_HIDDEN_RETURN_POINTER_X8
 #endif
 
 // After a helper that may hand control back to the VM: leave if requested,
@@ -1070,8 +1073,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // of through the generic CallSystemFunction of the engine. This is only done for
 // simple signatures: primitives and pointers as arguments, a primitive, pointer,
 // handle, or value type as return value, and nothing to clean up after the call.
-// Value types returned in memory are left out where the address isn't passed like
-// an argument (see JIT_HIDDEN_RETURN_POINTER).
+// Value types returned in memory are left out where the address is neither passed
+// like an argument nor in a register of its own (see JIT_HIDDEN_RETURN_POINTER).
 // Everything else, e.g. objects passed by value, returns false and is called
 // through the engine.
 //
@@ -1081,8 +1084,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 //
 // TODO: runtime optimize: Objects passed by value could be supported by setting up the
 //                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
-//                         do for each ABI, and value types returned in memory on AArch64
-//                         by setting x8, which the calls of the AsmJit compiler can't do.
+//                         do for each ABI.
 //                         Auto handles would need a release of the parameters after the call
 //                         and an AddRef of the returned handle, and asCALL_GENERIC could be
 //                         called with an asCGeneric set up inline. Each of these should be
@@ -1209,7 +1211,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		retPartsFloat = sysFunc->hostReturnFloat;
 	}
 #endif
-#ifndef JIT_HIDDEN_RETURN_POINTER
+	// The hidden pointer is passed like an argument, or in x8 on AArch64
+	bool retInX8 = false;
+#if defined(JIT_HIDDEN_RETURN_POINTER_X8)
+	retInX8 = retInMemory;
+#elif !defined(JIT_HIDDEN_RETURN_POINTER)
 	if( retInMemory )
 		return false;
 #endif
@@ -1272,7 +1278,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	int popSize = stackPos;
 
 	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC
-	bool retFirst = retInMemory, retAfterObj = false;
+	bool retFirst = retInMemory && !retInX8, retAfterObj = false;
 #ifdef JIT_HIDDEN_RETURN_POINTER_AFTER_THIS
 	if( retInMemory && sysFunc->callConv == ICC_THISCALL )
 	{
@@ -1288,6 +1294,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	if( retAfterObj ) sig.add_arg(TypeId::kUIntPtr);
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
 	if( hasObj && objLast ) sig.add_arg(TypeId::kUIntPtr);
+	if( retInX8 ) sig.add_arg(TypeId::kUIntPtr); // moved to x8 below
 
 	// A null object pointer is an exception raised by the VM
 	Gp obj;
@@ -1381,6 +1388,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	if( hasObj && objLast )
 		call->set_arg(argIdx++, obj);
+	if( retInX8 )
+	{
+		// The last argument of the signature goes in x8 instead of where the calling
+		// convention has put it. With more than eight integer arguments that was a
+		// slot on the stack, which stays reserved and unused then
+		call->set_arg(argIdx, retPtr);
+		call->detail().arg(argIdx).init_reg(RegType::kGp64, 8, TypeId::kUIntPtr);
+		argIdx++;
+	}
 
 	Gp  retGp, retGpHi, retGps[4];
 	Vec retVec, retVecs[4];

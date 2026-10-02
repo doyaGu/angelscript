@@ -126,8 +126,8 @@ releases again right after are left out.
 The generated code calls registered functions directly with their native calling
 convention whenever the signature allows it (primitives, references, and handles
 as arguments; primitives, references, handles, or value types as return value,
-except the value types that AArch64 and the compilers for 32bit x86 other than
-MSVC return in memory),
+except the value types that the compilers for 32bit x86 other than MSVC return
+in memory),
 instead of going through the code the VM uses, which marshals the arguments for
 the calling convention at runtime. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.
@@ -547,8 +547,10 @@ RetObj.3       0.040    0.003      0.004    0.003     0.011
  - The code generated ahead of time compiles no calls in place and borrows no
    references, which makes the calls of short script functions slower than with
    the JIT compiler. It creates the objects of the registered types through a
-   helper function, keeps the variables in memory on big endian CPUs, and checks
-   for suspension and line callbacks at every statement.
+   helper function, keeps the variables in memory on big endian CPUs, checks
+   for suspension and line callbacks at every statement, and on AArch64 calls the
+   functions that return a value type in memory through the engine, as the
+   generated C++ can't pass the hidden pointer in x8.
  - Direct system calls are only made for functions with primitive, reference,
    and handle parameters, and primitive, reference, handle, and value type return
    values. Everything else, including asCALL_GENERIC, goes through the same code
