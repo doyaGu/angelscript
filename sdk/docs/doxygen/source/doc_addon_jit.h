@@ -169,6 +169,33 @@ if( jit->Execute(ctx) == asEXECUTION_FINISHED )
   result = ctx->GetReturnDWord();
 \endcode
 
+A function that the application calls many times with the same context can be
+bound to it with \ref CJITCall, whose Prepare and Execute do what the methods of
+the compiler check and look up at every call once, when the call is bound, which
+makes the calls about twice as fast again. They have the same effects, fall back
+to the methods of the compiler whenever the context isn't where the last call of
+the function left it, and can be mixed with the methods of the compiler and of
+the context. The call must be used by the thread that bound it.
+
+\code
+CJITCall call;
+call.Bind(jit, ctx, func);
+for( int n = 0; n < count; n++ )
+{
+  call.Prepare();
+  ctx->SetArgDWord(0, n);
+  if( call.Execute() == asEXECUTION_FINISHED )
+    sum += ctx->GetReturnDWord();
+}
+\endcode
+
+When \ref asEP_AUTO_GARBAGE_COLLECT is set, which is the default, every execution
+ends with a step of the garbage collector if it knows any objects, which takes
+longer than the call of a short script function itself. Applications that call
+script functions often should turn the property off and call
+\ref asIScriptEngine::GarbageCollect themselves at a convenient time, e.g. once
+per frame.
+
 The engine allocates the script objects, the arrays, and much of its other memory
 in small blocks that are freed again soon after. \ref CJITCompiler::AllocMemory
 and \ref CJITCompiler::FreeMemory are memory functions for the engine that keep the

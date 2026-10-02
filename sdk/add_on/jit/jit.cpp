@@ -54,9 +54,8 @@
 //  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer
 //    operations instead of calling JIT_I64Op.
-//  - Call handles for the application that are bound to a function and set its arguments
-//    and read its return value without the checks of the context's methods, on top of
-//    CJITCompiler::Prepare and Execute (jit_runtime.cpp, JIT_Execute).
+//  - Set the arguments and read the return value of a CJITCall without the checks of
+//    the context's methods (jit_runtime.cpp, CJITCall::Prepare).
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE
@@ -308,6 +307,11 @@ int CJITCompiler::Prepare(asIScriptContext *ctx, asIScriptFunction *func)
 int CJITCompiler::Execute(asIScriptContext *ctx)
 {
 	return JIT_Execute(ctx, this, m_impl->maxNativeCallDepth);
+}
+
+asUINT CJITCompiler::GetNativeCallDepth() const
+{
+	return m_impl->maxNativeCallDepth;
 }
 
 SJITStatistics CJITCompiler::GetStatistics() const

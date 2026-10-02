@@ -212,6 +212,7 @@ public:
 	// Otherwise they call the methods of the context
 	int Prepare(asIScriptContext *ctx, asIScriptFunction *func);
 	int Execute(asIScriptContext *ctx);
+	asUINT GetNativeCallDepth() const;
 
 	// Memory functions for the engine that are much faster than the default ones for
 	// the many small objects of the scripts. The blocks of up to 1 KB that are freed
@@ -229,6 +230,41 @@ protected:
 	SImpl *m_impl;
 
 	static int TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
+};
+
+// A script function bound to a context for the application to call it many times,
+// faster than through CJITCompiler::Prepare and Execute: what those check and look
+// up at every call is done once when the call is bound. Prepare and Execute have the
+// same effects as the methods of the compiler, and the arguments and the return value
+// are set and read with the methods of the context as usual. The call must be used by
+// the thread that bound it, as it keeps the thread's list of active contexts; bind it
+// again to use it from another thread. Prepare falls back to the compiler's Prepare
+// unless the context is where the last call of the function left it, e.g. after the
+// context has been used for another function, and Execute falls back to the
+// compiler's Execute unless the context has been prepared for the function and the
+// function has been compiled, so the calls stay correct however the context is used
+class CJITCall
+{
+public:
+	CJITCall();
+
+	// Binds the call to the context and the function. Returns a negative value without
+	// a compiler or a context. Without a function, Prepare fails like the context's
+	int Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunction *func);
+
+	int Prepare();
+	int Execute();
+
+	asIScriptContext  *GetContext() const  { return m_ctx; }
+	asIScriptFunction *GetFunction() const { return m_func; }
+
+protected:
+	CJITCompiler      *m_compiler;
+	asIScriptContext  *m_ctx;
+	asIScriptFunction *m_func;
+	void              *m_threadData; // asCThreadLocalData of the thread that bound the call
+	asUINT             m_limitWords; // words of call states that the native calls may push
+	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
 };
 
 // Adds the indexers of the opIndex methods of CScriptArray to the compiler, see

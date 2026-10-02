@@ -10,6 +10,7 @@
 #include "../../../add_on/scriptarray/scriptarray.h"
 #include "../../../add_on/scriptmath/scriptmath.h"
 #include <sstream>
+#include <map>
 #include <stdexcept>
 #include <new>
 #include <thread>
@@ -3425,15 +3426,39 @@ static bool TestListFrees()
 namespace HostCalls
 {
 	// Calls the methods of the JIT compiler, or of the context without a compiler.
-	// When mixed, every third call is made through the context
+	// When mixed, every third call is made through the context. With handles, the
+	// calls go through a CJITCall bound to the context and the function, which the
+	// Execute uses that follows the Prepare, also when a call through the context
+	// came in between
 	struct SApi
 	{
 		CJITCompiler *jit;
 		bool mix;
+		bool handles;
 		int calls;
+		std::map<std::pair<asIScriptContext*, asIScriptFunction*>, CJITCall> bound;
+		std::map<asIScriptContext*, CJITCall*> current;
 		bool UseJit() { calls++; return jit && !(mix && calls % 3 == 0); }
-		int Prepare(asIScriptContext *ctx, asIScriptFunction *func) { return UseJit() ? jit->Prepare(ctx, func) : ctx->Prepare(func); }
-		int Execute(asIScriptContext *ctx) { return UseJit() ? jit->Execute(ctx) : ctx->Execute(); }
+		int Prepare(asIScriptContext *ctx, asIScriptFunction *func)
+		{
+			if( !UseJit() )
+				return ctx->Prepare(func);
+			if( !handles )
+				return jit->Prepare(ctx, func);
+			CJITCall &call = bound[std::make_pair(ctx, func)];
+			if( call.GetContext() == 0 && call.Bind(jit, ctx, func) < 0 )
+				return asERROR;
+			current[ctx] = &call;
+			return call.Prepare();
+		}
+		int Execute(asIScriptContext *ctx)
+		{
+			if( !UseJit() )
+				return ctx->Execute();
+			if( !handles || current[ctx] == 0 )
+				return jit->Execute(ctx);
+			return current[ctx]->Execute();
+		}
 	};
 	static SApi g_api;
 	static std::stringstream g_trace;
@@ -3582,17 +3607,21 @@ namespace HostCalls
 	};
 
 	// Engine properties, and the options of the JIT compiler and of the calls
-	struct SConfig { const char *name; asDWORD flags; asUINT depth; asEEngineProp prop; asPWORD value; bool mix; bool other; };
+	struct SConfig { const char *name; asDWORD flags; asUINT depth; asEEngineProp prop; asPWORD value; bool mix; bool other; bool handles; };
 	static const SConfig configs[] =
 	{
-		{ "default",                0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, false },
-		{ "native call depth 3",    0,                                   3, asEP_INIT_STACK_SIZE,      4096, false, false },
-		{ "no native script calls", CJITCompiler::JIT_NO_SCRIPT_CALLS, 256, asEP_INIT_STACK_SIZE,      4096, false, false },
-		{ "small stack blocks",     0,                                 256, asEP_INIT_STACK_SIZE,        64, false, false },
-		{ "few nested calls",       0,                                 256, asEP_MAX_NESTED_CALLS,        3, false, false },
-		{ "no automatic GC",        0,                                 256, asEP_AUTO_GARBAGE_COLLECT,    0, false, false },
-		{ "mixed with the context", 0,                                 256, asEP_INIT_STACK_SIZE,      4096, true,  false },
-		{ "another compiler",       0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, true },
+		{ "default",                0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, false, false },
+		{ "native call depth 3",    0,                                   3, asEP_INIT_STACK_SIZE,      4096, false, false, false },
+		{ "no native script calls", CJITCompiler::JIT_NO_SCRIPT_CALLS, 256, asEP_INIT_STACK_SIZE,      4096, false, false, false },
+		{ "small stack blocks",     0,                                 256, asEP_INIT_STACK_SIZE,        64, false, false, false },
+		{ "few nested calls",       0,                                 256, asEP_MAX_NESTED_CALLS,        3, false, false, false },
+		{ "no automatic GC",        0,                                 256, asEP_AUTO_GARBAGE_COLLECT,    0, false, false, false },
+		{ "mixed with the context", 0,                                 256, asEP_INIT_STACK_SIZE,      4096, true,  false, false },
+		{ "another compiler",       0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, true,  false },
+		{ "bound calls",            0,                                 256, asEP_INIT_STACK_SIZE,      4096, false, false, true },
+		{ "bound calls, depth 3",   0,                                   3, asEP_INIT_STACK_SIZE,      4096, false, false, true },
+		{ "bound calls, mixed",     0,                                 256, asEP_INIT_STACK_SIZE,      4096, true,  false, true },
+		{ "bound calls, few nested",0,                                 256, asEP_MAX_NESTED_CALLS,        3, false, false, true },
 	};
 
 	static std::string ExceptionInfo(asIScriptContext *ctx)
@@ -3683,7 +3712,10 @@ namespace HostCalls
 
 		g_api.jit = api;
 		g_api.mix = config.mix;
+		g_api.handles = config.handles;
 		g_api.calls = 0;
+		g_api.bound.clear();
+		g_api.current.clear();
 		std::string result;
 		asIScriptContext *ctx = engine->CreateContext();
 		ctx->SetExceptionCallback(asFUNCTION(OnException), 0, asCALL_CDECL);

@@ -1,4 +1,5 @@
 #include "jit_runtime.h"
+#include "jit.h"
 
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
@@ -1001,38 +1002,21 @@ struct SGCObjectCount : asCGarbageCollector
 	}
 };
 
-int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compiler, asUINT maxNativeCallDepth)
+// The words of call states that the native calls may push, see JITFunction
+static asUINT NativeCallLimitWords(asUINT maxNativeCallDepth)
 {
-	asCContext *ctx = static_cast<asCContext*>(context);
+	asQWORD words = asQWORD(maxNativeCallDepth) * CALLSTACK_FRAME_SIZE;
+	return asUINT(words < 0x40000000 ? words : 0x40000000);
+}
+
+// Executes the prepared context from the compiled code of its current function, which
+// must be a script function, like asCContext::Execute does from the VM, and returns
+// the state of the execution like it. The thread local data is the executing thread's
+static int ExecuteCompiled(asCContext *ctx, asCThreadLocalData *tld, asUINT limitWords)
+{
 	asCScriptEngine *engine = ctx->m_engine;
 	asSVMRegisters *regs = &ctx->m_regs;
-
-	// This follows asCContext::Execute for the script functions compiled by the
-	// compiler, when no line callback is set. The context executes the others, and
-	// raises the exceptions before the function is entered
-	if( ctx->m_status != asEXECUTION_PREPARED || regs->programPointer != 0 || ctx->m_lineCallback || engine->jitCompiler != compiler )
-		return ctx->Execute();
-
-	// Find the function to enter like asCContext::SetProgramPointer
 	asCScriptFunction *func = ctx->m_currentFunction;
-	asCScriptObject *obj;
-	bool isDelegate = func->funcType == asFUNC_DELEGATE;
-	if( isDelegate )
-	{
-		obj  = static_cast<asCScriptObject*>(func->objForDelegate);
-		func = func->funcForDelegate;
-	}
-	else
-		obj = *(asCScriptObject**)regs->stackFramePointer;
-	if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
-		func = FindMethod(func, obj);
-	if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData->jitFunction == 0 )
-		return ctx->Execute();
-
-	// Too many nested calls could fill up the thread call stack
-	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
-	if( tld == 0 || tld->activeContexts.GetLength() >= engine->ep.maxNestedCalls )
-		return ctx->Execute();
 
 	ctx->m_status = asEXECUTION_ACTIVE;
 	asCArray<asIScriptContext*> &activeContexts = tld->activeContexts;
@@ -1045,20 +1029,11 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 	if( engine->ep.autoGarbageCollect )
 		gcPreObjects = SGCObjectCount::Get(engine->gc);
 
-	if( isDelegate )
-	{
-		// Push the object pointer onto the stack
-		regs->stackPointer      -= AS_PTR_SIZE;
-		regs->stackFramePointer -= AS_PTR_SIZE;
-		*(asPWORD*)regs->stackPointer = asPWORD(obj);
-	}
-	ctx->m_currentFunction = func;
-	regs->programPointer   = func->scriptData->byteCode.AddressOf();
+	regs->programPointer = func->scriptData->byteCode.AddressOf();
 
 	// The native calls may push call states up to the same limit as when the VM enters
 	// the function, see JITFunction
-	asQWORD words = asQWORD(maxNativeCallDepth) * CALLSTACK_FRAME_SIZE;
-	asUINT callLimit = ctx->m_callStack.GetLength() + asUINT(words < 0x40000000 ? words : 0x40000000);
+	asUINT callLimit = ctx->m_callStack.GetLength() + limitWords;
 	if( callLimit > ctx->m_callStack.GetCapacity() )
 		callLimit = ctx->m_callStack.GetCapacity();
 	EnterFromApplication(regs, ctx, reinterpret_cast<JITFunction>(func->scriptData->jitFunction), callLimit);
@@ -1117,6 +1092,145 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 		return asEXECUTION_EXCEPTION;
 
 	return asERROR;
+}
+
+int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compiler, asUINT maxNativeCallDepth)
+{
+	asCContext *ctx = static_cast<asCContext*>(context);
+	asCScriptEngine *engine = ctx->m_engine;
+	asSVMRegisters *regs = &ctx->m_regs;
+
+	// This follows asCContext::Execute for the script functions compiled by the
+	// compiler, when no line callback is set. The context executes the others, and
+	// raises the exceptions before the function is entered
+	if( ctx->m_status != asEXECUTION_PREPARED || regs->programPointer != 0 || ctx->m_lineCallback || engine->jitCompiler != compiler )
+		return ctx->Execute();
+
+	// Find the function to enter like asCContext::SetProgramPointer
+	asCScriptFunction *func = ctx->m_currentFunction;
+	asCScriptObject *obj;
+	bool isDelegate = func->funcType == asFUNC_DELEGATE;
+	if( isDelegate )
+	{
+		obj  = static_cast<asCScriptObject*>(func->objForDelegate);
+		func = func->funcForDelegate;
+	}
+	else
+		obj = *(asCScriptObject**)regs->stackFramePointer;
+	if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
+		func = FindMethod(func, obj);
+	if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData->jitFunction == 0 )
+		return ctx->Execute();
+
+	// Too many nested calls could fill up the thread call stack
+	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
+	if( tld == 0 || tld->activeContexts.GetLength() >= engine->ep.maxNestedCalls )
+		return ctx->Execute();
+
+	if( isDelegate )
+	{
+		// Push the object pointer onto the stack
+		regs->stackPointer      -= AS_PTR_SIZE;
+		regs->stackFramePointer -= AS_PTR_SIZE;
+		*(asPWORD*)regs->stackPointer = asPWORD(obj);
+	}
+	ctx->m_currentFunction = func;
+	return ExecuteCompiled(ctx, tld, NativeCallLimitWords(maxNativeCallDepth));
+}
+
+//------------------------------------------------------------------------
+// Bound calls, see CJITCall
+
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_limitWords(0), m_scriptFunc(false)
+{
+}
+
+int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunction *func)
+{
+	m_compiler   = compiler;
+	m_ctx        = ctx;
+	m_func       = func;
+	m_threadData = asCThreadManager::GetLocalData();
+	m_limitWords = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
+	m_scriptFunc = func && func->GetFuncType() == asFUNC_SCRIPT;
+	return compiler && ctx && m_threadData ? asSUCCESS : asINVALID_ARG;
+}
+
+// Like JIT_Prepare, for a context that has finished executing the function
+int CJITCall::Prepare()
+{
+	asCContext *ctx = static_cast<asCContext*>(m_ctx);
+	asCScriptFunction *func = static_cast<asCScriptFunction*>(m_func);
+	if( ctx == 0 || ctx->m_status != asEXECUTION_FINISHED || ctx->m_initialFunction != func )
+		return JIT_Prepare(m_ctx, m_func);
+	asSVMRegisters *regs = &ctx->m_regs;
+
+	if( ctx->m_returnValueSize || regs->objectRegister )
+		ctx->CleanReturnObject();
+	if( func->objectType && (func->objectType->flags & asOBJ_SCRIPT_OBJECT) )
+	{
+		asCScriptObject *obj = *(asCScriptObject**)regs->stackFramePointer;
+		if( obj )
+			obj->Release();
+		*(asPWORD*)regs->stackFramePointer = 0;
+	}
+
+	// The function hasn't changed, so neither have the sizes, the stack, and the call stack
+	regs->stackPointer = ctx->m_originalStackPointer;
+	ctx->m_stackIndex  = ctx->m_originalStackIndex;
+	ctx->m_currentFunction = func;
+
+	// An exception that was caught leaves its information for the application to read
+	// until the next preparation, like asCContext::ClearException does
+	if( ctx->m_exceptionFunction )
+	{
+		if( ctx->m_exceptionString.GetLength() )
+			ctx->m_exceptionString = "";
+		ctx->m_exceptionFunction   = 0;
+		ctx->m_exceptionLine       = -1;
+		ctx->m_exceptionColumn     = -1;
+		ctx->m_exceptionSectionIdx = 0;
+	}
+
+	ctx->m_status = asEXECUTION_PREPARED;
+	regs->programPointer = 0;
+
+	regs->stackFramePointer = regs->stackPointer - ctx->m_argumentsSize - ctx->m_returnValueSize;
+	regs->stackPointer      = regs->stackFramePointer;
+	if( ctx->m_argumentsSize )
+		memset(regs->stackPointer, 0, 4 * ctx->m_argumentsSize);
+
+	if( ctx->m_returnValueSize )
+	{
+		asDWORD *ptr = regs->stackFramePointer;
+		if( func->objectType )
+			ptr += AS_PTR_SIZE;
+		*(void**)ptr = (void*)(regs->stackFramePointer + ctx->m_argumentsSize);
+	}
+
+	return asSUCCESS;
+}
+
+// Like JIT_Execute, for the function the call is bound to if it is a compiled script
+// function. The methods that need the object to find the implementation, and the
+// contexts that are prepared otherwise, are left to it
+int CJITCall::Execute()
+{
+	asCContext *ctx = static_cast<asCContext*>(m_ctx);
+	asCScriptFunction *func = static_cast<asCScriptFunction*>(m_func);
+	if( ctx == 0 || m_compiler == 0 )
+		return asINVALID_ARG;
+	asCScriptEngine *engine = ctx->m_engine;
+	asSVMRegisters *regs = &ctx->m_regs;
+	if( !m_scriptFunc || ctx->m_status != asEXECUTION_PREPARED || ctx->m_currentFunction != func || regs->programPointer != 0 ||
+	    ctx->m_lineCallback || engine->jitCompiler != m_compiler || func->scriptData->jitFunction == 0 )
+		return JIT_Execute(m_ctx, m_compiler, m_compiler->GetNativeCallDepth());
+
+	asCThreadLocalData *tld = static_cast<asCThreadLocalData*>(m_threadData);
+	if( tld->activeContexts.GetLength() >= engine->ep.maxNestedCalls )
+		return ctx->Execute();
+
+	return ExecuteCompiled(ctx, tld, m_limitWords);
 }
 
 END_AS_NAMESPACE
