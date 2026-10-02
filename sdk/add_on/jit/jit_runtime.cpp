@@ -48,6 +48,8 @@ const SJITContextLayout &JIT_GetContextLayout() noexcept
 struct SJITScriptObject : asCScriptObject
 {
 	static int RefCountOffset() { return int(offsetof(SJITScriptObject, refCount)); }
+	static asCAtomic &RefCount(asCScriptObject *obj) { return static_cast<SJITScriptObject*>(obj)->refCount; }
+	static bool HasExtra(const asCScriptObject *obj) { return static_cast<const SJITScriptObject*>(obj)->extra != 0; }
 	static int FlagByte(bool dead) { int mask; return FindFlag(dead, mask); }
 	static int FlagMask(bool dead) { int mask; FindFlag(dead, mask); return mask; }
 	static int FindFlag(bool dead, int &mask)
@@ -626,9 +628,39 @@ void JIT_AddRefScriptObject(void *obj) noexcept
 	static_cast<asCScriptObject*>(obj)->AddRef();
 }
 
+// True for the script classes whose objects have nothing to do when they are
+// destroyed but to be freed: no destructor, no garbage collection, and no members
+// but primitives and enums. The check reads a few fields of the type, which is
+// cheaper than caching it, as the user data of the types is read under a lock
+static bool IsPlainScriptType(const asCObjectType *type)
+{
+	if( type->beh.destruct || (type->flags & asOBJ_GC) )
+		return false;
+	for( asUINT n = 0; n < type->properties.GetLength(); n++ )
+	{
+		const asCTypeInfo *member = type->properties[n]->type.GetTypeInfo();
+		if( member && !(member->flags & asOBJ_ENUM) )
+			return false;
+	}
+	return true;
+}
+
+// The generated code gives up the last reference of a script object here, see
+// CJITCodeGen::EmitScriptRelease. The objects of the plain classes are freed
+// directly, like asCScriptObject::Release ends up doing after it has looked at
+// each member, unless a weak reference watches the object
 void JIT_ReleaseScriptObject(void *obj) noexcept
 {
-	static_cast<asCScriptObject*>(obj)->Release();
+	asCScriptObject *o = static_cast<asCScriptObject*>(obj);
+	asCObjectType *type = o->objType;
+	if( SJITScriptObject::RefCount(o).get() == 1 && !SJITScriptObject::HasExtra(o) && IsPlainScriptType(type) )
+	{
+		SJITScriptObject::RefCount(o).set(0);
+		type->engine->CallFree(o);
+		type->Release();
+		return;
+	}
+	o->Release();
 }
 
 void JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept
