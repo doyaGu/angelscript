@@ -825,13 +825,27 @@ bool CJITCodeGen::EmitIncDec(const SJITInstr &instr)
 		}
 		else
 		{
-			Gp p = m_uc.new_gp_ptr();
-			Lea(p, m);
-			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-			call->set_arg(0, Imm(int(instr.op)));
-			call->set_arg(1, p);
-			call->set_arg(2, Imm(0));
-			call->set_arg(3, Imm(0));
+			Mem hiMem = m;
+			hiMem.add_offset(4);
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			Gp carry = m_uc.new_gp32();
+			m_uc.load_u32(lo, m);
+			m_uc.load_u32(hi, hiMem);
+			if( instr.op == asBC_INCi64 )
+			{
+				m_uc.add(lo, lo, Imm(1));
+				m_uc.select(carry, Imm(1), Imm(0), test_z(lo));
+				m_uc.add(hi, hi, carry);
+			}
+			else
+			{
+				m_uc.select(carry, Imm(1), Imm(0), test_z(lo));
+				m_uc.sub(lo, lo, Imm(1));
+				m_uc.sub(hi, hi, carry);
+			}
+			m_uc.store_u32(m, lo);
+			m_uc.store_u32(hiMem, hi);
 		}
 		break;
 
