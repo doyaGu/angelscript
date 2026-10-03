@@ -1481,9 +1481,10 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 			// arguments. Then they are pushed for the constructor, a script function
 			// called like by asBC_CALL
 			//
-			// TODO: runtime optimize: The objects of registered types could be allocated
-			//                         and constructed directly too, with the call of the
-			//                         constructor in the key like for asBC_CALLSYS.
+			// Registered types without a constructor only need an allocation and the
+			// store through the destination address. Constructors still use JIT_Alloc;
+			// calling them directly would need their call shape in the AOT key like
+			// asBC_CALLSYS.
 			asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
 			int id = asBC_INTARG(instr.bc + P);
 			asCScriptFunction *callee = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
@@ -1503,9 +1504,35 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 			Emit("\t}");
 			Emit("\telse");
 			Emit("\t{");
-			Emit("\t\tif( JIT_Alloc(regs, o_, AOT_INT(%u)) )", pos + 1 + P);
-			Emit("\t\t\treturn 1;");
-			Emit("\t\tAOT_RELOAD();");
+			if( id == 0 )
+			{
+				Emit("\t\tvoid *m_ = ctx->m_engine->CallAlloc(o_);");
+				Emit("\t\tvoid **a_ = (void**)AOT_S(pw, 0);");
+				Emit("\t\tsp += %d;", P);
+				Emit("\t\tif( a_ ) *a_ = m_;");
+				Emit("\t\tif( AOT_SUSPENDING() )");
+				Emit("\t\t{");
+				Emit("\t\t\tregs->programPointer = bc + %u;", pos + instr.size);
+				Emit("\t\t\tregs->stackPointer = sp;");
+				Emit("\t\t\tif( ctx->m_doSuspend )");
+				Emit("\t\t\t{");
+				Emit("\t\t\t\tctx->m_status = asEXECUTION_SUSPENDED;");
+				Emit("\t\t\t\treturn 1;");
+				Emit("\t\t\t}");
+				Emit("\t\t\tif( ctx->m_status != asEXECUTION_ACTIVE )");
+				Emit("\t\t\t{");
+				Emit("\t\t\t\tctx->m_engine->CallFree(m_);");
+				Emit("\t\t\t\tif( a_ ) *a_ = 0;");
+				Emit("\t\t\t\treturn 1;");
+				Emit("\t\t\t}");
+				Emit("\t\t}");
+			}
+			else
+			{
+				Emit("\t\tif( JIT_Alloc(regs, o_, AOT_INT(%u)) )", pos + 1 + P);
+				Emit("\t\t\treturn 1;");
+				Emit("\t\tAOT_RELOAD();");
+			}
 			Emit("\t}");
 			EmitReload("\t");
 			Emit("}");

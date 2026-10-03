@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 13;
+const asQWORD JIT_AOT_FORMAT_VERSION = 14;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -221,6 +221,10 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 		// Nor is the type, but how its handles are copied and released
 		if( instr.op == asBC_FREE || instr.op == asBC_REFCPY || instr.op == asBC_RefCpyV )
 			hash.Add(CJITByteCode::GetRefKind(func->engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(bc))));
+		// Registered types without constructors are allocated directly by the generated
+		// code. The function id itself still comes from the bytecode at run time.
+		if( instr.op == asBC_ALLOC )
+			hash.Add(asBC_INTARG(bc + AS_PTR_SIZE) != 0);
 
 		// The function id isn't, but how the function is called, or where the
 		// indexers compiled in place find the element
