@@ -279,6 +279,8 @@ asINT64 JIT_fTOi64(float f) noexcept;
 asINT64 JIT_dTOi64(double d) noexcept;
 asQWORD JIT_fTOu64(float f) noexcept;
 asQWORD JIT_dTOu64(double d) noexcept;
+float   JIT_i64TOf(asINT64 v) noexcept;
+double  JIT_i64TOd(asINT64 v) noexcept;
 float   JIT_u64TOf(asQWORD v) noexcept;
 double  JIT_u64TOd(asQWORD v) noexcept;
 asUINT  JIT_fTOu(float f) noexcept;

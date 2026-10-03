@@ -1032,6 +1032,16 @@ asQWORD JIT_dTOu64(double d) noexcept
 	return asQWORD(d);
 }
 
+float JIT_i64TOf(asINT64 v) noexcept
+{
+	return float(v);
+}
+
+double JIT_i64TOd(asINT64 v) noexcept
+{
+	return double(v);
+}
+
 float JIT_u64TOf(asQWORD v) noexcept
 {
 	return float(v);
@@ -1119,10 +1129,10 @@ int JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept
 	case asBC_i64TOi:  *(int*)dst = int(ia); break;
 	case asBC_dTOi64:  *(asINT64*)dst = JIT_dTOi64(*(const double*)a); break;
 	case asBC_dTOu64:  *(asQWORD*)dst = JIT_dTOu64(*(const double*)a); break;
-	case asBC_i64TOf:  *(float*)dst = float(ia); break;
-	case asBC_u64TOf:  *(float*)dst = float(ua); break;
-	case asBC_i64TOd:  *(double*)dst = double(ia); break;
-	case asBC_u64TOd:  *(double*)dst = double(ua); break;
+	case asBC_i64TOf:  *(float*)dst = JIT_i64TOf(ia); break;
+	case asBC_u64TOf:  *(float*)dst = JIT_u64TOf(ua); break;
+	case asBC_i64TOd:  *(double*)dst = JIT_i64TOd(ia); break;
+	case asBC_u64TOd:  *(double*)dst = JIT_u64TOd(ua); break;
 	default:
 		return 1;
 	}
