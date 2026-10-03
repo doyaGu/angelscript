@@ -241,9 +241,9 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 	ctx->m_callingSystemFunction = 0;
 
 	// The VM registers describe the call instruction in the innermost function, with
-	// the arguments on the stack. Release the handles it took ownership of before
-	// that stack is popped
-	JIT_CleanupAutoHandles(regs, descr);
+	// the arguments on the stack. Clean what it took ownership of before that stack
+	// is popped
+	JIT_CleanupSystemCallArgs(regs, descr);
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 	int popSize = sysFunc->paramSize;
 	if( SystemCallHasStackObject(sysFunc) )
@@ -687,7 +687,26 @@ void JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *
 	*dst = src;
 }
 
-int JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept
+static bool IsIndirectValueArg(asCScriptFunction *func, asUINT param) noexcept
+{
+	if( func == 0 || param >= func->parameterTypes.GetLength() )
+		return false;
+	const asCDataType &dt = func->parameterTypes[param];
+	if( !dt.IsObject() || dt.IsObjectHandle() || dt.IsReference() || dt.GetTypeInfo() == 0 )
+		return false;
+
+	// All native call backends pass non-trivial objects indirectly. Some ABIs do the
+	// same for aggregates above their platform-specific size threshold.
+	if( dt.GetTypeInfo()->flags & COMPLEX_MASK )
+		return true;
+#ifdef AS_LARGE_OBJS_PASSED_BY_REF
+	if( dt.GetSizeInMemoryDWords() >= AS_LARGE_OBJ_MIN_SIZE )
+		return true;
+#endif
+	return false;
+}
+
+int JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept
 {
 	if( func == 0 || func->sysFuncIntf == 0 )
 		return -1;
@@ -698,6 +717,16 @@ int JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept
 	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
 	{
 		const asCDataType &dt = func->parameterTypes[n];
+		if( dt.IsObject() && !dt.IsObjectHandle() && !dt.IsReference() )
+		{
+			if( !IsIndirectValueArg(func, n) || cleanIdx >= sysFunc->cleanArgs.GetLength() )
+				return -1;
+			const asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[cleanIdx++];
+			asCObjectType *type = CastToObjectType(dt.GetTypeInfo());
+			if( type == 0 || (clean.op != 1 && clean.op != 2) ||
+			    clean.off != offset || clean.ot != type )
+				return -1;
+		}
 		if( n < sysFunc->paramAutoHandles.GetLength() && sysFunc->paramAutoHandles[n] )
 		{
 			if( cleanIdx >= sysFunc->cleanArgs.GetLength() )
@@ -717,7 +746,7 @@ int JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept
 	return cleanIdx == sysFunc->cleanArgs.GetLength() ? int(cleanIdx) : -1;
 }
 
-void JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexcept
+void JIT_CleanupSystemCallArgs(asSVMRegisters *regs, asCScriptFunction *func) noexcept
 {
 	asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
 	asDWORD *args = regs->stackPointer;
@@ -730,16 +759,25 @@ void JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexc
 	for( asUINT n = 0; n < sysFunc->cleanArgs.GetLength(); n++ )
 	{
 		asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[n];
-		asASSERT(clean.op == 0);
-		if( clean.op != 0 )
-			continue;
 		void **addr = (void**)&args[clean.off];
-		if( *addr )
-		{
+		if( *addr == 0 )
+			continue;
+		if( clean.op == 0 )
 			engine->CallObjectMethod(*addr, clean.ot->beh.release);
-			*addr = 0;
+		else
+		{
+			asASSERT(clean.op == 1 || clean.op == 2);
+			if( clean.op == 2 )
+				engine->CallObjectMethod(*addr, clean.ot->beh.destruct);
+			engine->CallFree(*addr);
 		}
+		*addr = 0;
 	}
+}
+
+void JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexcept
+{
+	JIT_CleanupSystemCallArgs(regs, func);
 }
 
 void JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj) noexcept

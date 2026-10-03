@@ -216,12 +216,16 @@ void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noex
 // asBC_REFCPY and asBC_RefCpyV
 void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *src) noexcept;
 
-// Returns the number of parameter auto handles that a direct system call must
-// release, or -1 if its argument cleanup includes anything else
-int    JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept;
+// Returns the number of argument cleanups of a direct system call, or -1 if they
+// include value objects that the direct call cannot pass indirectly
+int    JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept;
 
-// Releases the parameter auto handles of a direct system call. The stack pointer
-// must still point at its arguments, as it did when the function was entered
+// Cleans the value objects and auto handles of a direct system call. The stack
+// pointer must still point at its arguments, as it did when the function was entered
+void   JIT_CleanupSystemCallArgs(asSVMRegisters *regs, asCScriptFunction *func) noexcept;
+
+// Kept so that AOT source generated before the cleanup helper was generalized
+// still compiles
 void   JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexcept;
 
 // Adds the reference of a handle returned by a direct system call whose declaration

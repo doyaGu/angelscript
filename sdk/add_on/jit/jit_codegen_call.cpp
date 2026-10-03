@@ -1368,8 +1368,6 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal )
-		return false;
 	// The engine applies these adjustments only to method objects. Functor methods
 	// have two object pointers with less useful registration semantics, so retain
 	// their existing fallback when either pointer would need adjustment.
@@ -1378,9 +1376,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Auxiliary objects only have defined direct-call semantics for class methods.
 	if( sysFunc->auxiliary && !auxiliaryThis )
 		return false;
-	int autoHandleCount = JIT_GetAutoHandleCleanupCount(descr);
-	if( autoHandleCount < 0 )
+	int cleanupCount = JIT_GetSystemCallCleanupCount(descr);
+	if( cleanupCount < 0 )
 		return false;
+	bool cleanupValues = sysFunc->takesObjByVal;
 
 	// Return value. A value type returned by value is stored at the location that the
 	// caller put on the stack, either by the function itself through the hidden pointer,
@@ -1468,7 +1467,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		const asCDataType &pt = descr->parameterTypes[n];
 		SArg arg = {};
 		arg.stackOff = stackPos;
-		arg.autoHandle = n < sysFunc->paramAutoHandles.GetLength() && sysFunc->paramAutoHandles[n];
+		arg.autoHandle = !cleanupValues && n < sysFunc->paramAutoHandles.GetLength() &&
+		                 sysFunc->paramAutoHandles[n];
 		if( pt.GetTokenType() == ttQuestion )
 		{
 			// A variable-type parameter is passed to the application as two arguments:
@@ -1497,7 +1497,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 		args.push_back(arg);
 	}
-	asASSERT(cleanIdx == asUINT(autoHandleCount));
+	if( !cleanupValues )
+		asASSERT(cleanIdx == asUINT(cleanupCount));
 	if( stackPos - firstArg != sysFunc->paramSize )
 		return false;
 	if( args.size() + (hasThis ? 1 : 0) + ((objFirst || objLast) ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
@@ -1843,19 +1844,30 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		break;
 	}
 
-	// The function owns the references passed through @+ parameters. Release them
-	// from the still-live argument slots, then pop the complete call frame
-	for( asUINT n = 0; n < args.size(); n++ )
+	// The function owns the value copies and references passed through @+ parameters.
+	// Value copies use the engine's prepared cleanup metadata; the common auto-handle
+	// case keeps its releases in line.
+	if( cleanupValues )
 	{
-		if( !args[n].autoHandle )
-			continue;
-		Gp handle = m_uc.new_gp_ptr();
-		m_uc.load(handle, Stack(args[n].stackOff));
-		Label noHandle = m_uc.new_label();
-		m_uc.j(noHandle, test_z(handle));
-		EmitBehaviourCall(args[n].release, handle);
-		m_uc.store_zero_reg(Stack(args[n].stackOff));
-		m_uc.bind(noHandle);
+		InvokeNode *cleanup = Invoke((const void*)JIT_CleanupSystemCallArgs,
+			FuncSignature::build<void, asSVMRegisters*, asCScriptFunction*>());
+		SetRegsArg(cleanup, 0);
+		cleanup->set_arg(1, Imm(int64_t(asPWORD(descr))));
+	}
+	else
+	{
+		for( asUINT n = 0; n < args.size(); n++ )
+		{
+			if( !args[n].autoHandle )
+				continue;
+			Gp handle = m_uc.new_gp_ptr();
+			m_uc.load(handle, Stack(args[n].stackOff));
+			Label noHandle = m_uc.new_label();
+			m_uc.j(noHandle, test_z(handle));
+			EmitBehaviourCall(args[n].release, handle);
+			m_uc.store_zero_reg(Stack(args[n].stackOff));
+			m_uc.bind(noHandle);
+		}
 	}
 	PopStack(popSize * 4);
 
