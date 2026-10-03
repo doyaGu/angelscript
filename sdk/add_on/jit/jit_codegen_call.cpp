@@ -1377,7 +1377,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Auxiliary objects only have defined direct-call semantics for class methods.
 	if( sysFunc->auxiliary && !auxiliaryThis )
 		return false;
-	int cleanupCount = JIT_GetSystemCallCleanupCount(descr);
+	int cleanupCount = JIT_GetSystemCallCleanupCount(descr, true);
 	if( cleanupCount < 0 )
 		return false;
 	bool cleanupValues = sysFunc->takesObjByVal;
@@ -1455,7 +1455,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
-	struct SArg { int kind; int stackOff; TypeId type; bool autoHandle; SDirectBehaviour release; };
+	struct SArg { int kind; int stackOff; int valueSize; TypeId type; bool autoHandle; SDirectBehaviour release; };
 	std::vector<SArg> args;
 	bool hasStackObj = thisFromStack || objFirst || objLast;
 	bool hasThis = thisFromStack || auxiliaryThis;
@@ -1486,7 +1486,23 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			stackPos += AS_PTR_SIZE + 1;
 			continue;
 		}
-		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
+		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
+		else if( pt.IsObject() )
+		{
+			arg.valueSize = JIT_GetInlineValueArgSize(descr, n);
+			if( arg.valueSize > 0 )
+			{
+				arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
+				arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
+				           arg.valueSize == 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+			}
+			else
+			{
+				arg.kind = ARG_PTR;
+				arg.type = TypeId::kUIntPtr;
+			}
+			stackPos += AS_PTR_SIZE;
+		}
 		else if( pt.IsFloatType() )                { arg.kind = ARG_F32; arg.type = TypeId::kFloat32; stackPos += 1; }
 		else if( pt.IsDoubleType() )               { arg.kind = ARG_F64; arg.type = TypeId::kFloat64; stackPos += 2; }
 		else if( pt.GetSizeOnStackDWords() == 2 )  { arg.kind = ARG_I64; arg.type = TypeId::kInt64;   stackPos += 2; }
@@ -1590,6 +1606,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Load the arguments before anything is written back so the loads can be scheduled freely
 	std::vector<Gp>  gpArgs(args.size());
 	std::vector<Gp>  gpArgsHi(args.size());
+	std::vector<Gp>  valueObjs(args.size());
 	std::vector<Vec> vecArgs(args.size());
 	for( asUINT n = 0; n < args.size(); n++ )
 	{
@@ -1601,13 +1618,32 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			break;
 		case ARG_I32:
 			gpArgs[n] = m_uc.new_gp32();
-			m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
+			if( args[n].valueSize )
+			{
+				valueObjs[n] = m_uc.new_gp_ptr();
+				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
+				if( args[n].valueSize == 1 )
+					m_uc.load_u8(gpArgs[n], mem_ptr(valueObjs[n]));
+				else if( args[n].valueSize == 2 )
+					m_uc.load_u16(gpArgs[n], mem_ptr(valueObjs[n]));
+				else
+					m_uc.load_u32(gpArgs[n], mem_ptr(valueObjs[n]));
+			}
+			else
+				m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
 			break;
 		case ARG_I64:
 			if( Is64Bit() )
 			{
 				gpArgs[n] = m_uc.new_gp64();
-				m_uc.load_u64(gpArgs[n], Stack(args[n].stackOff));
+				if( args[n].valueSize )
+				{
+					valueObjs[n] = m_uc.new_gp_ptr();
+					m_uc.load(valueObjs[n], Stack(args[n].stackOff));
+					m_uc.load_u64(gpArgs[n], mem_ptr(valueObjs[n]));
+				}
+				else
+					m_uc.load_u64(gpArgs[n], Stack(args[n].stackOff));
 			}
 			else
 			{
@@ -1627,6 +1663,14 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			break;
 		}
 	}
+	for( asUINT n = 0; n < args.size(); n++ )
+		if( args[n].valueSize )
+		{
+			InvokeNode *freeValue = Invoke((const void*)JIT_FreeValueArg,
+				FuncSignature::build<void, asSVMRegisters*, void*>());
+			SetRegsArg(freeValue, 0);
+			freeValue->set_arg(1, valueObjs[n]);
+		}
 
 	// The function may raise a script exception, suspend the context, or
 	// inspect the variables through the debug interface, so the VM registers

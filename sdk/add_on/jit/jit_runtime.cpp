@@ -706,7 +706,31 @@ static bool IsIndirectValueArg(asCScriptFunction *func, asUINT param) noexcept
 	return false;
 }
 
-int JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept
+int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param) noexcept
+{
+	if( func == 0 || param >= func->parameterTypes.GetLength() )
+		return -1;
+	const asCDataType &dt = func->parameterTypes[param];
+	if( !dt.IsObject() || dt.IsObjectHandle() || dt.IsReference() || dt.GetTypeInfo() == 0 )
+		return -1;
+	if( IsIndirectValueArg(func, param) )
+		return 0;
+
+#ifdef AS_X64_MSVC
+	// The Microsoft x64 ABI passes POD aggregates of exactly 1, 2, 4, or 8 bytes
+	// in an integer slot. The engine's native backend copies those bytes out of the
+	// temporary script object before freeing it.
+	if( dt.GetTypeInfo()->flags & asOBJ_POD )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		if( size == 1 || size == 2 || size == 4 || size == 8 )
+			return size;
+	}
+#endif
+	return -1;
+}
+
+int JIT_GetSystemCallCleanupCount(asCScriptFunction *func, bool allowInlineValues) noexcept
 {
 	if( func == 0 || func->sysFuncIntf == 0 )
 		return -1;
@@ -719,7 +743,12 @@ int JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept
 		const asCDataType &dt = func->parameterTypes[n];
 		if( dt.IsObject() && !dt.IsObjectHandle() && !dt.IsReference() )
 		{
-			if( !IsIndirectValueArg(func, n) || cleanIdx >= sysFunc->cleanArgs.GetLength() )
+			int inlineSize = JIT_GetInlineValueArgSize(func, n);
+			if( inlineSize < 0 || (inlineSize > 0 && !allowInlineValues) )
+				return -1;
+			if( inlineSize > 0 )
+				continue;
+			if( cleanIdx >= sysFunc->cleanArgs.GetLength() )
 				return -1;
 			const asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[cleanIdx++];
 			asCObjectType *type = CastToObjectType(dt.GetTypeInfo());
@@ -744,6 +773,11 @@ int JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept
 	}
 
 	return cleanIdx == sysFunc->cleanArgs.GetLength() ? int(cleanIdx) : -1;
+}
+
+void JIT_FreeValueArg(asSVMRegisters *regs, void *obj) noexcept
+{
+	GetContext(regs)->m_engine->CallFree(obj);
 }
 
 void JIT_CleanupSystemCallArgs(asSVMRegisters *regs, asCScriptFunction *func) noexcept

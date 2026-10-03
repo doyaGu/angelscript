@@ -216,9 +216,18 @@ void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noex
 // asBC_REFCPY and asBC_RefCpyV
 void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *src) noexcept;
 
+// Returns the size of a value parameter passed inline by a supported native ABI,
+// zero if it is passed indirectly, or -1 if direct calls don't support it
+int    JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param) noexcept;
+
 // Returns the number of argument cleanups of a direct system call, or -1 if they
-// include value objects that the direct call cannot pass indirectly
-int    JIT_GetSystemCallCleanupCount(asCScriptFunction *func) noexcept;
+// include value objects that the direct call cannot pass. allowInlineValues is for
+// backends that copy supported inline values out of their script objects
+int    JIT_GetSystemCallCleanupCount(asCScriptFunction *func, bool allowInlineValues) noexcept;
+
+// Frees the temporary script object after its inline value has been loaded for a
+// direct system call. The native copy owns the value from then on
+void   JIT_FreeValueArg(asSVMRegisters *regs, void *obj) noexcept;
 
 // Cleans the value objects and auto handles of a direct system call. The stack
 // pointer must still point at its arguments, as it did when the function was entered

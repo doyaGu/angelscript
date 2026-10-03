@@ -248,7 +248,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	if( sysFunc->auxiliary && !call.auxiliaryThis )
 		return false;
-	int cleanupCount = JIT_GetSystemCallCleanupCount(descr);
+	int cleanupCount = JIT_GetSystemCallCleanupCount(descr, false);
 	if( cleanupCount < 0 )
 		return false;
 	call.cleanArgs = cleanupCount != 0;
