@@ -907,49 +907,6 @@ void CJITCppGen::EmitSync(const char *indent)
 	Emit("%sAOT_SYNC(%u);", indent, m_pos);
 }
 
-// The function that a call is expected to call: the one of asBC_CALL, the method
-// of the class for the virtual methods, and the only method of the classes of the
-// modules implementing an interface method. Null if there is none
-asCScriptFunction *CJITCppGen::FindCallee(asCScriptFunction *func, bool virtualCall)
-{
-	if( func == 0 || !virtualCall )
-		return func;
-	if( func->funcType == asFUNC_VIRTUAL )
-	{
-		asCObjectType *type = func->objectType;
-		if( type == 0 || func->vfTableIdx < 0 || asUINT(func->vfTableIdx) >= type->virtualFunctionTable.GetLength() )
-			return 0;
-		return type->virtualFunctionTable[func->vfTableIdx];
-	}
-	if( func->funcType != asFUNC_INTERFACE || func->objectType == 0 )
-		return 0;
-
-	asCScriptFunction *found = 0;
-	asIScriptEngine *engine = func->GetEngine();
-	for( asUINT m = 0; m < engine->GetModuleCount(); m++ )
-	{
-		asIScriptModule *mod = engine->GetModuleByIndex(m);
-		for( asUINT t = 0; mod && t < mod->GetObjectTypeCount(); t++ )
-		{
-			// The interfaces list the interfaces they derive from, but have no methods
-			asCObjectType *type = CastToObjectType(static_cast<asCTypeInfo*>(mod->GetObjectTypeByIndex(t)));
-			if( type == 0 || type->IsInterface() )
-				continue;
-			for( asUINT n = 0; n < type->interfaces.GetLength() && n < type->interfaceVFTOffsets.GetLength(); n++ )
-			{
-				if( type->interfaces[n] != func->objectType )
-					continue;
-				asUINT idx = asUINT(func->vfTableIdx) + type->interfaceVFTOffsets[n];
-				asCScriptFunction *method = idx < type->virtualFunctionTable.GetLength() ? type->virtualFunctionTable[idx] : 0;
-				if( method == 0 || (found && found != method) )
-					return 0;
-				found = method;
-			}
-		}
-	}
-	return found;
-}
-
 void CJITCppGen::EmitScriptCall(asUINT idx, const SJITInstr &instr)
 {
 	asUINT pos = m_pos;
@@ -957,7 +914,7 @@ void CJITCppGen::EmitScriptCall(asUINT idx, const SJITInstr &instr)
 	asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
 	int id = asBC_INTARG(instr.bc);
 	asCScriptFunction *callee = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
-	callee = FindCallee(callee, virtualCall);
+	callee = CJITByteCode::FindAOTCallee(callee, virtualCall);
 
 	Emit("{");
 	EmitOwnBorrowed("\t");

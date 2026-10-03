@@ -1404,11 +1404,57 @@ void CJITByteCode::FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlin
 	}
 }
 
-// Analyses the functions called by plain script calls just far enough to find the
-// handle parameters whose references their direct AOT entries can borrow. Virtual
-// calls are left for a separate analysis because the implementation depends on the
-// receiver type. The called function is not emitted in place: its generated direct
-// entry receives the borrowed-parameter mask at run time.
+// The function that an AOT script call expects to call directly. The pointer to the
+// implementation found at run time is checked against its generated code before the
+// direct call, so other implementations safely take the fallback path.
+asCScriptFunction *CJITByteCode::FindAOTCallee(asCScriptFunction *func, bool virtualCall)
+{
+	if( func == 0 || !virtualCall )
+		return func;
+	if( func->funcType == asFUNC_VIRTUAL )
+	{
+		asCObjectType *type = func->objectType;
+		if( type == 0 || func->vfTableIdx < 0 ||
+		    asUINT(func->vfTableIdx) >= type->virtualFunctionTable.GetLength() )
+			return 0;
+		return type->virtualFunctionTable[func->vfTableIdx];
+	}
+	if( func->funcType != asFUNC_INTERFACE || func->objectType == 0 )
+		return 0;
+
+	asCScriptFunction *found = 0;
+	asIScriptEngine *engine = func->GetEngine();
+	for( asUINT m = 0; m < engine->GetModuleCount(); m++ )
+	{
+		asIScriptModule *mod = engine->GetModuleByIndex(m);
+		for( asUINT t = 0; mod && t < mod->GetObjectTypeCount(); t++ )
+		{
+			// The interfaces list the interfaces they derive from, but have no methods
+			asCObjectType *type = CastToObjectType(
+				static_cast<asCTypeInfo*>(mod->GetObjectTypeByIndex(t)));
+			if( type == 0 || type->IsInterface() )
+				continue;
+			for( asUINT n = 0; n < type->interfaces.GetLength() &&
+			                        n < type->interfaceVFTOffsets.GetLength(); n++ )
+			{
+				if( type->interfaces[n] != func->objectType )
+					continue;
+				asUINT idx = asUINT(func->vfTableIdx) + type->interfaceVFTOffsets[n];
+				asCScriptFunction *method = idx < type->virtualFunctionTable.GetLength()
+				                            ? type->virtualFunctionTable[idx] : 0;
+				if( method == 0 || (found && found != method) )
+					return 0;
+				found = method;
+			}
+		}
+	}
+	return found;
+}
+
+// Analyses the expected direct targets of script calls just far enough to find the
+// handle parameters whose references their direct AOT entries can borrow. The called
+// function is not emitted in place: its generated direct entry receives the
+// borrowed-parameter mask at run time.
 void CJITByteCode::FindAOTBorrowedArgs()
 {
 	std::map<asUINT, std::vector<SJITInlinee> > callees;
@@ -1416,12 +1462,14 @@ void CJITByteCode::FindAOTBorrowedArgs()
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( instr.op != asBC_CALL || (instr.flags & JIT_INSTR_DEAD) )
+		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF) ||
+		    (instr.flags & JIT_INSTR_DEAD) )
 			continue;
 
 		int id = asBC_INTARG(instr.bc);
 		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
 		                           ? engine->scriptFunctions[id] : 0;
+		func = FindAOTCallee(func, instr.op == asBC_CALLINTF);
 		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
 			continue;
 

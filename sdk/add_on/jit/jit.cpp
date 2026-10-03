@@ -25,10 +25,6 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Borrow the references of handle arguments passed through virtual and interface
-//    calls in the code generated ahead of time. Plain script calls already do so; the
-//    remaining calls need all possible implementations analysed (jit_bytecode.cpp,
-//    FindAOTBorrowedArgs).
 //  - Objects passed by value to direct system calls (jit_codegen_call.cpp,
 //    EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,

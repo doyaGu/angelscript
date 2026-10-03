@@ -30,8 +30,8 @@ class asCScriptEngine;
 // nothing that the key leaves out.
 //
 // The script calls to the functions whose code is generated too call the code
-// directly if the function called at run time has that code, see AOT_PopCall. Plain
-// script calls may lend handle arguments to the direct entry, which receives their
+// directly if the function called at run time has that code, see AOT_PopCall. The
+// calls may lend handle arguments to the direct entry, which receives their
 // parameter mask and owns them before exposing its frame. The
 // lines of the code for that are a region, which begins with a line of
 // JIT_CPPGEN_REGION followed by the name of the code called, and ends with a line of
@@ -125,8 +125,6 @@ protected:
 	void EmitSystemCall(asUINT idx, const SJITSystemCall &call);
 	void EmitConstructor(asUINT idx, const SJITSystemCall &call);
 	bool GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const;
-
-	static asCScriptFunction *FindCallee(asCScriptFunction *func, bool virtualCall);
 
 	SLocal     *FindLocal(int offset);
 	std::string Var(const char *type, int offset);

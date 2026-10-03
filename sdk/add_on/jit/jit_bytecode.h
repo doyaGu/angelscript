@@ -221,11 +221,15 @@ public:
 	void Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const SJITInlineOptions *inlining = 0);
 
 	// Performs the analysis for the code generated ahead of time, which must depend
-	// only on the key of the function, see JIT_GetAOTKey. Nothing is inlined, and the
-	// instructions aren't marked with what their objects and callees allow. The script
-	// calls that the code may make directly leave the frame dirty, see CJITCppGen.
-	// The indexers are part of the key too
+	// only on the key of the function, see JIT_GetAOTKey. Nothing is inlined. Script
+	// calls are analysed only for the handle arguments that their direct entries can
+	// borrow. The calls that the code may make directly leave the frame dirty, see
+	// CJITCppGen. The indexers are part of the key too
 	void AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTION_t, SJITIndexer> *indexers);
+
+	// The function that generated AOT code expects a script call to reach. Virtual
+	// and interface calls return null when no single implementation can be expected
+	static asCScriptFunction *FindAOTCallee(asCScriptFunction *func, bool virtualCall);
 
 	asCScriptFunction             *GetFunction() const     { return m_func; }
 	const asDWORD                 *GetByteCode() const     { return m_byteCode; }
@@ -352,7 +356,7 @@ public:
 	int    FindParam(int offset) const;
 
 	// Returns the mask of the handle parameters that the function only reads and
-	// releases, so that the calls inlining it can lend it their references
+	// releases, so that native script calls can lend it their references
 	asUINT GetBorrowableParams() const { return m_borrowableParams; }
 
 	// Returns the mask of the parameters of the function called by the instruction
@@ -360,7 +364,7 @@ public:
 	asUINT GetBorrowedArgs(asUINT instrIdx) const;
 
 	// Returns the variables that must be null for the copies of the references lent
-	// to an inlined call not to release anything, which the first of the copies
+	// to a native script call not to release anything, which the first of the copies
 	// checks for all of them
 	const std::vector<int> &GetBorrowChecks(asUINT instrIdx) const;
 
