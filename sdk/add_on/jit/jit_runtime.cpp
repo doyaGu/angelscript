@@ -726,6 +726,17 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param) noexcept
 		if( size == 1 || size == 2 || size == 4 || size == 8 )
 			return size;
 	}
+#elif defined(AS_X64_GCC)
+	// The System V x64 ABI classifies these aggregates as one INTEGER eightbyte.
+	// Restrict this to one native slot; larger aggregates need atomic allocation of
+	// all of their registers or must be passed entirely on the stack.
+	asQWORD flags = dt.GetTypeInfo()->flags;
+	if( (flags & asOBJ_POD) && (flags & (asOBJ_APP_CLASS_ALLINTS | asOBJ_APP_PRIMITIVE)) )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		if( size == 1 || size == 2 || size == 4 || size == 8 )
+			return size;
+	}
 #endif
 	return -1;
 }

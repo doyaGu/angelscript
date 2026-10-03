@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 19;
+const asQWORD JIT_AOT_FORMAT_VERSION = 20;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
