@@ -1290,7 +1290,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Calling convention. The object on the script stack and the native method's
 	// this pointer aren't always the same: functor methods use auxiliary as this
 	// and pass the script object as an ordinary first or last argument.
-	bool thisFromStack = false, auxiliaryThis = false;
+	bool thisFromStack = false, auxiliaryThis = false, virtualThis = false;
 	bool objFirst = false, objLast = false;
 	CallConvId conv = CallConvId::kCDecl;
 	switch( sysFunc->callConv )
@@ -1309,6 +1309,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		conv = CallConvId::kThisCall;
 #endif
 		break;
+#ifdef GNU_STYLE_VIRTUAL_METHOD
+	case ICC_VIRTUAL_THISCALL:
+		thisFromStack = true;
+		virtualThis = true;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
+#endif
+		break;
+#endif
 	case ICC_CDECL_OBJFIRST:
 		objFirst = true;
 		break;
@@ -1333,6 +1342,28 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		conv = CallConvId::kThisCall;
 #endif
 		break;
+#ifdef GNU_STYLE_VIRTUAL_METHOD
+	case ICC_VIRTUAL_THISCALL_OBJFIRST:
+		if( !sysFunc->auxiliary )
+			return false;
+		auxiliaryThis = true;
+		virtualThis = true;
+		objFirst = true;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
+#endif
+		break;
+	case ICC_VIRTUAL_THISCALL_OBJLAST:
+		if( !sysFunc->auxiliary )
+			return false;
+		auxiliaryThis = true;
+		virtualThis = true;
+		objLast = true;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
+#endif
+		break;
+#endif
 	default:
 		return false;
 	}
@@ -1565,7 +1596,17 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	Mem callingFunc = ContextField(JIT_GetContextLayout().callingSystemFunction);
 	m_uc.store(callingFunc, PtrConst(asPWORD(descr)));
 
-	InvokeNode *call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);
+	InvokeNode *call = 0;
+	if( virtualThis )
+	{
+		// Itanium method pointers hold the byte offset in the virtual table plus 1.
+		Gp target = m_uc.new_gp_ptr();
+		m_uc.load(target, mem_ptr(thisObj));
+		m_uc.load(target, Addr(target, int32_t(FuncPtrToUInt(sysFunc->func) - 1)));
+		m_uc.cc->invoke(Out(call), target, sig);
+	}
+	else
+		call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);
 	asUINT argIdx = 0;
 	if( retFirst )
 		call->set_arg(argIdx++, retPtr);
@@ -1836,7 +1877,7 @@ bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 		beh.conv = CallConvId::kThisCall;
 #endif
 		break;
-#if defined(GNU_STYLE_VIRTUAL_METHOD) && (defined(AS_X86) || defined(AS_X64_GCC) || defined(AS_X64_MINGW))
+#if defined(GNU_STYLE_VIRTUAL_METHOD) && (defined(AS_X86) || defined(AS_X64_GCC) || defined(AS_X64_MINGW) || defined(AS_ARM64))
 	case ICC_VIRTUAL_THISCALL:
 		// With the Itanium C++ ABI the method pointer of a virtual method holds its
 		// offset in the virtual function table plus 1

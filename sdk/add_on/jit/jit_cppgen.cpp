@@ -181,6 +181,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.obj = SJITSystemCall::OBJ_NONE;
 	call.thisFromStack = false;
 	call.auxiliaryThis = false;
+	call.virtualThis = false;
 	switch( sysFunc->callConv )
 	{
 	case ICC_CDECL:
@@ -196,6 +197,12 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		else
 			call.thisFromStack = true;
 		break;
+#ifdef GNU_STYLE_VIRTUAL_METHOD
+	case ICC_VIRTUAL_THISCALL:
+		call.thisFromStack = true;
+		call.virtualThis = true;
+		break;
+#endif
 	case ICC_THISCALL_OBJFIRST:
 		if( !sysFunc->auxiliary )
 			return false;
@@ -208,6 +215,22 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		call.auxiliaryThis = true;
 		call.obj = SJITSystemCall::OBJ_LAST;
 		break;
+#ifdef GNU_STYLE_VIRTUAL_METHOD
+	case ICC_VIRTUAL_THISCALL_OBJFIRST:
+		if( !sysFunc->auxiliary )
+			return false;
+		call.auxiliaryThis = true;
+		call.virtualThis = true;
+		call.obj = SJITSystemCall::OBJ_FIRST;
+		break;
+	case ICC_VIRTUAL_THISCALL_OBJLAST:
+		if( !sysFunc->auxiliary )
+			return false;
+		call.auxiliaryThis = true;
+		call.virtualThis = true;
+		call.obj = SJITSystemCall::OBJ_LAST;
+		break;
+#endif
 #endif
 	case ICC_CDECL_OBJFIRST:
 		call.obj = SJITSystemCall::OBJ_FIRST;
@@ -1052,7 +1075,14 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	Emit("\tregs->stackPointer = sp;");
 	Emit("\tctx->m_callingSystemFunction = d_;");
 	std::string retType = call.retParts ? Format("aot_parts<%s, %d>", types[call.ret], call.retParts) : types[call.ret];
-	std::string func = Format("((%s (AOT_CDECL*)(%s))d_->sysFuncIntf->func)(%s)", retType.c_str(), paramList.c_str(), argList.c_str());
+	std::string target = "d_->sysFuncIntf->func";
+	if( call.virtualThis )
+	{
+		Emit("\tasFUNCTION_t f_ = (*(asFUNCTION_t**)%s)[FuncPtrToUInt(d_->sysFuncIntf->func) / sizeof(void*)];",
+			call.thisFromStack ? "o_" : "h_");
+		target = "f_";
+	}
+	std::string func = Format("((%s (AOT_CDECL*)(%s))%s)(%s)", retType.c_str(), paramList.c_str(), target.c_str(), argList.c_str());
 	if( call.ret == SJITSystemCall::VALUE_VOID )
 		Emit("\t%s;", func.c_str());
 	else
