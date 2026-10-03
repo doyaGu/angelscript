@@ -742,7 +742,7 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 	if( (flags & asOBJ_POD) && (flags & (asOBJ_APP_CLASS_ALLFLOATS | asOBJ_APP_FLOAT)) )
 	{
 		int size = dt.GetSizeInMemoryBytes();
-		if( size == 4 || size == 8 )
+		if( size == 4 || size == 8 || size == 12 || size == 16 )
 		{
 			if( floating )
 				*floating = true;

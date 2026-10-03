@@ -163,13 +163,14 @@ const char *CJITCppGen::GetABI()
 static bool IsInlineValueArg(int kind)
 {
 	return (kind >= SJITSystemCall::VALUE_OBJ1 && kind <= SJITSystemCall::VALUE_OBJF8) ||
-	       kind == SJITSystemCall::VALUE_OBJI2;
+	       kind == SJITSystemCall::VALUE_OBJI2 || kind == SJITSystemCall::VALUE_OBJF2;
 }
 
 static int InlineValueArgKind(int size, bool floating)
 {
 	if( floating )
-		return size == 4 ? SJITSystemCall::VALUE_OBJF4 : SJITSystemCall::VALUE_OBJF8;
+		return size > 8 ? SJITSystemCall::VALUE_OBJF2 :
+		       size == 4 ? SJITSystemCall::VALUE_OBJF4 : SJITSystemCall::VALUE_OBJF8;
 	if( size > 8 )
 		return SJITSystemCall::VALUE_OBJI2;
 	switch( size )
@@ -1055,9 +1056,9 @@ void CJITCppGen::EmitIndexer(asUINT idx)
 // would, and the variables are loaded again only after it, like the JIT does
 void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double", "aot_parts<asQWORD, 2>" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64", "" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double", "aot_parts<asQWORD, 2>", "aot_parts<double, 2>" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64", "", "" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	asUINT pos = m_pos;
 	bool obj = call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack;
 	int retOff = obj ? AS_PTR_SIZE : 0;
@@ -1118,7 +1119,7 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 		{
 			int kind = call.args[n];
 			Emit("\tvoid *p_%u = (void*)AOT_S(pw, %d);", n, valueOff[n]);
-			if( kind == SJITSystemCall::VALUE_OBJI2 )
+			if( kind == SJITSystemCall::VALUE_OBJI2 || kind == SJITSystemCall::VALUE_OBJF2 )
 			{
 				Emit("\t%s v_%u = {};", types[kind], n);
 				Emit("\tmemcpy(&v_%u, p_%u, %d);", n, n, call.argBytes[n]);
@@ -1195,9 +1196,9 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 // is pushed. The destination is popped and filled afterwards like asBC_ALLOC does
 void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double", "aot_parts<asQWORD, 2>" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64", "" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double", "aot_parts<asQWORD, 2>", "aot_parts<double, 2>" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64", "", "" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	const asUINT pos = m_pos;
 	const int P = AS_PTR_SIZE;
 	int off = P;
@@ -1249,7 +1250,7 @@ void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 		{
 			int kind = call.args[n];
 			Emit("\t\t\tvoid *p_%u = (void*)AOT_S(pw, %d);", n, valueOff[n]);
-			if( kind == SJITSystemCall::VALUE_OBJI2 )
+			if( kind == SJITSystemCall::VALUE_OBJI2 || kind == SJITSystemCall::VALUE_OBJF2 )
 			{
 				Emit("\t\t\t%s v_%u = {};", types[kind], n);
 				Emit("\t\t\tmemcpy(&v_%u, p_%u, %d);", n, n, call.argBytes[n]);

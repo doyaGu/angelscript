@@ -1511,9 +1511,19 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 					arg.valueSize = valueSize - 8;
 					arg.valueOffset = 8;
 					arg.valueFree = true;
-					arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
-					arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
-					           arg.valueSize <= 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+					if( arg.valueFloat )
+					{
+						// A full eightbyte stack slot is needed for the last float of a
+						// 12-byte aggregate. Its upper bits are zeroed when it is loaded.
+						arg.kind = ARG_F64;
+						arg.type = TypeId::kFloat64;
+					}
+					else
+					{
+						arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
+						arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
+						           arg.valueSize <= 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+					}
 					args.push_back(arg);
 				}
 				stackPos += AS_PTR_SIZE;
@@ -1555,11 +1565,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 #endif
 	// Keep two-slot aggregates wholly in registers or wholly on the stack as required
 	// by the System V ABI. AsmJit sees their slots as separate primitive arguments;
-	// force the first pair that would straddle the last register onto the stack below.
-	// The freed register is then available to the next scalar integer argument. AsmJit also gives the
+	// force the first pair of each register class that would straddle its last register
+	// onto the stack below. The freed register is then available to the next scalar
+	// argument of that class. AsmJit also gives the
 	// floats passed on the stack 4 bytes each instead of 8, so reject those calls.
 	const Environment &env = m_uc.cc->environment();
-	int forceStackArg = -1;
+	int forceStackGpArg = -1, forceStackVecArg = -1;
 	if( Is64Bit() && !env.is_platform_windows() && !env.is_msvc_abi() )
 	{
 		asUINT gpArgs = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
@@ -1570,18 +1581,28 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			bool twoSlotValue = args[n].valueSize && !args[n].valueFree;
 			if( args[n].kind == ARG_F32 || args[n].kind == ARG_F64 )
 			{
-				if( twoSlotValue && vecArgs == 7 )
-					return false;
-				if( args[n].kind == ARG_F32 && vecArgs >= 8 )
-					return false;
-				vecArgs++;
+				if( twoSlotValue )
+				{
+					if( vecArgs <= 6 )
+						vecArgs += 2;
+					else if( vecArgs == 7 && forceStackVecArg < 0 )
+						forceStackVecArg = int(n);
+					n++;
+				}
+				else
+				{
+					if( args[n].kind == ARG_F32 && vecArgs >= 8 )
+						return false;
+					if( vecArgs < 8 )
+						vecArgs++;
+				}
 			}
 			else if( twoSlotValue )
 			{
 				if( gpArgs <= 4 )
 					gpArgs += 2;
-				else if( gpArgs == 5 && forceStackArg < 0 )
-					forceStackArg = int(n);
+				else if( gpArgs == 5 && forceStackGpArg < 0 )
+					forceStackGpArg = int(n);
 				n++;
 			}
 			else
@@ -1602,7 +1623,17 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
 	if( objLast ) sig.add_arg(TypeId::kUIntPtr);
 	if( retInX8 ) sig.add_arg(TypeId::kUIntPtr); // moved to x8 below
-	if( forceStackArg >= 0 ) sig.add_arg(TypeId::kUInt64); // reserves one outgoing stack slot
+	int forceStackGpDummy = -1, forceStackVecDummy = -1;
+	if( forceStackGpArg >= 0 )
+	{
+		forceStackGpDummy = int(sig.arg_count());
+		sig.add_arg(TypeId::kUInt64); // reserves one outgoing stack slot
+	}
+	if( forceStackVecArg >= 0 )
+	{
+		forceStackVecDummy = int(sig.arg_count());
+		sig.add_arg(TypeId::kFloat64); // reserves one outgoing stack slot
+	}
 
 	// A null script object pointer is an exception raised by the VM. Auxiliary is
 	// required to be non-null when the function is registered.
@@ -1746,7 +1777,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				valueObjs[n] = m_uc.new_gp_ptr();
 				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
-				m_uc.v_loadu64_f64(vecArgs[n], mem_ptr(valueObjs[n]));
+				if( args[n].valueSize == 4 )
+					m_uc.v_loadu32_f32(vecArgs[n], Addr(valueObjs[n], args[n].valueOffset));
+				else
+					m_uc.v_loadu64_f64(vecArgs[n], Addr(valueObjs[n], args[n].valueOffset));
 			}
 			else
 				m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
@@ -1775,6 +1809,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	Mem callingFunc = ContextField(JIT_GetContextLayout().callingSystemFunction);
 	m_uc.store(callingFunc, PtrConst(asPWORD(descr)));
 
+	Vec forceStackVecValue;
+	if( forceStackVecArg >= 0 )
+	{
+		forceStackVecValue = m_uc.new_vec128_f64x1();
+		m_uc.v_zero_d(forceStackVecValue);
+	}
 	InvokeNode *call = 0;
 	if( virtualThis )
 	{
@@ -1786,47 +1826,56 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	else
 		call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);
-	if( forceStackArg >= 0 )
+	if( forceStackGpArg >= 0 || forceStackVecArg >= 0 )
 	{
-		// The signature reserves an extra final argument so the outgoing frame has
-		// room for the half moved out of r9. Move the first later scalar integer to
-		// r9, if any; otherwise the unused extra argument occupies it. Stack arguments
-		// between the aggregate and that value move up by one eightbyte.
+		// Each signature dummy reserves an outgoing stack slot for the half moved out
+		// of the last register. Move the first later scalar of the same register class
+		// there, if any; otherwise the unused dummy occupies the register. Stack
+		// arguments between the aggregate and that value move up by one eightbyte.
 		asUINT argBase = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
 		                 (retAfterThis ? 1 : 0) + (objFirst ? 1 : 0);
-		asUINT first = argBase + asUINT(forceStackArg);
-		asUINT second = first + 1;
-		asUINT candidate = call->detail().arg_count() - 1;
-		for( asUINT n = asUINT(forceStackArg + 2); n < args.size(); n++ )
+		auto forcePairToStack = [&](int forceArg, int dummy, bool floating)
 		{
-			if( args[n].valueSize && !args[n].valueFree )
+			if( forceArg < 0 )
+				return;
+			asUINT first = argBase + asUINT(forceArg);
+			asUINT second = first + 1;
+			asUINT candidate = asUINT(dummy);
+			for( asUINT n = asUINT(forceArg + 2); n < args.size(); n++ )
 			{
-				n++;
-				continue;
+				if( args[n].valueSize && !args[n].valueFree )
+				{
+					n++;
+					continue;
+				}
+				bool argFloat = args[n].kind == ARG_F32 || args[n].kind == ARG_F64;
+				if( argFloat == floating )
+				{
+					candidate = argBase + n;
+					break;
+				}
 			}
-			if( args[n].kind != ARG_F32 && args[n].kind != ARG_F64 )
-			{
-				candidate = argBase + n;
-				break;
-			}
-		}
-		if( candidate == call->detail().arg_count() - 1 && objLast )
-			candidate = argBase + asUINT(args.size());
+			if( candidate == asUINT(dummy) && objLast && !floating )
+				candidate = argBase + asUINT(args.size());
 
-		FuncValue &firstValue = call->detail().arg(first);
-		FuncValue &secondValue = call->detail().arg(second);
-		FuncValue &candidateValue = call->detail().arg(candidate);
-		int32_t firstOffset = secondValue.stack_offset();
-		int32_t candidateOffset = candidateValue.stack_offset();
-		for( asUINT n = 0; n < call->detail().arg_count(); n++ )
-		{
-			FuncValue &value = call->detail().arg(n);
-			if( value.is_stack() && value.stack_offset() >= firstOffset && value.stack_offset() < candidateOffset )
-				value.set_stack_offset(value.stack_offset() + 8);
-		}
-		firstValue.init_stack(firstOffset, firstValue.type_id());
-		RegType candidateType = TypeUtils::size_of(candidateValue.type_id()) <= 4 ? RegType::kGp32 : RegType::kGp64;
-		candidateValue.init_reg(candidateType, 9, candidateValue.type_id());
+			FuncValue &firstValue = call->detail().arg(first);
+			FuncValue &secondValue = call->detail().arg(second);
+			FuncValue &candidateValue = call->detail().arg(candidate);
+			int32_t firstOffset = secondValue.stack_offset();
+			int32_t candidateOffset = candidateValue.stack_offset();
+			for( asUINT n = 0; n < call->detail().arg_count(); n++ )
+			{
+				FuncValue &value = call->detail().arg(n);
+				if( value.is_stack() && value.stack_offset() >= firstOffset && value.stack_offset() < candidateOffset )
+					value.set_stack_offset(value.stack_offset() + 8);
+			}
+			firstValue.init_stack(firstOffset, firstValue.type_id());
+			RegType candidateType = floating ? RegType::kVec128 :
+			                        TypeUtils::size_of(candidateValue.type_id()) <= 4 ? RegType::kGp32 : RegType::kGp64;
+			candidateValue.init_reg(candidateType, floating ? 7 : 9, candidateValue.type_id());
+		};
+		forcePairToStack(forceStackGpArg, forceStackGpDummy, false);
+		forcePairToStack(forceStackVecArg, forceStackVecDummy, true);
 	}
 	asUINT argIdx = 0;
 	if( retFirst )
@@ -1861,8 +1910,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		call->detail().arg(argIdx).init_reg(RegType::kGp64, 8, TypeId::kUIntPtr);
 		argIdx++;
 	}
-	if( forceStackArg >= 0 )
+	if( forceStackGpArg >= 0 )
 		call->set_arg(argIdx++, Imm(0));
+	if( forceStackVecArg >= 0 )
+		call->set_arg(argIdx++, forceStackVecValue);
 
 	Gp  retGp, retGpHi, retGps[4];
 	Vec retVec, retVecs[4];

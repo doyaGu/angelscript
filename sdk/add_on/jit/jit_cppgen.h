@@ -50,7 +50,7 @@ struct SJITSystemCall
 	{
 		VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE,
 		VALUE_OBJ1, VALUE_OBJ2, VALUE_OBJ4, VALUE_OBJ8, VALUE_OBJF4, VALUE_OBJF8,
-		VALUE_OBJI2
+		VALUE_OBJI2, VALUE_OBJF2
 	};
 
 	int              obj;         // where the script object is passed as an argument
