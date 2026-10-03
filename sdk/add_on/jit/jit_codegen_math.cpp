@@ -1458,17 +1458,16 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		}
 		else
 		{
-			Gp dst = m_uc.new_gp_ptr();
-			Gp src = m_uc.new_gp_ptr();
-			LeaVar(dst, a0);
-			LeaVar(src, instr.op == asBC_fTOi64 ? a1 : a0);
-			StoreCachedSlot(a0);
-			StoreCachedSlot(a1);
-			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-			call->set_arg(0, Imm(int(instr.op)));
-			call->set_arg(1, dst);
-			call->set_arg(2, src);
-			call->set_arg(3, Imm(0));
+			Vec x = instr.op == asBC_fTOi64 ? LoadF32(a1) : LoadF64(a0);
+			InvokeNode *call = Invoke(instr.op == asBC_fTOi64 ? (const void*)JIT_fTOi64 : (const void*)JIT_dTOi64,
+				instr.op == asBC_fTOi64 ? FuncSignature::build<asINT64, float>() : FuncSignature::build<asINT64, double>());
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			call->set_arg(0, x);
+			call->set_ret(0, lo);
+			call->set_ret(1, hi);
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
 			ReloadCachedSlot(a0);
 		}
 		break;
@@ -1496,17 +1495,16 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 		}
 		else
 		{
-			Gp dst = m_uc.new_gp_ptr();
-			Gp src = m_uc.new_gp_ptr();
-			LeaVar(dst, a0);
-			LeaVar(src, instr.op == asBC_fTOu64 ? a1 : a0);
-			StoreCachedSlot(a0);
-			StoreCachedSlot(a1);
-			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-			call->set_arg(0, Imm(int(instr.op)));
-			call->set_arg(1, dst);
-			call->set_arg(2, src);
-			call->set_arg(3, Imm(0));
+			Vec x = instr.op == asBC_fTOu64 ? LoadF32(a1) : LoadF64(a0);
+			InvokeNode *call = Invoke(instr.op == asBC_fTOu64 ? (const void*)JIT_fTOu64 : (const void*)JIT_dTOu64,
+				instr.op == asBC_fTOu64 ? FuncSignature::build<asQWORD, float>() : FuncSignature::build<asQWORD, double>());
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			call->set_arg(0, x);
+			call->set_ret(0, lo);
+			call->set_ret(1, hi);
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
 			ReloadCachedSlot(a0);
 		}
 		break;

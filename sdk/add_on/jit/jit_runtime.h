@@ -275,6 +275,8 @@ float  JIT_MODf(float a, float b) noexcept;
 double JIT_MODd(double a, double b) noexcept;
 
 // Conversions with no direct machine instruction
+asINT64 JIT_fTOi64(float f) noexcept;
+asINT64 JIT_dTOi64(double d) noexcept;
 asQWORD JIT_fTOu64(float f) noexcept;
 asQWORD JIT_dTOu64(double d) noexcept;
 float   JIT_u64TOf(asQWORD v) noexcept;

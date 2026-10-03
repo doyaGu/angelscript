@@ -1008,6 +1008,16 @@ double JIT_MODd(double a, double b) noexcept
 
 // The conversions below replicate the exact expressions used by the VM
 
+asINT64 JIT_fTOi64(float f) noexcept
+{
+	return asINT64(f);
+}
+
+asINT64 JIT_dTOi64(double d) noexcept
+{
+	return asINT64(d);
+}
+
 asQWORD JIT_fTOu64(float f) noexcept
 {
 	if( f < 0 )
@@ -1067,7 +1077,7 @@ int JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept
 	case asBC_BSRA64:  *(asINT64*)dst = *(const asINT64*)a >> *(const asDWORD*)b; return 0;
 	case asBC_uTOi64:  *(asINT64*)dst = asINT64(*(const asUINT*)a); return 0;
 	case asBC_iTOi64:  *(asINT64*)dst = asINT64(*(const int*)a); return 0;
-	case asBC_fTOi64:  *(asINT64*)dst = asINT64(*(const float*)a); return 0;
+	case asBC_fTOi64:  *(asINT64*)dst = JIT_fTOi64(*(const float*)a); return 0;
 	case asBC_fTOu64:  *(asQWORD*)dst = JIT_fTOu64(*(const float*)a); return 0;
 	default: break;
 	}
@@ -1107,7 +1117,7 @@ int JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept
 	case asBC_INCi64:  ++*(asQWORD*)dst; break;
 	case asBC_DECi64:  --*(asQWORD*)dst; break;
 	case asBC_i64TOi:  *(int*)dst = int(ia); break;
-	case asBC_dTOi64:  *(asINT64*)dst = asINT64(*(const double*)a); break;
+	case asBC_dTOi64:  *(asINT64*)dst = JIT_dTOi64(*(const double*)a); break;
 	case asBC_dTOu64:  *(asQWORD*)dst = JIT_dTOu64(*(const double*)a); break;
 	case asBC_i64TOf:  *(float*)dst = float(ia); break;
 	case asBC_u64TOf:  *(float*)dst = float(ua); break;
