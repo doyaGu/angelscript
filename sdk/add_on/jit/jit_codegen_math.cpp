@@ -253,26 +253,27 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 				m_uc.not_(r, x);
 			Commit64(a0, r);
 		}
-		else if( instr.op == asBC_BNOT64 )
+		else
 		{
 			Gp lo = m_uc.new_gp32();
 			Gp hi = m_uc.new_gp32();
 			m_uc.load_u32(lo, Var(a0));
 			m_uc.load_u32(hi, Var(a0, 4));
-			m_uc.not_(lo, lo);
-			m_uc.not_(hi, hi);
+			if( instr.op == asBC_BNOT64 )
+			{
+				m_uc.not_(lo, lo);
+				m_uc.not_(hi, hi);
+			}
+			else
+			{
+				Gp borrow = m_uc.new_gp32();
+				m_uc.select(borrow, Imm(1), Imm(0), test_nz(lo));
+				m_uc.neg(lo, lo);
+				m_uc.neg(hi, hi);
+				m_uc.sub(hi, hi, borrow);
+			}
 			m_uc.store_u32(Var(a0), lo);
 			m_uc.store_u32(Var(a0, 4), hi);
-		}
-		else
-		{
-			Gp dst = m_uc.new_gp_ptr();
-			LeaVar(dst, a0);
-			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-			call->set_arg(0, Imm(int(instr.op)));
-			call->set_arg(1, dst);
-			call->set_arg(2, dst);
-			call->set_arg(3, Imm(0));
 		}
 		break;
 
@@ -337,6 +338,36 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 				}
 				break;
 			}
+		}
+		else if( !Is64Bit() && (instr.op == asBC_ADDi64 || instr.op == asBC_SUBi64) )
+		{
+			Gp alo = m_uc.new_gp32();
+			Gp ahi = m_uc.new_gp32();
+			Gp blo = m_uc.new_gp32();
+			Gp bhi = m_uc.new_gp32();
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			Gp carry = m_uc.new_gp32();
+			m_uc.load_u32(alo, Var(a1));
+			m_uc.load_u32(ahi, Var(a1, 4));
+			m_uc.load_u32(blo, Var(a2));
+			m_uc.load_u32(bhi, Var(a2, 4));
+			if( instr.op == asBC_ADDi64 )
+			{
+				m_uc.add(lo, alo, blo);
+				m_uc.select(carry, Imm(1), Imm(0), ucmp_lt(lo, alo));
+				m_uc.add(hi, ahi, bhi);
+				m_uc.add(hi, hi, carry);
+			}
+			else
+			{
+				m_uc.select(carry, Imm(1), Imm(0), ucmp_lt(alo, blo));
+				m_uc.sub(lo, alo, blo);
+				m_uc.sub(hi, ahi, bhi);
+				m_uc.sub(hi, hi, carry);
+			}
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
 		}
 		else if( !Is64Bit() && (instr.op == asBC_BAND64 || instr.op == asBC_BOR64 || instr.op == asBC_BXOR64) )
 		{
