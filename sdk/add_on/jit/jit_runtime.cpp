@@ -1382,24 +1382,29 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 //------------------------------------------------------------------------
 // Bound calls, see CJITCall
 
-CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_limitWords(0), m_scriptFunc(false)
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_returnObject(0), m_limitWords(0), m_scriptFunc(false), m_returnReference(false), m_returnOnStack(false)
 {
 }
 
 int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunction *func)
 {
-	m_compiler   = compiler;
-	m_ctx        = ctx;
-	m_func       = func;
-	m_threadData = asCThreadManager::GetLocalData();
-	m_arguments  = 0;
-	m_returnValue = ctx ? &static_cast<asCContext*>(ctx)->m_regs.valueRegister : 0;
-	m_limitWords = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
-	m_scriptFunc = func && func->GetFuncType() == asFUNC_SCRIPT;
+	m_compiler       = compiler;
+	m_ctx            = ctx;
+	m_func           = func;
+	m_threadData     = asCThreadManager::GetLocalData();
+	m_arguments      = 0;
+	m_returnValue    = ctx ? &static_cast<asCContext*>(ctx)->m_regs.valueRegister : 0;
+	m_returnObject   = ctx ? &static_cast<asCContext*>(ctx)->m_regs.objectRegister : 0;
+	m_limitWords     = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
+	m_scriptFunc     = func && func->GetFuncType() == asFUNC_SCRIPT;
+	m_returnReference = false;
+	m_returnOnStack   = false;
 	m_argOffsets.clear();
 	if( func )
 	{
 		asCScriptFunction *scriptFunc = static_cast<asCScriptFunction*>(func);
+		m_returnReference = scriptFunc->returnType.IsReference();
+		m_returnOnStack = scriptFunc->DoesReturnOnStack();
 		asUINT offset = (scriptFunc->objectType ? AS_PTR_SIZE : 0) + (scriptFunc->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
 		m_argOffsets.reserve(scriptFunc->parameterTypes.GetLength());
 		for( asUINT n = 0; n < scriptFunc->parameterTypes.GetLength(); n++ )
@@ -1420,6 +1425,8 @@ int CJITCall::Prepare()
 	{
 		int result = JIT_Prepare(m_ctx, m_func);
 		m_arguments = result >= 0 ? ctx->m_regs.stackFramePointer : 0;
+		if( m_returnOnStack )
+			m_returnObject = result >= 0 ? reinterpret_cast<void**>(m_arguments + (func->objectType ? AS_PTR_SIZE : 0)) : 0;
 		return result;
 	}
 	asSVMRegisters *regs = &ctx->m_regs;
@@ -1467,6 +1474,8 @@ int CJITCall::Prepare()
 		*(void**)ptr = (void*)(regs->stackFramePointer + ctx->m_argumentsSize);
 	}
 	m_arguments = regs->stackFramePointer;
+	if( m_returnOnStack )
+		m_returnObject = reinterpret_cast<void**>(m_arguments + (func->objectType ? AS_PTR_SIZE : 0));
 
 	return asSUCCESS;
 }

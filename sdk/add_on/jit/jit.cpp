@@ -41,8 +41,8 @@
 //    (jit_bytecode.cpp, AnalyseSlots).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit
 //    division and modulo instead of calling runtime helpers.
-//  - Set method objects, copy object arguments, and read object or reference returns
-//    from a CJITCall without the checks of the context's methods
+//  - Set method objects, copy object arguments, and get the address of the returned
+//    value from a CJITCall without the checks of the context's methods
 //    (jit_runtime.cpp, CJITCall::Prepare).
 //  - Project files for the add-on for the IDEs besides CMake.
 

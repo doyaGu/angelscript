@@ -285,19 +285,23 @@ public:
 
 	// These likewise skip the context's state and return type checks. Call them only
 	// after Execute has returned asEXECUTION_FINISHED, with the method that matches the
-	// primitive return type.
+	// return type. Returned objects remain owned by the context like those read through
+	// asIScriptContext, and are invalidated when it is reused.
 	asBYTE  GetReturnByte() const   { return *reinterpret_cast<asBYTE*>(m_returnValue); }
 	asWORD  GetReturnWord() const   { return *reinterpret_cast<asWORD*>(m_returnValue); }
 	asDWORD GetReturnDWord() const  { return *reinterpret_cast<asDWORD*>(m_returnValue); }
 	asQWORD GetReturnQWord() const  { return *m_returnValue; }
 	float   GetReturnFloat() const  { return *reinterpret_cast<float*>(m_returnValue); }
 	double  GetReturnDouble() const { return *reinterpret_cast<double*>(m_returnValue); }
+	void   *GetReturnAddress() const { return m_returnReference ? ReturnReference() : *m_returnObject; }
+	void   *GetReturnObject() const  { return m_returnReference ? *reinterpret_cast<void**>(asPWORD(*m_returnValue)) : *m_returnObject; }
 
 	asIScriptContext  *GetContext() const  { return m_ctx; }
 	asIScriptFunction *GetFunction() const { return m_func; }
 
 protected:
 	void *Argument(asUINT arg) const { return m_arguments + m_argOffsets[arg]; }
+	void *ReturnReference() const { return *reinterpret_cast<void* const*>(m_returnValue); }
 
 	CJITCompiler      *m_compiler;
 	asIScriptContext  *m_ctx;
@@ -305,9 +309,12 @@ protected:
 	void              *m_threadData; // asCThreadLocalData of the thread that bound the call
 	asDWORD           *m_arguments;  // stack frame of the successful Prepare
 	asQWORD           *m_returnValue; // value register of the bound context
+	void             **m_returnObject; // object register or hidden return pointer in the stack frame
 	std::vector<asUINT> m_argOffsets; // dword offsets of the parameters in the stack frame
 	asUINT             m_limitWords; // words of call states that the native calls may push
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
+	bool               m_returnReference; // the return is a reference stored in the value register
+	bool               m_returnOnStack; // the object return uses the hidden pointer in the stack frame
 };
 
 // Adds the indexers of the opIndex methods of CScriptArray to the compiler, see
