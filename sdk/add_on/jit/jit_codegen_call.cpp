@@ -1287,8 +1287,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 
-	// Calling convention
-	bool hasObj = false, objLast = false;
+	// Calling convention. The object on the script stack and the native method's
+	// this pointer aren't always the same: functor methods use auxiliary as this
+	// and pass the script object as an ordinary first or last argument.
+	bool thisFromStack = false, auxiliaryThis = false;
+	bool objFirst = false, objLast = false;
 	CallConvId conv = CallConvId::kCDecl;
 	switch( sysFunc->callConv )
 	{
@@ -1298,24 +1301,47 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		if( !Is64Bit() ) conv = CallConvId::kStdCall;
 		break;
 	case ICC_THISCALL:
-		hasObj = true;
+		if( sysFunc->auxiliary )
+			auxiliaryThis = true;
+		else
+			thisFromStack = true;
 #if defined(JIT_X86_THISCALL)
 		conv = CallConvId::kThisCall;
 #endif
 		break;
 	case ICC_CDECL_OBJFIRST:
-		hasObj = true;
+		objFirst = true;
 		break;
 	case ICC_CDECL_OBJLAST:
-		hasObj = true;
 		objLast = true;
+		break;
+	case ICC_THISCALL_OBJFIRST:
+		if( !sysFunc->auxiliary )
+			return false;
+		auxiliaryThis = true;
+		objFirst = true;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
+#endif
+		break;
+	case ICC_THISCALL_OBJLAST:
+		if( !sysFunc->auxiliary )
+			return false;
+		auxiliaryThis = true;
+		objLast = true;
+#if defined(JIT_X86_THISCALL)
+		conv = CallConvId::kThisCall;
+#endif
 		break;
 	default:
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() || sysFunc->auxiliary ||
+	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+		return false;
+	// Auxiliary objects only have defined direct-call semantics for class methods.
+	if( sysFunc->auxiliary && !auxiliaryThis )
 		return false;
 	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
 		if( sysFunc->paramAutoHandles[n] )
@@ -1391,7 +1417,9 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
 	struct SArg { int kind; int stackOff; TypeId type; };
 	std::vector<SArg> args;
-	int retOff = hasObj ? AS_PTR_SIZE : 0;
+	bool hasStackObj = thisFromStack || objFirst || objLast;
+	bool hasThis = thisFromStack || auxiliaryThis;
+	int retOff = hasStackObj ? AS_PTR_SIZE : 0;
 	int firstArg = retOff + (retOnStack ? AS_PTR_SIZE : 0);
 	int stackPos = firstArg;
 	for( asUINT n = 0; n < descr->parameterTypes.GetLength(); n++ )
@@ -1410,7 +1438,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	if( stackPos - firstArg != sysFunc->paramSize )
 		return false;
-	if( args.size() + (hasObj ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
+	if( args.size() + (hasThis ? 1 : 0) + ((objFirst || objLast) ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
 		return false;
 	// With the System V x64 ABI AsmJit gives the floats passed on the stack 4 bytes
 	// each instead of 8, so the functions that have any are called through the engine
@@ -1430,32 +1458,39 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	int popSize = stackPos;
 
 	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC
-	bool retFirst = retInMemory && !retInX8, retAfterObj = false;
+	bool retFirst = retInMemory && !retInX8, retAfterThis = false;
 #ifdef JIT_HIDDEN_RETURN_POINTER_AFTER_THIS
-	if( retInMemory && sysFunc->callConv == ICC_THISCALL )
+	if( retInMemory && hasThis )
 	{
 		retFirst = false;
-		retAfterObj = true;
+		retAfterThis = true;
 	}
 #endif
 
 	FuncSignature sig(conv);
 	sig.set_ret(retType);
 	if( retFirst ) sig.add_arg(TypeId::kUIntPtr);
-	if( hasObj && !objLast ) sig.add_arg(TypeId::kUIntPtr);
-	if( retAfterObj ) sig.add_arg(TypeId::kUIntPtr);
+	if( hasThis ) sig.add_arg(TypeId::kUIntPtr);
+	if( retAfterThis ) sig.add_arg(TypeId::kUIntPtr);
+	if( objFirst ) sig.add_arg(TypeId::kUIntPtr);
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
-	if( hasObj && objLast ) sig.add_arg(TypeId::kUIntPtr);
+	if( objLast ) sig.add_arg(TypeId::kUIntPtr);
 	if( retInX8 ) sig.add_arg(TypeId::kUIntPtr); // moved to x8 below
 
-	// A null object pointer is an exception raised by the VM
+	// A null script object pointer is an exception raised by the VM. Auxiliary is
+	// required to be non-null when the function is registered.
 	Gp obj;
-	if( hasObj )
+	if( hasStackObj )
 	{
 		obj = m_uc.new_gp_ptr();
 		m_uc.load(obj, Stack(0));
 		m_uc.j(BailLabel(idx), test_z(obj));
 	}
+	Gp thisObj;
+	if( thisFromStack )
+		thisObj = obj;
+	else if( auxiliaryThis )
+		thisObj = PtrConst(asPWORD(sysFunc->auxiliary));
 	Gp retPtr;
 	if( retOnStack )
 	{
@@ -1521,10 +1556,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	asUINT argIdx = 0;
 	if( retFirst )
 		call->set_arg(argIdx++, retPtr);
-	if( hasObj && !objLast )
-		call->set_arg(argIdx++, obj);
-	if( retAfterObj )
+	if( hasThis )
+		call->set_arg(argIdx++, thisObj);
+	if( retAfterThis )
 		call->set_arg(argIdx++, retPtr);
+	if( objFirst )
+		call->set_arg(argIdx++, obj);
 	for( asUINT n = 0; n < args.size(); n++ )
 	{
 		if( args[n].kind == ARG_F32 || args[n].kind == ARG_F64 )
@@ -1538,7 +1575,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			call->set_arg(argIdx, gpArgs[n]);
 		argIdx++;
 	}
-	if( hasObj && objLast )
+	if( objLast )
 		call->set_arg(argIdx++, obj);
 	if( retInX8 )
 	{

@@ -33,9 +33,10 @@
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
 //    AnalyseForAOT).
-//  - More signatures for direct system calls (jit_codegen_call.cpp, EmitDirectSystemCall,
-//    and jit_cppgen.cpp, GetSystemCall), and unwind information on the platforms besides
-//    64bit Windows, 64bit x86 on Linux, and AArch64 on Linux and macOS (jit_unwind.h).
+//  - Objects passed by value, auto handles, and generic signatures for direct system
+//    calls (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
+//    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
+//    and AArch64 on Linux and macOS (jit_unwind.h).
 //  - Construct the objects of the registered types directly in the code generated ahead
 //    of time, which calls JIT_Alloc for them (jit_cppgen.cpp, asBC_ALLOC).
 //  - Borrow the references of the handle arguments on 32bit hosts, whose call states have

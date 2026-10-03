@@ -178,6 +178,8 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 
 	call.obj = SJITSystemCall::OBJ_NONE;
+	call.thisFromStack = false;
+	call.auxiliaryThis = false;
 	switch( sysFunc->callConv )
 	{
 	case ICC_CDECL:
@@ -188,6 +190,23 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 #endif
 #ifdef JIT_AOT_THISCALL
 	case ICC_THISCALL:
+		if( sysFunc->auxiliary )
+			call.auxiliaryThis = true;
+		else
+			call.thisFromStack = true;
+		break;
+	case ICC_THISCALL_OBJFIRST:
+		if( !sysFunc->auxiliary )
+			return false;
+		call.auxiliaryThis = true;
+		call.obj = SJITSystemCall::OBJ_FIRST;
+		break;
+	case ICC_THISCALL_OBJLAST:
+		if( !sysFunc->auxiliary )
+			return false;
+		call.auxiliaryThis = true;
+		call.obj = SJITSystemCall::OBJ_LAST;
+		break;
 #endif
 	case ICC_CDECL_OBJFIRST:
 		call.obj = SJITSystemCall::OBJ_FIRST;
@@ -199,8 +218,10 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() || sysFunc->auxiliary ||
+	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+		return false;
+	if( sysFunc->auxiliary && !call.auxiliaryThis )
 		return false;
 	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
 		if( sysFunc->paramAutoHandles[n] )
@@ -212,7 +233,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	const asCDataType &rt = descr->returnType;
 	call.retOnStack  = descr->DoesReturnOnStack();
 	call.retInMemory = call.retOnStack && sysFunc->hostReturnInMemory;
-	call.retAfterObj = false;
+	call.retAfterThis = false;
 	call.retParts    = 0;
 	call.retBytes    = 0;
 	int retSize;
@@ -253,7 +274,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	{
 #ifdef JIT_AOT_RETURN_IN_MEMORY
 #ifdef JIT_AOT_RETURN_AFTER_THIS
-		call.retAfterObj = sysFunc->callConv == ICC_THISCALL;
+		call.retAfterThis = call.thisFromStack || call.auxiliaryThis;
 #endif
 		call.ret = SJITSystemCall::VALUE_VOID;
 		retSize = AS_PTR_SIZE;
@@ -300,14 +321,16 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	if( size != sysFunc->paramSize )
 		return false;
 #ifdef JIT_AOT_REGISTER_ARGS
-	intArgs += (call.obj != SJITSystemCall::OBJ_NONE ? 1 : 0) + (call.retInMemory ? 1 : 0);
+	intArgs += (call.obj != SJITSystemCall::OBJ_NONE ? 1 : 0) +
+		(call.thisFromStack || call.auxiliaryThis ? 1 : 0) + (call.retInMemory ? 1 : 0);
 	if( intArgs > JIT_AOT_REGISTER_ARGS || floatArgs > JIT_AOT_REGISTER_ARGS )
 		return false;
 #else
 	UNUSED_VAR(intArgs);
 	UNUSED_VAR(floatArgs);
 #endif
-	call.popSize = size + (call.obj != SJITSystemCall::OBJ_NONE ? AS_PTR_SIZE : 0) + (call.retOnStack ? AS_PTR_SIZE : 0);
+	call.popSize = size + (call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack ? AS_PTR_SIZE : 0) +
+		(call.retOnStack ? AS_PTR_SIZE : 0);
 	return true;
 #endif
 }
@@ -318,7 +341,8 @@ bool CJITCppGen::GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) con
 	asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
 	if( !GetSystemCall(engine, asBC_INTARG(instr.bc), call) )
 		return false;
-	return instr.op != asBC_Thiscall1 || (call.obj != SJITSystemCall::OBJ_NONE && !call.retOnStack && call.ret == SJITSystemCall::VALUE_PTR &&
+	return instr.op != asBC_Thiscall1 || ((call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack) &&
+		!call.retOnStack && call.ret == SJITSystemCall::VALUE_PTR &&
 		call.args.size() == 1 && call.args[0] == SJITSystemCall::VALUE_I32);
 }
 
@@ -979,14 +1003,16 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw" };
 	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE };
 	asUINT pos = m_pos;
-	bool obj = call.obj != SJITSystemCall::OBJ_NONE;
+	bool obj = call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack;
 	int retOff = obj ? AS_PTR_SIZE : 0;
 	int off = retOff + (call.retOnStack ? AS_PTR_SIZE : 0);
 
 	std::vector<std::string> params, args;
-	if( call.retInMemory && !call.retAfterObj ) { params.push_back("void*"); args.push_back("r_"); }
+	if( call.retInMemory && !call.retAfterThis ) { params.push_back("void*"); args.push_back("r_"); }
+	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back("o_"); }
+	if( call.auxiliaryThis )                    { params.push_back("void*"); args.push_back("h_"); }
+	if( call.retAfterThis )                     { params.push_back("void*"); args.push_back("r_"); }
 	if( call.obj == SJITSystemCall::OBJ_FIRST ) { params.push_back("void*"); args.push_back("o_"); }
-	if( call.retAfterObj )                      { params.push_back("void*"); args.push_back("r_"); }
 	for( asUINT n = 0; n < call.args.size(); n++ )
 	{
 		int kind = call.args[n];
@@ -1004,6 +1030,8 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 
 	Emit("{");
 	Emit("\tasCScriptFunction *d_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
+	if( call.auxiliaryThis )
+		Emit("\tvoid *h_ = d_->sysFuncIntf->auxiliary;");
 	if( obj )
 	{
 		Emit("\tvoid *o_ = (void*)AOT_S(pw, 0);");

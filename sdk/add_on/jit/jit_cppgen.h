@@ -46,10 +46,12 @@ struct SJITSystemCall
 	enum { OBJ_NONE, OBJ_FIRST, OBJ_LAST };
 	enum { VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE };
 
-	int              obj;         // where the object pointer is passed
+	int              obj;         // where the script object is passed as an argument
+	bool             thisFromStack; // it is instead the native this pointer
+	bool             auxiliaryThis; // auxiliary is the native this pointer
 	bool             retOnStack;  // the value is returned to the location on the stack
 	bool             retInMemory; // through the hidden pointer, which is passed first,
-	bool             retAfterObj; // or after the object pointer
+	bool             retAfterThis; // or after the native this pointer
 	int              ret;         // the kind of the value returned, VALUE_VOID for retInMemory
 	int              retParts;    // or of the members of the struct returned, if not 0,
 	int              retBytes;    // whose first bytes are the object
