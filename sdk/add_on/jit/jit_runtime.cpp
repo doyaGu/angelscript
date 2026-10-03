@@ -642,6 +642,12 @@ void JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *
 	*dst = src;
 }
 
+void JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj) noexcept
+{
+	if( obj && objType->beh.addref )
+		GetContext(regs)->m_engine->CallObjectMethod(obj, objType->beh.addref);
+}
+
 void JIT_AddRefScriptObject(void *obj) noexcept
 {
 	static_cast<asCScriptObject*>(obj)->AddRef();

@@ -218,7 +218,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() ||
+	if( sysFunc->takesObjByVal || sysFunc->cleanArgs.GetLength() ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
 		return false;
 	if( sysFunc->auxiliary && !call.auxiliaryThis )
@@ -234,6 +234,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.retOnStack  = descr->DoesReturnOnStack();
 	call.retInMemory = call.retOnStack && sysFunc->hostReturnInMemory;
 	call.retAfterThis = false;
+	call.returnAutoHandle = sysFunc->returnAutoHandle;
 	call.retParts    = 0;
 	call.retBytes    = 0;
 	int retSize;
@@ -300,6 +301,8 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	else if( rt.IsDoubleType() )                                { call.ret = SJITSystemCall::VALUE_F64;    retSize = 2; }
 	else if( rt.GetSizeOnStackDWords() == 2 )                   { call.ret = SJITSystemCall::VALUE_I64;    retSize = 2; }
 	else                                                        { call.ret = SJITSystemCall::VALUE_I32;    retSize = 1; }
+	if( call.returnAutoHandle && call.ret != SJITSystemCall::VALUE_HANDLE )
+		return false;
 	bool retFloat = call.ret == SJITSystemCall::VALUE_F32 || call.ret == SJITSystemCall::VALUE_F64;
 	if( sysFunc->hostReturnSize != retSize || (!call.retParts && sysFunc->hostReturnFloat != retFloat) )
 		return false;
@@ -1053,6 +1056,8 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	else
 		Emit("\t%s x_ = %s;", retType.c_str(), func.c_str());
 	Emit("\tctx->m_callingSystemFunction = 0;");
+	if( call.returnAutoHandle )
+		Emit("\tJIT_AddRefObject(regs, (asCObjectType*)d_->returnType.GetTypeInfo(), x_);");
 	Emit("\tsp += %d;", call.popSize);
 
 	// The value is stored like the VM does, but the value register only if it is read

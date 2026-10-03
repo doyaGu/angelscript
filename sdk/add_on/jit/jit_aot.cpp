@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 8;
+const asQWORD JIT_AOT_FORMAT_VERSION = 9;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -244,7 +244,8 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 			}
 			hash.Add(1 | (call.obj << 1) | (call.thisFromStack << 3) | (call.auxiliaryThis << 4) |
 				(call.retOnStack << 5) | (call.retInMemory << 6) | (call.retAfterThis << 7) |
-				(call.ret << 8) | (call.retParts << 11) | (call.retBytes << 14));
+				(call.returnAutoHandle << 8) | (call.ret << 9) | (call.retParts << 12) |
+				(call.retBytes << 15));
 			hash.Add(call.popSize);
 			hash.Add(call.args.size());
 			for( asUINT a = 0; a < call.args.size(); a++ )

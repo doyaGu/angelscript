@@ -1237,10 +1237,10 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // TODO: runtime optimize: Objects passed by value could be supported by setting up the
 //                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
 //                         do for each ABI.
-//                         Auto handles would need a release of the parameters after the call
-//                         and an AddRef of the returned handle, and asCALL_GENERIC could be
-//                         called with an asCGeneric set up inline. Each of these should be
-//                         measured against CallSystemFunction before adding the code.
+//                         Parameter auto handles would need a release after the call, and
+//                         asCALL_GENERIC could be called with an asCGeneric set up inline.
+//                         Each should be measured against CallSystemFunction before adding
+//                         the code.
 // The indexers are compiled in place as the loads of the address of the element, see
 // CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
 // left to the VM, which calls the method to raise the exception. Nothing else can
@@ -1337,7 +1337,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->returnAutoHandle || sysFunc->cleanArgs.GetLength() ||
+	if( sysFunc->takesObjByVal || sysFunc->cleanArgs.GetLength() ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
 		return false;
 	// Auxiliary objects only have defined direct-call semantics for class methods.
@@ -1410,6 +1410,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	else if( rt.IsDoubleType() )                                 { retKind = RET_F64;    retType = TypeId::kFloat64; expectedRetSize = 2; }
 	else if( rt.GetSizeOnStackDWords() == 2 )                    { retKind = RET_I64;    retType = TypeId::kInt64;   expectedRetSize = 2; }
 	else                                                         { retKind = RET_I32;    retType = TypeId::kInt32;   expectedRetSize = 1; }
+	if( sysFunc->returnAutoHandle && retKind != RET_HANDLE )
+		return false;
+	SDirectBehaviour returnAddRef;
+	if( sysFunc->returnAutoHandle && !GetDirectBehaviour(CastToObjectType(rt.GetTypeInfo())->beh.addref, returnAddRef) )
+		return false;
 	if( sysFunc->hostReturnSize != expectedRetSize || (retKind != RET_PARTS && sysFunc->hostReturnFloat != (retKind == RET_F32 || retKind == RET_F64)) )
 		return false;
 
@@ -1644,6 +1649,16 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 
 	m_uc.store_zero_reg(callingFunc);
+	if( sysFunc->returnAutoHandle )
+	{
+		// Preserve the return before another native call can reuse its ABI register.
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), retGp);
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectType)), PtrConst(asPWORD(rt.GetTypeInfo())));
+		Label noHandle = m_uc.new_label();
+		m_uc.j(noHandle, test_z(retGp));
+		EmitBehaviourCall(returnAddRef, retGp);
+		m_uc.bind(noHandle);
+	}
 
 	// Pop the arguments and store the return value like the VM does, except
 	// that the value register is left alone if it isn't read afterwards
@@ -1692,7 +1707,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			break;
 		}
 	}
-	else if( retKind == RET_HANDLE )
+	else if( retKind == RET_HANDLE && !sysFunc->returnAutoHandle )
 	{
 		m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), retGp);
 		m_uc.store(RegsField(offsetof(asSVMRegisters, objectType)), PtrConst(asPWORD(rt.GetTypeInfo())));

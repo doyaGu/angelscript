@@ -210,6 +210,10 @@ void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noex
 // asBC_REFCPY and asBC_RefCpyV
 void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *src) noexcept;
 
+// Adds the reference of a handle returned by a direct system call whose declaration
+// uses @+. The object may be null
+void   JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj) noexcept;
+
 // The rare paths of the reference counts of script objects changed in place. The
 // registers must have been synced, as Release may execute the destructor
 void   JIT_AddRefScriptObject(void *obj) noexcept;
