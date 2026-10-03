@@ -7,6 +7,7 @@
 #endif
 
 #include <stdio.h>
+#include <vector>
 
 BEGIN_AS_NAMESPACE
 
@@ -249,14 +250,15 @@ protected:
 // A script function bound to a context for the application to call it many times,
 // faster than through CJITCompiler::Prepare and Execute: what those check and look
 // up at every call is done once when the call is bound. Prepare and Execute have the
-// same effects as the methods of the compiler, and the arguments and the return value
-// are set and read with the methods of the context as usual. The call must be used by
-// the thread that bound it, as it keeps the thread's list of active contexts; bind it
-// again to use it from another thread. Prepare falls back to the compiler's Prepare
-// unless the context is where the last call of the function left it, e.g. after the
-// context has been used for another function, and Execute falls back to the
-// compiler's Execute unless the context has been prepared for the function and the
-// function has been compiled, so the calls stay correct however the context is used
+// same effects as the methods of the compiler. Primitive and address arguments may be
+// set with the unchecked methods below, or all arguments with the methods of the
+// context as usual. The call must be used by the thread that bound it, as it keeps the
+// thread's list of active contexts; bind it again to use it from another thread.
+// Prepare falls back to the compiler's Prepare unless the context is where the last
+// call of the function left it, e.g. after the context has been used for another
+// function, and Execute falls back to the compiler's Execute unless the context has
+// been prepared for the function and the function has been compiled, so the calls
+// stay correct however the context is used
 class CJITCall
 {
 public:
@@ -269,14 +271,29 @@ public:
 	int Prepare();
 	int Execute();
 
+	// These skip the state, index, and type checks of asIScriptContext, and use the
+	// argument offsets cached by Bind. Call them only after this call's Prepare has
+	// succeeded and before its Execute, with the method that matches the argument.
+	void SetArgByte(asUINT arg, asBYTE value)       { *reinterpret_cast<asBYTE*>(Argument(arg)) = value; }
+	void SetArgWord(asUINT arg, asWORD value)       { *reinterpret_cast<asWORD*>(Argument(arg)) = value; }
+	void SetArgDWord(asUINT arg, asDWORD value)     { *reinterpret_cast<asDWORD*>(Argument(arg)) = value; }
+	void SetArgQWord(asUINT arg, asQWORD value)     { *reinterpret_cast<asQWORD*>(Argument(arg)) = value; }
+	void SetArgFloat(asUINT arg, float value)       { *reinterpret_cast<float*>(Argument(arg)) = value; }
+	void SetArgDouble(asUINT arg, double value)     { *reinterpret_cast<double*>(Argument(arg)) = value; }
+	void SetArgAddress(asUINT arg, void *value)     { *reinterpret_cast<asPWORD*>(Argument(arg)) = asPWORD(value); }
+
 	asIScriptContext  *GetContext() const  { return m_ctx; }
 	asIScriptFunction *GetFunction() const { return m_func; }
 
 protected:
+	void *Argument(asUINT arg) const { return m_arguments + m_argOffsets[arg]; }
+
 	CJITCompiler      *m_compiler;
 	asIScriptContext  *m_ctx;
 	asIScriptFunction *m_func;
 	void              *m_threadData; // asCThreadLocalData of the thread that bound the call
+	asDWORD           *m_arguments;  // stack frame of the successful Prepare
+	std::vector<asUINT> m_argOffsets; // dword offsets of the parameters in the stack frame
 	asUINT             m_limitWords; // words of call states that the native calls may push
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
 };

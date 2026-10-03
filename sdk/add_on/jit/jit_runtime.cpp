@@ -1382,7 +1382,7 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 //------------------------------------------------------------------------
 // Bound calls, see CJITCall
 
-CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_limitWords(0), m_scriptFunc(false)
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_limitWords(0), m_scriptFunc(false)
 {
 }
 
@@ -1392,8 +1392,21 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	m_ctx        = ctx;
 	m_func       = func;
 	m_threadData = asCThreadManager::GetLocalData();
+	m_arguments  = 0;
 	m_limitWords = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
 	m_scriptFunc = func && func->GetFuncType() == asFUNC_SCRIPT;
+	m_argOffsets.clear();
+	if( func )
+	{
+		asCScriptFunction *scriptFunc = static_cast<asCScriptFunction*>(func);
+		asUINT offset = (scriptFunc->objectType ? AS_PTR_SIZE : 0) + (scriptFunc->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+		m_argOffsets.reserve(scriptFunc->parameterTypes.GetLength());
+		for( asUINT n = 0; n < scriptFunc->parameterTypes.GetLength(); n++ )
+		{
+			m_argOffsets.push_back(offset);
+			offset += scriptFunc->parameterTypes[n].GetSizeOnStackDWords();
+		}
+	}
 	return compiler && ctx && m_threadData ? asSUCCESS : asINVALID_ARG;
 }
 
@@ -1403,7 +1416,11 @@ int CJITCall::Prepare()
 	asCContext *ctx = static_cast<asCContext*>(m_ctx);
 	asCScriptFunction *func = static_cast<asCScriptFunction*>(m_func);
 	if( ctx == 0 || ctx->m_status != asEXECUTION_FINISHED || ctx->m_initialFunction != func )
-		return JIT_Prepare(m_ctx, m_func);
+	{
+		int result = JIT_Prepare(m_ctx, m_func);
+		m_arguments = result >= 0 ? ctx->m_regs.stackFramePointer : 0;
+		return result;
+	}
 	asSVMRegisters *regs = &ctx->m_regs;
 
 	if( ctx->m_returnValueSize || regs->objectRegister )
@@ -1448,6 +1465,7 @@ int CJITCall::Prepare()
 			ptr += AS_PTR_SIZE;
 		*(void**)ptr = (void*)(regs->stackFramePointer + ctx->m_argumentsSize);
 	}
+	m_arguments = regs->stackFramePointer;
 
 	return asSUCCESS;
 }
