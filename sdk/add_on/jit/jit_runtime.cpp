@@ -1382,7 +1382,7 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 //------------------------------------------------------------------------
 // Bound calls, see CJITCall
 
-CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_returnObject(0), m_limitWords(0), m_scriptFunc(false), m_returnReference(false), m_returnOnStack(false), m_returnObjectValue(false), m_returnObjectHandle(false)
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_returnObject(0), m_limitWords(0), m_scriptFunc(false), m_scriptObjectMethod(false), m_returnReference(false), m_returnOnStack(false), m_returnObjectValue(false), m_returnObjectHandle(false)
 {
 }
 
@@ -1397,6 +1397,7 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	m_returnObject   = ctx ? &static_cast<asCContext*>(ctx)->m_regs.objectRegister : 0;
 	m_limitWords     = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
 	m_scriptFunc     = func && func->GetFuncType() == asFUNC_SCRIPT;
+	m_scriptObjectMethod = false;
 	m_returnReference = false;
 	m_returnOnStack   = false;
 	m_returnObjectValue = false;
@@ -1405,6 +1406,7 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	if( func )
 	{
 		asCScriptFunction *scriptFunc = static_cast<asCScriptFunction*>(func);
+		m_scriptObjectMethod = scriptFunc->objectType && (scriptFunc->objectType->flags & asOBJ_SCRIPT_OBJECT);
 		m_returnReference = scriptFunc->returnType.IsReference();
 		m_returnOnStack = scriptFunc->DoesReturnOnStack();
 		if( !m_returnReference && (scriptFunc->returnType.IsObject() || scriptFunc->returnType.IsFuncdef()) )
@@ -1421,6 +1423,13 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 		}
 	}
 	return compiler && ctx && m_threadData ? asSUCCESS : asINVALID_ARG;
+}
+
+void CJITCall::SetObject(void *obj)
+{
+	*reinterpret_cast<asPWORD*>(m_arguments) = asPWORD(obj);
+	if( obj && m_scriptObjectMethod )
+		reinterpret_cast<asCScriptObject*>(obj)->AddRef();
 }
 
 // Like JIT_Prepare, for a context that has finished executing the function

@@ -275,6 +275,10 @@ public:
 	// These skip the state, index, and type checks of asIScriptContext, and use the
 	// argument offsets cached by Bind. Call them only after this call's Prepare has
 	// succeeded and before its Execute, with the method that matches the argument.
+	// SetObject is only for a bound method and must be called at most once per
+	// preparation. Like asIScriptContext::SetObject, it retains script objects until
+	// the context is prepared or unprepared again.
+	void SetObject(void *obj);
 	void SetArgByte(asUINT arg, asBYTE value)       { *reinterpret_cast<asBYTE*>(Argument(arg)) = value; }
 	void SetArgWord(asUINT arg, asWORD value)       { *reinterpret_cast<asWORD*>(Argument(arg)) = value; }
 	void SetArgDWord(asUINT arg, asDWORD value)     { *reinterpret_cast<asDWORD*>(Argument(arg)) = value; }
@@ -321,6 +325,7 @@ protected:
 	std::vector<asUINT> m_argOffsets; // dword offsets of the parameters in the stack frame
 	asUINT             m_limitWords; // words of call states that the native calls may push
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
+	bool               m_scriptObjectMethod; // SetObject must retain the method's script object
 	bool               m_returnReference; // the return is a reference stored in the value register
 	bool               m_returnOnStack; // the object return uses the hidden pointer in the stack frame
 	bool               m_returnObjectValue; // the return is a non-reference object value
