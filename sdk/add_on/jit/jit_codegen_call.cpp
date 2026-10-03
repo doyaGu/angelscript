@@ -1368,8 +1368,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal ||
-		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+	if( sysFunc->takesObjByVal )
+		return false;
+	// The engine applies these adjustments only to method objects. Functor methods
+	// have two object pointers with less useful registration semantics, so retain
+	// their existing fallback when either pointer would need adjustment.
+	if( (sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset) && !thisFromStack )
 		return false;
 	// Auxiliary objects only have defined direct-call semantics for class methods.
 	if( sysFunc->auxiliary && !auxiliaryThis )
@@ -1546,7 +1550,32 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	Gp thisObj;
 	if( thisFromStack )
+	{
 		thisObj = obj;
+		if( sysFunc->compositeOffset )
+		{
+			Gp adjusted = m_uc.new_gp_ptr();
+			m_uc.add(adjusted, thisObj, Imm(sysFunc->compositeOffset));
+			thisObj = adjusted;
+		}
+		if( sysFunc->isCompositeIndirect )
+		{
+			Gp adjusted = m_uc.new_gp_ptr();
+			m_uc.load(adjusted, mem_ptr(thisObj));
+			thisObj = adjusted;
+		}
+		int baseOffset = sysFunc->baseOffset;
+#if defined(__GNUC__) && defined(AS_ARM64)
+		// The low bit tags virtual methods on GNU ARM, leaving the byte offset shifted.
+		baseOffset >>= 1;
+#endif
+		if( baseOffset )
+		{
+			Gp adjusted = m_uc.new_gp_ptr();
+			m_uc.add(adjusted, thisObj, Imm(baseOffset));
+			thisObj = adjusted;
+		}
+	}
 	else if( auxiliaryThis )
 		thisObj = PtrConst(asPWORD(sysFunc->auxiliary));
 	Gp retPtr;
@@ -1878,10 +1907,14 @@ bool CJITCodeGen::GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const
 	// A floating point value returned on the x87 stack would have to be popped
 	if( descr->parameterTypes.GetLength() || sysFunc->paramSize || descr->DoesReturnOnStack() ||
 		sysFunc->hostReturnInMemory || sysFunc->hostReturnFloat || sysFunc->auxiliary ||
-		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+		sysFunc->compositeOffset || sysFunc->isCompositeIndirect )
 		return false;
 
 	beh.func = (const void*)FuncPtrToUInt(sysFunc->func);
+	beh.thisOffset = sysFunc->baseOffset;
+#if defined(__GNUC__) && defined(AS_ARM64)
+	beh.thisOffset >>= 1;
+#endif
 	beh.isVirtual = false;
 	beh.conv = CallConvId::kCDecl;
 	switch( sysFunc->callConv )
@@ -1942,17 +1975,24 @@ void CJITCodeGen::EmitBehaviourCall(const SDirectBehaviour &beh, const Gp &obj)
 	sig.set_ret(TypeId::kVoid);
 	sig.add_arg(TypeId::kUIntPtr);
 
+	Gp thisObj = obj;
+	if( beh.thisOffset )
+	{
+		thisObj = m_uc.new_gp_ptr();
+		m_uc.add(thisObj, obj, Imm(beh.thisOffset));
+	}
+
 	InvokeNode *call = 0;
 	if( beh.isVirtual )
 	{
 		Gp target = m_uc.new_gp_ptr();
-		m_uc.load(target, mem_ptr(obj));
+		m_uc.load(target, mem_ptr(thisObj));
 		m_uc.load(target, Addr(target, int32_t(asPWORD(beh.func) - 1)));
 		m_uc.cc->invoke(Out(call), target, sig);
 	}
 	else
 		call = Invoke(beh.func, sig);
-	call->set_arg(0, obj);
+	call->set_arg(0, thisObj);
 }
 
 // Adds a reference to the script object in place, see CJITByteCode::FindInPlaceRefCounts.

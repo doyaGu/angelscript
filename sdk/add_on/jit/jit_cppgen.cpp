@@ -182,6 +182,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.thisFromStack = false;
 	call.auxiliaryThis = false;
 	call.virtualThis = false;
+	call.adjustThis = false;
 	switch( sysFunc->callConv )
 	{
 	case ICC_CDECL:
@@ -242,8 +243,10 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal ||
-		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
+	if( sysFunc->takesObjByVal )
+		return false;
+	call.adjustThis = sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset;
+	if( call.adjustThis && !call.thisFromStack )
 		return false;
 	if( sysFunc->auxiliary && !call.auxiliaryThis )
 		return false;
@@ -1043,7 +1046,7 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 
 	std::vector<std::string> params, args;
 	if( call.retInMemory && !call.retAfterThis ) { params.push_back("void*"); args.push_back("r_"); }
-	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back("o_"); }
+	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back(call.adjustThis ? "t_" : "o_"); }
 	if( call.auxiliaryThis )                    { params.push_back("void*"); args.push_back("h_"); }
 	if( call.retAfterThis )                     { params.push_back("void*"); args.push_back("r_"); }
 	if( call.obj == SJITSystemCall::OBJ_FIRST ) { params.push_back("void*"); args.push_back("o_"); }
@@ -1072,6 +1075,16 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 		Emit("\tif( o_ == 0 )");
 		Emit("\t\t%s", Bail().c_str());
 	}
+	if( call.adjustThis )
+	{
+		Emit("\tvoid *t_ = (void*)((char*)o_ + d_->sysFuncIntf->compositeOffset);");
+		Emit("\tif( d_->sysFuncIntf->isCompositeIndirect ) t_ = *(void**)t_;");
+#if defined(__GNUC__) && defined(AS_ARM64)
+		Emit("\tt_ = (void*)((char*)t_ + (d_->sysFuncIntf->baseOffset >> 1));");
+#else
+		Emit("\tt_ = (void*)((char*)t_ + d_->sysFuncIntf->baseOffset);");
+#endif
+	}
 	if( call.retOnStack )
 		Emit("\tvoid *r_ = (void*)AOT_S(pw, %d);", retOff);
 	Put(m_sync.empty() ? "" : "\t" + m_sync);
@@ -1085,7 +1098,7 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	if( call.virtualThis )
 	{
 		Emit("\tasFUNCTION_t f_ = (*(asFUNCTION_t**)%s)[FuncPtrToUInt(d_->sysFuncIntf->func) / sizeof(void*)];",
-			call.thisFromStack ? "o_" : "h_");
+			call.adjustThis ? "t_" : call.thisFromStack ? "o_" : "h_");
 		target = "f_";
 	}
 	std::string func = Format("((%s (AOT_CDECL*)(%s))%s)(%s)", retType.c_str(), paramList.c_str(), target.c_str(), argList.c_str());

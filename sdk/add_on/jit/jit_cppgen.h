@@ -50,6 +50,7 @@ struct SJITSystemCall
 	bool             thisFromStack; // it is instead the native this pointer
 	bool             auxiliaryThis; // auxiliary is the native this pointer
 	bool             virtualThis; // resolve the function from the native this pointer
+	bool             adjustThis;  // adjust the native this pointer for composition or inheritance
 	bool             retOnStack;  // the value is returned to the location on the stack
 	bool             retInMemory; // through the hidden pointer, which is passed first,
 	bool             retAfterThis; // or after the native this pointer

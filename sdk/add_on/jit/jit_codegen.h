@@ -131,6 +131,7 @@ protected:
 	struct SDirectBehaviour
 	{
 		const void         *func;      // for virtual methods the offset in the virtual function table plus 1
+		int                 thisOffset; // adjustment of the object pointer for an inherited method
 		bool                isVirtual;
 		asmjit::CallConvId  conv;
 	};
