@@ -174,6 +174,8 @@ public:
 	// calls of a function have been made that many times, the function is compiled
 	// again if a call has seen a class since the function was compiled, with the
 	// methods compiled in place for the objects of the classes seen, each checked for.
+	// Functions whose compilation is deferred note the classes while the VM executes
+	// them too, so their first generated code can already compile the methods in place.
 	// The calls are counted again otherwise. The objects of other classes call the
 	// method, and are noted too, and the calls not made yet go on noting their classes,
 	// so a function is compiled at most 3 times. The call that has counted down goes on

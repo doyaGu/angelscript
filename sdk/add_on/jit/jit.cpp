@@ -8,6 +8,7 @@
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
 #include "as_context.h"
+#include "as_scriptobject.h"
 #include "as_scriptengine.h"
 #include "as_scriptfunction.h"
 #include "as_module.h"
@@ -27,8 +28,6 @@
 //  - Inline the methods that several classes implement for the type of the handle, which
 //    the bytecode doesn't tell for the methods overridden by derived classes
 //    (jit_bytecode.cpp, FindInlinees).
-//  - Note the classes that the calls see while the VM executes the deferred functions
-//    too, so that their first code inlines the methods (ResolveEntry below).
 //  - Inline calls in the code generated ahead of time, and borrow the references of the
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
@@ -102,10 +101,11 @@ struct CJITCompiler::SImpl
 	struct SEntry
 	{
 		SEntry(SImpl *owner, asCScriptFunction *function, JITFunction initialCode, const std::vector<asUINT> &initialCounts)
-			: impl(owner), func(function), code(initialCode), counts(initialCounts.size()), wrapper(0)
+			: impl(owner), func(function), code(initialCode), counts(initialCounts.size()), wrapper(0), profilesVMCalls(false)
 		{
 			for( size_t n = 0; n < initialCounts.size(); n++ )
 				counts[n].store(initialCounts[n], std::memory_order_relaxed);
+			vmProfile.countdown = 0;
 		}
 
 		SImpl                             *impl;
@@ -113,9 +113,13 @@ struct CJITCompiler::SImpl
 		std::atomic<JITFunction>           code;
 		std::vector<std::atomic<asUINT> > counts;
 		asJITFunction                      wrapper;
+		SJITProfile                        vmProfile; // classes seen while this function is interpreted
+		std::map<const asDWORD*, SJITSeenClasses*> vmCalls; // profile cells by the address after asBC_CALLINTF
+		std::atomic<bool>                   profilesVMCalls;
 	};
 	std::map<asJITFunction, SEntry*> entries; // by the immutable wrapper given to the engine
 	std::map<asCScriptFunction*, SEntry*> functionEntries;
+	std::atomic<asUINT> deferredProfiles; // deferred entries still noting classes in the VM
 
 	// The profile of the code of a function, which is passed to Recompile when the code
 	// has counted down the calls
@@ -149,13 +153,16 @@ struct CJITCompiler::SImpl
 	};
 
 	bool IsLogged(asCScriptFunction *func) const;
-	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose = COMPILE_FIRST, const SProfile *source = 0, bool exact = false, bool setEntryArgs = true);
+	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose = COMPILE_FIRST, const SProfile *source = 0, bool exact = false, bool setEntryArgs = true, const SJITProfile *vmProfile = 0);
 	JITFunction TierUp(SEntry *entry, bool exact);
 	JITFunction CompileExact(asCScriptFunction *func);
 	void Replace(asCScriptFunction *func, asJITFunction code);
 	void Release(asJITFunction code);
-	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output);
+	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode = 0);
 	SEntry *FindEntry(asCScriptFunction *func);
+	void PrepareVMProfile(SEntry *entry, const CJITByteCode &code);
+	void FinishVMProfile(SEntry *entry);
+	void NoteVMClass(asSVMRegisters *regs);
 	static asPWORD ResolveEntry(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg);
 	static int ContinueInVM(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 	static int Recompile(SJITProfile *profile);
@@ -181,6 +188,7 @@ CJITCompiler::CJITCompiler(asDWORD flags)
 	m_impl->callThreshold   = 0;
 	m_impl->loopThreshold   = 0;
 	m_impl->profileThreshold = 10000;
+	m_impl->deferredProfiles.store(0, std::memory_order_relaxed);
 	memset(m_impl->bailOps, 0, sizeof(m_impl->bailOps));
 	memset(&m_impl->stats, 0, sizeof(m_impl->stats));
 }
@@ -459,6 +467,88 @@ CJITCompiler::SImpl::SEntry *CJITCompiler::SImpl::FindEntry(asCScriptFunction *f
 	return it != functionEntries.end() ? it->second : 0;
 }
 
+// Prepares cells for the classes seen by the virtual and interface calls while a
+// deferred function still runs in the VM. The return addresses of the calls are in
+// their call states when their script implementations enter ResolveEntry.
+void CJITCompiler::SImpl::PrepareVMProfile(SEntry *entry, const CJITByteCode &code)
+{
+	if( entry->counts.empty() || profileThreshold == 0 || maxInlineSize == 0 ||
+	    (flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) )
+		return;
+
+	asCScriptEngine *engine = entry->func->engine;
+	const std::vector<SJITInstr> &instrs = code.GetInstructions();
+	for( asUINT n = 0; n < instrs.size(); n++ )
+	{
+		const SJITInstr &instr = instrs[n];
+		if( instr.op != asBC_CALLINTF )
+			continue;
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *method = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( method == 0 || (method->funcType != asFUNC_VIRTUAL && method->funcType != asFUNC_INTERFACE) )
+			continue;
+		SJITSeenClasses &seen = entry->vmProfile.classes[std::make_pair(entry->func, n)];
+		entry->vmCalls[instr.bc + instr.size] = &seen;
+	}
+	if( !entry->vmCalls.empty() )
+	{
+		entry->profilesVMCalls.store(true, std::memory_order_release);
+		deferredProfiles.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+// Stops looking up the calls of an entry after its first compilation has taken a
+// snapshot of the classes seen in the VM, or after the entry is released.
+void CJITCompiler::SImpl::FinishVMProfile(SEntry *entry)
+{
+	if( entry->profilesVMCalls.exchange(false, std::memory_order_acq_rel) )
+		deferredProfiles.fetch_sub(1, std::memory_order_relaxed);
+}
+
+static void NoteSeenClass(SJITSeenClasses *seen, asCObjectType *type)
+{
+	for( asUINT n = 0; n < JIT_PROFILE_CLASSES; n++ )
+	{
+		if( seen->types[n] == type )
+			return;
+		if( seen->types[n] == 0 )
+		{
+			seen->types[n] = type;
+			return;
+		}
+	}
+}
+
+// Notes the class of the receiver of the interpreted CALLINTF that entered the
+// current script function. PushCallState leaves the caller's program pointer just
+// after the call and its stack pointer at the receiver in the top call state.
+void CJITCompiler::SImpl::NoteVMClass(asSVMRegisters *regs)
+{
+	asCContext *ctx = static_cast<asCContext*>(regs->ctx);
+	asUINT length = ctx->m_callStack.GetLength();
+	if( length < CALLSTACK_FRAME_SIZE )
+		return;
+	asPWORD *state = ctx->m_callStack.AddressOf() + length - CALLSTACK_FRAME_SIZE;
+	if( state[0] == 0 || state[1] == 0 || state[3] == 0 )
+		return;
+
+	asCScriptFunction *caller = reinterpret_cast<asCScriptFunction*>(state[1]);
+	std::map<asCScriptFunction*, SEntry*>::iterator found = functionEntries.find(caller);
+	if( found == functionEntries.end() )
+		return;
+	SEntry *entry = found->second;
+	if( !entry->profilesVMCalls.load(std::memory_order_acquire) )
+		return;
+
+	const asDWORD *returnAddress = reinterpret_cast<const asDWORD*>(state[2]);
+	std::map<const asDWORD*, SJITSeenClasses*>::iterator call = entry->vmCalls.find(returnAddress);
+	if( call == entry->vmCalls.end() )
+		return;
+	asCScriptObject *obj = *reinterpret_cast<asCScriptObject**>(state[3]);
+	if( obj )
+		NoteSeenClass(call->second, obj->objType);
+}
+
 asJITFunction JIT_GetNativeTarget(asCScriptFunction *func)
 {
 	if( func == 0 || func->engine == 0 || func->engine->jitCompiler == 0 )
@@ -469,12 +559,14 @@ asJITFunction JIT_GetNativeTarget(asCScriptFunction *func)
 	return entry ? reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire)) : 0;
 }
 
-int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output)
+int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode)
 {
 	using namespace asmjit;
 	using namespace asmjit::ujit;
 
 	SEntry *entry = new SEntry(this, func, reinterpret_cast<JITFunction>(code), counts);
+	if( byteCode )
+		PrepareVMProfile(entry, *byteCode);
 	CodeHolder holder;
 	holder.init(runtime.environment(), runtime.cpu_features());
 	CJITErrorHandler errorHandler;
@@ -571,6 +663,7 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 	{
 		if( unwindHandle )
 			CJITUnwindInfo::Unregister(unwindHandle);
+		FinishVMProfile(entry);
 		delete entry;
 		std::lock_guard<std::mutex> lock(mutex);
 		stats.functionsFailed++;
@@ -743,7 +836,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		SetEntryArgs(func, code);
 		if( log )
 			fprintf(m_impl->logFile, "\n; ---- %s ----\n; compilation deferred\n", func->GetDeclaration(true, true));
-		int wrapped = m_impl->CreateEntry(func, 0, tieredCounts, output);
+		int wrapped = m_impl->CreateEntry(func, 0, tieredCounts, output, &code);
 		if( wrapped >= 0 )
 		{
 			std::lock_guard<std::mutex> lock(m_impl->mutex);
@@ -778,7 +871,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 // the classes in the profile of the source, see Recompile. With exact the code checks
 // for suspension and line callbacks at every statement, and so does the code compiled
 // again with its profile
-int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose, const SProfile *source, bool exact, bool setEntryArgs)
+int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose, const SProfile *source, bool exact, bool setEntryArgs, const SJITProfile *vmProfile)
 {
 	using namespace asmjit;
 	using namespace asmjit::ujit;
@@ -797,13 +890,15 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	asUINT generation = source ? source->generation + 1 : 0;
 	inlining.profile     = profileThreshold > 0 && inlining.maxSize > 0 && generation < JIT_MAX_RECOMPILES;
 	// The classes seen before stay in the profile for the next time. The code of the
-	// source may go on noting them, so the analysis takes them from the copy
+	// source may go on noting them, and the VM may still finish a call while the first
+	// code is compiled, so the analysis takes them from the copy
+	const SJITProfile *seenBefore = source ? static_cast<const SJITProfile*>(source) : vmProfile;
 	SProfile *profile = 0;
 	if( inlining.profile )
 	{
 		profile = new SProfile;
-		if( source )
-			profile->compiledWith.classes = source->classes;
+		if( seenBefore )
+			profile->compiledWith.classes = seenBefore->classes;
 		profile->classes    = profile->compiledWith.classes;
 		profile->countdown  = int(profileThreshold);
 		profile->impl       = this;
@@ -813,7 +908,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 		profile->recompiled = false;
 		profile->exact      = exact;
 	}
-	inlining.classes     = profile ? &profile->compiledWith : source;
+	inlining.classes     = profile ? &profile->compiledWith : seenBefore;
 	inlining.indexers    = &indexers;
 	code.SetBailInstructions(bailOps);
 	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
@@ -981,17 +1076,20 @@ JITFunction CJITCompiler::SImpl::TierUp(SEntry *entry, bool exact)
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_FIRST, 0, exact, false) >= 0;
+	const SJITProfile *vmProfile = entry->profilesVMCalls.load(std::memory_order_acquire) ? &entry->vmProfile : 0;
+	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_FIRST, 0, exact, false, vmProfile) >= 0;
 
 	std::lock_guard<std::mutex> lock(mutex);
 	compiling.erase(func);
 	if( !ok )
 	{
+		FinishVMProfile(entry);
 		for( size_t n = 0; n < entry->counts.size(); n++ )
 			entry->counts[n].store(0, std::memory_order_relaxed);
 		return 0;
 	}
 	entry->code.store(reinterpret_cast<JITFunction>(jitFunc), std::memory_order_release);
+	FinishVMProfile(entry);
 	return reinterpret_cast<JITFunction>(jitFunc);
 }
 
@@ -1117,12 +1215,12 @@ int CJITCompiler::SImpl::ExactEntry(void *impl, asSVMRegisters *regs, asPWORD ji
 
 // Resolves an immutable function wrapper to its current code. Deferred functions
 // count calls and loop iterations here, then publish their code through the entry.
-//
-// TODO: runtime optimize: The classes of the objects that the virtual and interface
-//                         calls see until the function is compiled could be noted too,
-//                         so that the first code inlines their methods, see SJITProfile.
+// The entry of a script method also sees the call state of its caller, from which the
+// classes at the virtual and interface calls of deferred functions are profiled.
 asPWORD CJITCompiler::SImpl::ResolveEntry(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg)
 {
+	if( entry->impl->deferredProfiles.load(std::memory_order_relaxed) )
+		entry->impl->NoteVMClass(regs);
 	JITFunction code = entry->code.load(std::memory_order_acquire);
 	if( code == 0 && !entry->counts.empty() )
 	{
@@ -1179,6 +1277,7 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 	if( found == m_impl->entries.end() )
 		return;
 	SImpl::SEntry *entry = found->second;
+	m_impl->FinishVMProfile(entry);
 	asJITFunction code = reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire));
 	bool releasable = code && !m_impl->aotPointers.count(code);
 
