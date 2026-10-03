@@ -95,10 +95,13 @@ typedef asPWORD     aot_pw;
 // see CJITCppGen::GetSystemCall, in case the default is another one
 #if defined(AS_X86) && defined(_MSC_VER)
 #define AOT_CDECL __cdecl
+#define AOT_STDCALL __stdcall
 #elif defined(AS_X86) && defined(__GNUC__)
 #define AOT_CDECL __attribute__((cdecl))
+#define AOT_STDCALL __attribute__((stdcall))
 #else
 #define AOT_CDECL
+#define AOT_STDCALL
 #endif
 
 // A value type that a registered function returns in more than one register, as

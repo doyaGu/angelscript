@@ -210,14 +210,14 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.auxiliaryThis = false;
 	call.virtualThis = false;
 	call.adjustThis = false;
+	call.stdCall = false;
 	switch( sysFunc->callConv )
 	{
 	case ICC_CDECL:
 		break;
-#if AS_PTR_SIZE == 2
 	case ICC_STDCALL:
+		call.stdCall = true;
 		break;
-#endif
 #ifdef JIT_AOT_THISCALL
 	case ICC_THISCALL:
 		if( sysFunc->auxiliary )
@@ -1149,7 +1149,8 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 			call.adjustThis ? "t_" : call.thisFromStack ? "o_" : "h_");
 		target = "f_";
 	}
-	std::string func = Format("((%s (AOT_CDECL*)(%s))%s)(%s)", retType.c_str(), paramList.c_str(), target.c_str(), argList.c_str());
+	const char *callConv = call.stdCall ? "AOT_STDCALL" : "AOT_CDECL";
+	std::string func = Format("((%s (%s*)(%s))%s)(%s)", retType.c_str(), callConv, paramList.c_str(), target.c_str(), argList.c_str());
 	if( call.ret == SJITSystemCall::VALUE_VOID )
 		Emit("\t%s;", func.c_str());
 	else
@@ -1275,7 +1276,7 @@ void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 			call.adjustThis ? "t_" : call.thisFromStack ? "m_" : "h_");
 		target = "f_";
 	}
-	Emit("\t\t\t((void (AOT_CDECL*)(%s))%s)(%s);", paramList.c_str(), target.c_str(), argList.c_str());
+	Emit("\t\t\t((void (%s*)(%s))%s)(%s);", call.stdCall ? "AOT_STDCALL" : "AOT_CDECL", paramList.c_str(), target.c_str(), argList.c_str());
 	Emit("\t\t\tctx->m_callingSystemFunction = 0;");
 	if( call.cleanArgs )
 		Emit("\t\t\tJIT_CleanupSystemCallArgs(regs, d_);");

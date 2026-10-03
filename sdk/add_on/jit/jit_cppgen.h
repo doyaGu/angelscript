@@ -58,6 +58,7 @@ struct SJITSystemCall
 	bool             auxiliaryThis; // auxiliary is the native this pointer
 	bool             virtualThis; // resolve the function from the native this pointer
 	bool             adjustThis;  // adjust the native this pointer for composition or inheritance
+	bool             stdCall;     // use the callee-cleaned 32bit x86 calling convention
 	bool             retOnStack;  // the value is returned to the location on the stack
 	bool             retInMemory; // through the hidden pointer, which is passed first,
 	bool             retAfterThis; // or after the native this pointer
