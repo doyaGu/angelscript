@@ -49,7 +49,8 @@ struct SJITSystemCall
 	enum
 	{
 		VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE,
-		VALUE_OBJ1, VALUE_OBJ2, VALUE_OBJ4, VALUE_OBJ8, VALUE_OBJF4, VALUE_OBJF8
+		VALUE_OBJ1, VALUE_OBJ2, VALUE_OBJ4, VALUE_OBJ8, VALUE_OBJF4, VALUE_OBJF8,
+		VALUE_OBJI2
 	};
 
 	int              obj;         // where the script object is passed as an argument
@@ -67,6 +68,7 @@ struct SJITSystemCall
 	int              retBytes;    // whose first bytes are the object
 	std::vector<int> args;        // the kinds of the arguments, not VALUE_VOID or VALUE_HANDLE;
 	                              // VALUE_OBJ* is loaded through the temporary object pointer
+	std::vector<int> argBytes;    // exact object bytes for VALUE_OBJ*, 0 otherwise
 	int              popSize;     // dwords popped off the stack
 };
 

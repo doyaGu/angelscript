@@ -1455,7 +1455,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
-	struct SArg { int kind; int stackOff; int valueSize; TypeId type; bool valueFloat; bool autoHandle; SDirectBehaviour release; };
+	struct SArg { int kind; int stackOff; int valueSize; int valueOffset; TypeId type; bool valueFloat; bool valueFree; bool autoHandle; SDirectBehaviour release; };
 	std::vector<SArg> args;
 	bool hasStackObj = thisFromStack || objFirst || objLast;
 	bool hasThis = thisFromStack || auxiliaryThis;
@@ -1489,9 +1489,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
 		else if( pt.IsObject() )
 		{
-			arg.valueSize = JIT_GetInlineValueArgSize(descr, n, &arg.valueFloat);
-			if( arg.valueSize > 0 )
+			int valueSize = JIT_GetInlineValueArgSize(descr, n, &arg.valueFloat);
+			if( valueSize > 0 )
 			{
+				arg.valueSize = valueSize > 8 ? 8 : valueSize;
+				arg.valueFree = valueSize <= 8;
 				if( arg.valueFloat )
 				{
 					arg.kind = arg.valueSize == 4 ? ARG_F32 : ARG_F64;
@@ -1501,8 +1503,21 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				{
 					arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
 					arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
-					           arg.valueSize == 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+					           arg.valueSize <= 4 ? TypeId::kUInt32 : TypeId::kUInt64;
 				}
+				args.push_back(arg);
+				if( valueSize > 8 )
+				{
+					arg.valueSize = valueSize - 8;
+					arg.valueOffset = 8;
+					arg.valueFree = true;
+					arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
+					arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
+					           arg.valueSize <= 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+					args.push_back(arg);
+				}
+				stackPos += AS_PTR_SIZE;
+				continue;
 			}
 			else
 			{
@@ -1528,22 +1543,6 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	if( args.size() + (hasThis ? 1 : 0) + ((objFirst || objLast) ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
 		return false;
-	// With the System V x64 ABI AsmJit gives the floats passed on the stack 4 bytes
-	// each instead of 8, so the functions that have any are called through the engine
-	const Environment &env = m_uc.cc->environment();
-	if( Is64Bit() && !env.is_platform_windows() && !env.is_msvc_abi() )
-	{
-		asUINT vecArgs = 0;
-		for( asUINT n = 0; n < args.size(); n++ )
-		{
-			if( args[n].kind != ARG_F32 && args[n].kind != ARG_F64 )
-				continue;
-			if( args[n].kind == ARG_F32 && vecArgs >= 8 )
-				return false;
-			vecArgs++;
-		}
-	}
-	int popSize = stackPos;
 
 	// The hidden return pointer comes first, except after the object pointer of class methods with MSVC
 	bool retFirst = retInMemory && !retInX8, retAfterThis = false;
@@ -1554,6 +1553,45 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		retAfterThis = true;
 	}
 #endif
+	// Keep two-slot aggregates wholly in registers or wholly on the stack as required
+	// by the System V ABI. AsmJit sees their slots as separate primitive arguments;
+	// force the first pair that would straddle the last register onto the stack below.
+	// The freed register is then available to the next scalar integer argument. AsmJit also gives the
+	// floats passed on the stack 4 bytes each instead of 8, so reject those calls.
+	const Environment &env = m_uc.cc->environment();
+	int forceStackArg = -1;
+	if( Is64Bit() && !env.is_platform_windows() && !env.is_msvc_abi() )
+	{
+		asUINT gpArgs = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
+		                (retAfterThis ? 1 : 0) + (objFirst ? 1 : 0);
+		asUINT vecArgs = 0;
+		for( asUINT n = 0; n < args.size(); n++ )
+		{
+			bool twoSlotValue = args[n].valueSize && !args[n].valueFree;
+			if( args[n].kind == ARG_F32 || args[n].kind == ARG_F64 )
+			{
+				if( twoSlotValue && vecArgs == 7 )
+					return false;
+				if( args[n].kind == ARG_F32 && vecArgs >= 8 )
+					return false;
+				vecArgs++;
+			}
+			else if( twoSlotValue )
+			{
+				if( gpArgs <= 4 )
+					gpArgs += 2;
+				else if( gpArgs == 5 && forceStackArg < 0 )
+					forceStackArg = int(n);
+				n++;
+			}
+			else
+			{
+				if( gpArgs < 6 )
+					gpArgs++;
+			}
+		}
+	}
+	int popSize = stackPos;
 
 	FuncSignature sig(conv);
 	sig.set_ret(retType);
@@ -1564,6 +1602,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
 	if( objLast ) sig.add_arg(TypeId::kUIntPtr);
 	if( retInX8 ) sig.add_arg(TypeId::kUIntPtr); // moved to x8 below
+	if( forceStackArg >= 0 ) sig.add_arg(TypeId::kUInt64); // reserves one outgoing stack slot
 
 	// A null script object pointer is an exception raised by the VM. Auxiliary is
 	// required to be non-null when the function is registered.
@@ -1630,12 +1669,24 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				valueObjs[n] = m_uc.new_gp_ptr();
 				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
-				if( args[n].valueSize == 1 )
-					m_uc.load_u8(gpArgs[n], mem_ptr(valueObjs[n]));
-				else if( args[n].valueSize == 2 )
-					m_uc.load_u16(gpArgs[n], mem_ptr(valueObjs[n]));
-				else
-					m_uc.load_u32(gpArgs[n], mem_ptr(valueObjs[n]));
+				m_uc.mov(gpArgs[n], Imm(0));
+				int remaining = args[n].valueSize, partOffset = 0;
+				while( remaining )
+				{
+					int partSize = remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+					Gp part = partOffset ? m_uc.new_gp32() : gpArgs[n];
+					Mem source = Addr(valueObjs[n], args[n].valueOffset + partOffset);
+					if( partSize == 4 ) m_uc.load_u32(part, source);
+					else if( partSize == 2 ) m_uc.load_u16(part, source);
+					else m_uc.load_u8(part, source);
+					if( partOffset )
+					{
+						m_uc.shl(part, part, Imm(partOffset * 8));
+						m_uc.or_(gpArgs[n], gpArgs[n], part);
+					}
+					partOffset += partSize;
+					remaining -= partSize;
+				}
 			}
 			else
 				m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
@@ -1648,7 +1699,24 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				{
 					valueObjs[n] = m_uc.new_gp_ptr();
 					m_uc.load(valueObjs[n], Stack(args[n].stackOff));
-					m_uc.load_u64(gpArgs[n], mem_ptr(valueObjs[n]));
+					m_uc.mov(gpArgs[n], Imm(0));
+					int remaining = args[n].valueSize, partOffset = 0;
+					while( remaining )
+					{
+						int partSize = remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+						Gp part = partOffset ? m_uc.new_gp64() : gpArgs[n];
+						Mem source = Addr(valueObjs[n], args[n].valueOffset + partOffset);
+						if( partSize == 4 ) m_uc.load_u32(part, source);
+						else if( partSize == 2 ) m_uc.load_u16(part, source);
+						else m_uc.load_u8(part, source);
+						if( partOffset )
+						{
+							m_uc.shl(part, part, Imm(partOffset * 8));
+							m_uc.or_(gpArgs[n], gpArgs[n], part);
+						}
+						partOffset += partSize;
+						remaining -= partSize;
+					}
 				}
 				else
 					m_uc.load_u64(gpArgs[n], Stack(args[n].stackOff));
@@ -1686,7 +1754,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 	}
 	for( asUINT n = 0; n < args.size(); n++ )
-		if( args[n].valueSize )
+		if( args[n].valueSize && args[n].valueFree )
 		{
 			InvokeNode *freeValue = Invoke((const void*)JIT_FreeValueArg,
 				FuncSignature::build<void, asSVMRegisters*, void*>());
@@ -1718,6 +1786,48 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	else
 		call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), sig);
+	if( forceStackArg >= 0 )
+	{
+		// The signature reserves an extra final argument so the outgoing frame has
+		// room for the half moved out of r9. Move the first later scalar integer to
+		// r9, if any; otherwise the unused extra argument occupies it. Stack arguments
+		// between the aggregate and that value move up by one eightbyte.
+		asUINT argBase = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
+		                 (retAfterThis ? 1 : 0) + (objFirst ? 1 : 0);
+		asUINT first = argBase + asUINT(forceStackArg);
+		asUINT second = first + 1;
+		asUINT candidate = call->detail().arg_count() - 1;
+		for( asUINT n = asUINT(forceStackArg + 2); n < args.size(); n++ )
+		{
+			if( args[n].valueSize && !args[n].valueFree )
+			{
+				n++;
+				continue;
+			}
+			if( args[n].kind != ARG_F32 && args[n].kind != ARG_F64 )
+			{
+				candidate = argBase + n;
+				break;
+			}
+		}
+		if( candidate == call->detail().arg_count() - 1 && objLast )
+			candidate = argBase + asUINT(args.size());
+
+		FuncValue &firstValue = call->detail().arg(first);
+		FuncValue &secondValue = call->detail().arg(second);
+		FuncValue &candidateValue = call->detail().arg(candidate);
+		int32_t firstOffset = secondValue.stack_offset();
+		int32_t candidateOffset = candidateValue.stack_offset();
+		for( asUINT n = 0; n < call->detail().arg_count(); n++ )
+		{
+			FuncValue &value = call->detail().arg(n);
+			if( value.is_stack() && value.stack_offset() >= firstOffset && value.stack_offset() < candidateOffset )
+				value.set_stack_offset(value.stack_offset() + 8);
+		}
+		firstValue.init_stack(firstOffset, firstValue.type_id());
+		RegType candidateType = TypeUtils::size_of(candidateValue.type_id()) <= 4 ? RegType::kGp32 : RegType::kGp64;
+		candidateValue.init_reg(candidateType, 9, candidateValue.type_id());
+	}
 	asUINT argIdx = 0;
 	if( retFirst )
 		call->set_arg(argIdx++, retPtr);
@@ -1751,6 +1861,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		call->detail().arg(argIdx).init_reg(RegType::kGp64, 8, TypeId::kUIntPtr);
 		argIdx++;
 	}
+	if( forceStackArg >= 0 )
+		call->set_arg(argIdx++, Imm(0));
 
 	Gp  retGp, retGpHi, retGps[4];
 	Vec retVec, retVecs[4];
