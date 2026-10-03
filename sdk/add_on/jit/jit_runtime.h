@@ -210,6 +210,14 @@ void   JIT_Free(asSVMRegisters *regs, asCObjectType *objType, asPWORD *var) noex
 // asBC_REFCPY and asBC_RefCpyV
 void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *src) noexcept;
 
+// Returns the number of parameter auto handles that a direct system call must
+// release, or -1 if its argument cleanup includes anything else
+int    JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept;
+
+// Releases the parameter auto handles of a direct system call. The stack pointer
+// must still point at its arguments, as it did when the function was entered
+void   JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexcept;
+
 // Adds the reference of a handle returned by a direct system call whose declaration
 // uses @+. The object may be null
 void   JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj) noexcept;

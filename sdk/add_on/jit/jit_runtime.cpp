@@ -211,8 +211,9 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 	ctx->m_callingSystemFunction = 0;
 
 	// The VM registers describe the asBC_CALLSYS or asBC_Thiscall1 instruction in
-	// the innermost function, with the arguments on the stack. The function hasn't
-	// returned anything, so there is nothing to clean up
+	// the innermost function, with the arguments on the stack. Release the handles
+	// it took ownership of before that stack is popped
+	JIT_CleanupAutoHandles(regs, descr);
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 	int popSize = sysFunc->paramSize;
 	if( sysFunc->callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
@@ -640,6 +641,61 @@ void JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void *
 	}
 
 	*dst = src;
+}
+
+int JIT_GetAutoHandleCleanupCount(asCScriptFunction *func) noexcept
+{
+	if( func == 0 || func->sysFuncIntf == 0 )
+		return -1;
+
+	asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
+	asUINT cleanIdx = 0;
+	int offset = 0;
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = func->parameterTypes[n];
+		if( n < sysFunc->paramAutoHandles.GetLength() && sysFunc->paramAutoHandles[n] )
+		{
+			if( cleanIdx >= sysFunc->cleanArgs.GetLength() )
+				return -1;
+			const asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[cleanIdx++];
+			asCObjectType *type = dt.IsFuncdef() ? &func->engine->functionBehaviours : CastToObjectType(dt.GetTypeInfo());
+			if( type == 0 || type->beh.release <= 0 || clean.op != 0 || clean.off != offset || clean.ot != type )
+				return -1;
+		}
+
+		if( dt.IsObject() && !dt.IsObjectHandle() && !dt.IsReference() )
+			offset += AS_PTR_SIZE;
+		else
+			offset += dt.GetSizeOnStackDWords();
+	}
+
+	return cleanIdx == sysFunc->cleanArgs.GetLength() ? int(cleanIdx) : -1;
+}
+
+void JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexcept
+{
+	asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
+	asDWORD *args = regs->stackPointer;
+	if( func->DoesReturnOnStack() )
+		args += AS_PTR_SIZE;
+	if( sysFunc->callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
+		args += AS_PTR_SIZE;
+
+	asCScriptEngine *engine = func->engine;
+	for( asUINT n = 0; n < sysFunc->cleanArgs.GetLength(); n++ )
+	{
+		asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[n];
+		asASSERT(clean.op == 0);
+		if( clean.op != 0 )
+			continue;
+		void **addr = (void**)&args[clean.off];
+		if( *addr )
+		{
+			engine->CallObjectMethod(*addr, clean.ot->beh.release);
+			*addr = 0;
+		}
+	}
 }
 
 void JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj) noexcept

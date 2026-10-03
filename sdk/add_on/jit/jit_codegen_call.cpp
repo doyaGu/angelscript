@@ -1224,7 +1224,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // Calls a registered function directly with its native calling convention, instead
 // of through the generic CallSystemFunction of the engine. This is only done for
 // simple signatures: primitives and pointers as arguments, a primitive, pointer,
-// handle, or value type as return value, and nothing to clean up after the call.
+// handle, or value type as return value, and only auto handles to clean up after
+// the call.
 // Value types returned in memory are left out where the address is neither passed
 // like an argument nor in a register of its own (see JIT_HIDDEN_RETURN_POINTER).
 // Everything else, e.g. objects passed by value, returns false and is called
@@ -1237,7 +1238,6 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // TODO: runtime optimize: Objects passed by value could be supported by setting up the
 //                         argument copies the way CallSystemFunction and as_callfunc_*.cpp
 //                         do for each ABI.
-//                         Parameter auto handles would need a release after the call, and
 //                         asCALL_GENERIC could be called with an asCGeneric set up inline.
 //                         Each should be measured against CallSystemFunction before adding
 //                         the code.
@@ -1337,15 +1337,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->cleanArgs.GetLength() ||
+	if( sysFunc->takesObjByVal ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
 		return false;
 	// Auxiliary objects only have defined direct-call semantics for class methods.
 	if( sysFunc->auxiliary && !auxiliaryThis )
 		return false;
-	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
-		if( sysFunc->paramAutoHandles[n] )
-			return false;
+	int autoHandleCount = JIT_GetAutoHandleCleanupCount(descr);
+	if( autoHandleCount < 0 )
+		return false;
 
 	// Return value. A value type returned by value is stored at the location that the
 	// caller put on the stack, either by the function itself through the hidden pointer,
@@ -1420,18 +1420,20 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
-	struct SArg { int kind; int stackOff; TypeId type; };
+	struct SArg { int kind; int stackOff; TypeId type; bool autoHandle; SDirectBehaviour release; };
 	std::vector<SArg> args;
 	bool hasStackObj = thisFromStack || objFirst || objLast;
 	bool hasThis = thisFromStack || auxiliaryThis;
 	int retOff = hasStackObj ? AS_PTR_SIZE : 0;
 	int firstArg = retOff + (retOnStack ? AS_PTR_SIZE : 0);
 	int stackPos = firstArg;
+	asUINT cleanIdx = 0;
 	for( asUINT n = 0; n < descr->parameterTypes.GetLength(); n++ )
 	{
 		const asCDataType &pt = descr->parameterTypes[n];
-		SArg arg;
+		SArg arg = {};
 		arg.stackOff = stackPos;
+		arg.autoHandle = n < sysFunc->paramAutoHandles.GetLength() && sysFunc->paramAutoHandles[n];
 		if( pt.GetTokenType() == ttQuestion )
 			return false;
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
@@ -1439,8 +1441,14 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		else if( pt.IsDoubleType() )               { arg.kind = ARG_F64; arg.type = TypeId::kFloat64; stackPos += 2; }
 		else if( pt.GetSizeOnStackDWords() == 2 )  { arg.kind = ARG_I64; arg.type = TypeId::kInt64;   stackPos += 2; }
 		else                                       { arg.kind = ARG_I32; arg.type = TypeId::kInt32;   stackPos += 1; }
+		if( arg.autoHandle )
+		{
+			if( arg.kind != ARG_PTR || !GetDirectBehaviour(sysFunc->cleanArgs[cleanIdx++].ot->beh.release, arg.release) )
+				return false;
+		}
 		args.push_back(arg);
 	}
+	asASSERT(cleanIdx == asUINT(autoHandleCount));
 	if( stackPos - firstArg != sysFunc->paramSize )
 		return false;
 	if( args.size() + (hasThis ? 1 : 0) + ((objFirst || objLast) ? 1 : 0) + (retInMemory ? 1 : 0) > Globals::kMaxFuncArgs )
@@ -1660,9 +1668,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		m_uc.bind(noHandle);
 	}
 
-	// Pop the arguments and store the return value like the VM does, except
-	// that the value register is left alone if it isn't read afterwards
-	PopStack(popSize * 4);
+	// Store the return value like the VM does before releasing the parameter auto
+	// handles. The value register is left alone if it isn't read afterwards
 	bool vrLive = m_code->IsVRLiveAfter(idx);
 	if( retOnStack )
 	{
@@ -1751,6 +1758,22 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	default:
 		break;
 	}
+
+	// The function owns the references passed through @+ parameters. Release them
+	// from the still-live argument slots, then pop the complete call frame
+	for( asUINT n = 0; n < args.size(); n++ )
+	{
+		if( !args[n].autoHandle )
+			continue;
+		Gp handle = m_uc.new_gp_ptr();
+		m_uc.load(handle, Stack(args[n].stackOff));
+		Label noHandle = m_uc.new_label();
+		m_uc.j(noHandle, test_z(handle));
+		EmitBehaviourCall(args[n].release, handle);
+		m_uc.store_zero_reg(Stack(args[n].stackOff));
+		m_uc.bind(noHandle);
+	}
+	PopStack(popSize * 4);
 
 	// Exceptions, suspend requests, and line callbacks are handled by the helper
 	Gp flag = m_uc.new_gp32();

@@ -1,4 +1,5 @@
 #include "jit_cppgen.h"
+#include "jit_runtime.h"
 
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
@@ -218,14 +219,15 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal || sysFunc->cleanArgs.GetLength() ||
+	if( sysFunc->takesObjByVal ||
 		sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset )
 		return false;
 	if( sysFunc->auxiliary && !call.auxiliaryThis )
 		return false;
-	for( asUINT n = 0; n < sysFunc->paramAutoHandles.GetLength(); n++ )
-		if( sysFunc->paramAutoHandles[n] )
-			return false;
+	int autoHandleCount = JIT_GetAutoHandleCleanupCount(descr);
+	if( autoHandleCount < 0 )
+		return false;
+	call.cleanAutoHandles = autoHandleCount != 0;
 
 	// The value returned. A value type returned by value is stored where the caller
 	// pushed the location, by the function itself through the hidden pointer or from
@@ -1058,7 +1060,6 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	Emit("\tctx->m_callingSystemFunction = 0;");
 	if( call.returnAutoHandle )
 		Emit("\tJIT_AddRefObject(regs, (asCObjectType*)d_->returnType.GetTypeInfo(), x_);");
-	Emit("\tsp += %d;", call.popSize);
 
 	// The value is stored like the VM does, but the value register only if it is read
 	bool vrLive = m_code.IsVRLiveAfter(idx);
@@ -1080,6 +1081,9 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	case SJITSystemCall::VALUE_PTR: Emit("\tAOT_SETVR(asPWORD, (asPWORD)x_);"); break;
 	default: break;
 	}
+	if( call.cleanAutoHandles )
+		Emit("\tJIT_CleanupAutoHandles(regs, d_);");
+	Emit("\tsp += %d;", call.popSize);
 
 	// Exceptions, suspend requests, and line callbacks
 	Emit("\tif( AOT_SUSPENDING() )");
