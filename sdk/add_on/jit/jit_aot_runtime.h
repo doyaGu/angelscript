@@ -109,11 +109,25 @@ typedef asPWORD     aot_pw;
 // see CJITCppGen::GetSystemCall
 template<typename T, int N> struct aot_parts { T v[N]; };
 
+// The first byte and word of a dword in VM memory. Cached local variables keep
+// the raw dword layout, so these access its high bits on big endian hosts
+#ifdef AS_BIG_ENDIAN
+inline asBYTE  aot_get8(asDWORD v)  { return asBYTE(v >> 24); }
+inline asWORD  aot_get16(asDWORD v) { return asWORD(v >> 16); }
+inline asDWORD aot_set8(asDWORD v)  { return asDWORD(asBYTE(v)) << 24; }
+inline asDWORD aot_set16(asDWORD v) { return asDWORD(asWORD(v)) << 16; }
+#else
+inline asBYTE  aot_get8(asDWORD v)  { return asBYTE(v); }
+inline asWORD  aot_get16(asDWORD v) { return asWORD(v); }
+inline asDWORD aot_set8(asDWORD v)  { return asBYTE(v); }
+inline asDWORD aot_set16(asDWORD v) { return asWORD(v); }
+#endif
+
 // Booleans. The VM writes the byte of a boolean and clears the rest of the dword,
 // or of the value register for the tests
 #if AS_SIZEOF_BOOL == 1
 #define AOT_NOT(off) do { asBYTE v_ = AOT_V(u8, off) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0; AOT_V(u32, off) = 0; AOT_V(u8, off) = v_; } while(0)
-#define AOT_NOTL(l) ((l) = ((asBYTE)(l) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0))
+#define AOT_NOTL(l) ((l) = aot_set8(aot_get8(l) == 0 ? VALUE_OF_BOOLEAN_TRUE : 0))
 #define AOT_TEST(cond) AOT_SETVR(asBYTE, (cond) ? VALUE_OF_BOOLEAN_TRUE : 0)
 #define AOT_CLRHI() AOT_SETVR(asBYTE, AOT_GETVR(asBYTE))
 #else

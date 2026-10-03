@@ -736,20 +736,20 @@ std::string CJITCppGen::Var(const char *type, int offset)
 	case JIT_SLOT_I32:
 		if( strcmp(type, "u32") == 0 ) return name;
 		if( strcmp(type, "i32") == 0 ) return Format("((int)%s)", name);
-		if( strcmp(type, "u16") == 0 ) return Format("((asWORD)%s)", name);
-		if( strcmp(type, "i16") == 0 ) return Format("((short)%s)", name);
-		if( strcmp(type, "u8") == 0 )  return Format("((asBYTE)%s)", name);
-		if( strcmp(type, "i8") == 0 )  return Format("((signed char)%s)", name);
+		if( strcmp(type, "u16") == 0 ) return Format("aot_get16(%s)", name);
+		if( strcmp(type, "i16") == 0 ) return Format("((short)aot_get16(%s))", name);
+		if( strcmp(type, "u8") == 0 )  return Format("aot_get8(%s)", name);
+		if( strcmp(type, "i8") == 0 )  return Format("((signed char)aot_get8(%s))", name);
 		if( strcmp(type, "f32") == 0 ) return Format("aot_f32bits(%s)", name);
 		break;
 	case JIT_SLOT_F32:
 		if( strcmp(type, "f32") == 0 ) return name;
 		if( strcmp(type, "u32") == 0 ) return Format("aot_bits32(%s)", name);
 		if( strcmp(type, "i32") == 0 ) return Format("((int)aot_bits32(%s))", name);
-		if( strcmp(type, "u16") == 0 ) return Format("((asWORD)aot_bits32(%s))", name);
-		if( strcmp(type, "i16") == 0 ) return Format("((short)aot_bits32(%s))", name);
-		if( strcmp(type, "u8") == 0 )  return Format("((asBYTE)aot_bits32(%s))", name);
-		if( strcmp(type, "i8") == 0 )  return Format("((signed char)aot_bits32(%s))", name);
+		if( strcmp(type, "u16") == 0 ) return Format("aot_get16(aot_bits32(%s))", name);
+		if( strcmp(type, "i16") == 0 ) return Format("((short)aot_get16(aot_bits32(%s)))", name);
+		if( strcmp(type, "u8") == 0 )  return Format("aot_get8(aot_bits32(%s))", name);
+		if( strcmp(type, "i8") == 0 )  return Format("((signed char)aot_get8(aot_bits32(%s)))", name);
 		break;
 	case JIT_SLOT_I64:
 		if( strcmp(type, "u64") == 0 ) return name;
@@ -800,22 +800,22 @@ std::string CJITCppGen::SetVar(const char *type, int offset, const std::string &
 	return "";
 }
 
-// The statement that writes the value to the low byte or word of a variable, u8 or
-// u16, and clears the rest of the dword, like the VM does for 8 and 16bit values.
-// The local variables are only used on little endian hosts, see JIT_AOT_MAX_LOCALS
+// The statement that writes the value to the first byte or word of a variable, u8
+// or u16, and clears the rest of the dword, like the VM does for those values
 std::string CJITCppGen::SetVarLow(const char *type, int offset, const std::string &value)
 {
 	const char *ctype = strcmp(type, "u8") == 0 ? "asBYTE" : "asWORD";
+	const char *set = strcmp(type, "u8") == 0 ? "aot_set8" : "aot_set16";
 	SLocal *local = FindLocal(offset);
 	if( local == 0 )
 		return Format("{ %s v_ = (%s)(%s); AOT_V(u32, %d) = 0; AOT_V(%s, %d) = v_; }", ctype, ctype, value.c_str(), offset, type, offset);
 
 	local->used = true;
 	if( local->kind == JIT_SLOT_F32 )
-		return Format("%s = aot_f32bits((%s)(%s));", local->name.c_str(), ctype, value.c_str());
+		return Format("%s = aot_f32bits(%s(%s));", local->name.c_str(), set, value.c_str());
 	if( local->kind != JIT_SLOT_I32 )
 		m_failed = true;
-	return Format("%s = (%s)(%s);", local->name.c_str(), ctype, value.c_str());
+	return Format("%s = %s(%s);", local->name.c_str(), set, value.c_str());
 }
 
 // The address of a variable, which the analysis doesn't keep in a register then

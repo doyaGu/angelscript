@@ -37,9 +37,8 @@
 //    for the calls that aren't inlined, which would need entry points of the callees
 //    that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
-//  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots),
-//    and local variables for the variables in the code generated ahead of time on big endian
-//    hosts (jit_aot.cpp, JIT_AOT_MAX_LOCALS).
+//  - Register cache for pointer variables and for more than 32 variables
+//    (jit_bytecode.cpp, AnalyseSlots).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit
 //    division and modulo instead of calling runtime helpers.
 //  - Set the arguments and read the return value of a CJITCall without the checks of
