@@ -195,6 +195,35 @@ int JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noex
 	return CheckStatusAfterSystemCall(regs, ctx);
 }
 
+int JIT_AfterDirectAlloc(asSVMRegisters *regs, void *mem, void **dst) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+	regs->programPointer += 2 + AS_PTR_SIZE;
+	if( regs->doProcessSuspend )
+	{
+		if( ctx->m_doSuspend )
+		{
+			ctx->m_status = asEXECUTION_SUSPENDED;
+			return 1;
+		}
+		if( ctx->m_status != asEXECUTION_ACTIVE )
+		{
+			ctx->m_engine->CallFree(mem);
+			if( dst ) *dst = 0;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// The method object is on the script stack for ordinary methods and for functor
+// methods. A bound method exposed as a global uses only its auxiliary object
+static inline bool SystemCallHasStackObject(const asSSystemFunctionInterface *sysFunc)
+{
+	return sysFunc->callConv >= ICC_THISCALL &&
+		(sysFunc->auxiliary == 0 || sysFunc->callConv >= ICC_THISCALL_OBJLAST);
+}
+
 #ifndef AS_NO_EXCEPTIONS
 // Turns the C++ exception being caught into a script exception like CallSystemFunction,
 // if it was thrown by a registered function that the generated code called directly.
@@ -204,22 +233,37 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 	asCScriptFunction *descr = ctx->m_callingSystemFunction;
 	if( descr == 0 )
 		return false;
+	asCScriptEngine *engine = ctx->m_engine;
 
 	// The VM releases the parameters of the inlined functions on the call stack
 	JIT_OwnBorrowed(regs, 0, 0);
 	ctx->HandleAppException();
 	ctx->m_callingSystemFunction = 0;
 
-	// The VM registers describe the asBC_CALLSYS or asBC_Thiscall1 instruction in
-	// the innermost function, with the arguments on the stack. Release the handles
-	// it took ownership of before that stack is popped
+	// The VM registers describe the call instruction in the innermost function, with
+	// the arguments on the stack. Release the handles it took ownership of before
+	// that stack is popped
 	JIT_CleanupAutoHandles(regs, descr);
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 	int popSize = sysFunc->paramSize;
-	if( sysFunc->callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
+	if( SystemCallHasStackObject(sysFunc) )
 		popSize += AS_PTR_SIZE;
 	if( descr->DoesReturnOnStack() )
 		popSize += AS_PTR_SIZE;
+
+	if( asEBCInstr(*(asBYTE*)regs->programPointer) == asBC_ALLOC )
+	{
+		// The object is still first on the stack because the constructor threw. Pop
+		// its call frame and the destination, then discard the incomplete object
+		void *mem = *(void**)regs->stackPointer;
+		regs->stackPointer += popSize;
+		void **dst = (void**)*(asPWORD*)regs->stackPointer;
+		regs->stackPointer += AS_PTR_SIZE;
+		engine->CallFree(mem);
+		if( dst ) *dst = 0;
+		regs->programPointer += 2 + AS_PTR_SIZE;
+		return true;
+	}
 
 	bool onStack = descr->DoesReturnOnStack();
 	if( asEBCInstr(*(asBYTE*)regs->programPointer) == asBC_CALLSYS )
@@ -679,7 +723,7 @@ void JIT_CleanupAutoHandles(asSVMRegisters *regs, asCScriptFunction *func) noexc
 	asDWORD *args = regs->stackPointer;
 	if( func->DoesReturnOnStack() )
 		args += AS_PTR_SIZE;
-	if( sysFunc->callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
+	if( SystemCallHasStackObject(sysFunc) )
 		args += AS_PTR_SIZE;
 
 	asCScriptEngine *engine = func->engine;

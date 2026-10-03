@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 14;
+const asQWORD JIT_AOT_FORMAT_VERSION = 15;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -63,6 +63,19 @@ protected:
 	asQWORD m_h0;
 	asQWORD m_h1;
 };
+
+static void AddSystemCallKey(CJITAOTHasher &hash, const SJITSystemCall &call)
+{
+	hash.Add(1 | (call.obj << 1) | (call.thisFromStack << 3) | (call.auxiliaryThis << 4) |
+		(call.virtualThis << 5) | (call.adjustThis << 6) | (call.retOnStack << 7) |
+		(call.retInMemory << 8) | (call.retAfterThis << 9) | (call.returnAutoHandle << 10) |
+		(call.cleanAutoHandles << 11) | (call.ret << 12) | (call.retParts << 15) |
+		(call.retBytes << 18));
+	hash.Add(call.popSize);
+	hash.Add(call.args.size());
+	for( asUINT a = 0; a < call.args.size(); a++ )
+		hash.Add(call.args[a]);
+}
 
 // The operands that are part of the key
 enum
@@ -221,10 +234,25 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 		// Nor is the type, but how its handles are copied and released
 		if( instr.op == asBC_FREE || instr.op == asBC_REFCPY || instr.op == asBC_RefCpyV )
 			hash.Add(CJITByteCode::GetRefKind(func->engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(bc))));
-		// Registered types without constructors are allocated directly by the generated
-		// code. The function id itself still comes from the bytecode at run time.
+		// Registered types are allocated and, where the ABI is supported, constructed
+		// directly. The pointers and function ids still come from the bytecode at run time.
 		if( instr.op == asBC_ALLOC )
-			hash.Add(asBC_INTARG(bc + AS_PTR_SIZE) != 0);
+		{
+			int id = asBC_INTARG(bc + AS_PTR_SIZE);
+			if( id == 0 )
+				hash.Add(0);
+			else
+			{
+				SJITSystemCall call;
+				if( CJITCppGen::GetConstructorCall(func->engine, id, call) )
+				{
+					hash.Add(2);
+					AddSystemCallKey(hash, call);
+				}
+				else
+					hash.Add(1);
+			}
+		}
 
 		// The function id isn't, but how the function is called, or where the
 		// indexers compiled in place find the element
@@ -246,15 +274,7 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 				hash.Add(0);
 				continue;
 			}
-			hash.Add(1 | (call.obj << 1) | (call.thisFromStack << 3) | (call.auxiliaryThis << 4) |
-				(call.virtualThis << 5) | (call.adjustThis << 6) | (call.retOnStack << 7) |
-				(call.retInMemory << 8) | (call.retAfterThis << 9) | (call.returnAutoHandle << 10) |
-				(call.cleanAutoHandles << 11) | (call.ret << 12) | (call.retParts << 15) |
-				(call.retBytes << 18));
-			hash.Add(call.popSize);
-			hash.Add(call.args.size());
-			for( asUINT a = 0; a < call.args.size(); a++ )
-				hash.Add(call.args[a]);
+			AddSystemCallKey(hash, call);
 		}
 	}
 

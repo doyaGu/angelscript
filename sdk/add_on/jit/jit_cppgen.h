@@ -89,6 +89,10 @@ public:
 	// the host, see GetABI
 	static bool GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCall &call);
 
+	// The same for a constructor called by asBC_ALLOC. It must take the allocated
+	// object and return void
+	static bool GetConstructorCall(asCScriptEngine *engine, int funcId, SJITSystemCall &call);
+
 	// The condition on the macros of as_config.h that the code checks, which gives the
 	// ABI of the direct calls, or null if the code makes none
 	static const char *GetABI();
@@ -116,6 +120,7 @@ protected:
 	void EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow);
 	void EmitIndexer(asUINT idx);
 	void EmitSystemCall(asUINT idx, const SJITSystemCall &call);
+	void EmitConstructor(asUINT idx, const SJITSystemCall &call);
 	bool GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const;
 
 	static asCScriptFunction *FindCallee(asCScriptFunction *func, bool virtualCall);

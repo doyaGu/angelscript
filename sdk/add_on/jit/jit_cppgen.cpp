@@ -372,6 +372,14 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 #endif
 }
 
+bool CJITCppGen::GetConstructorCall(asCScriptEngine *engine, int funcId, SJITSystemCall &call)
+{
+	if( !GetSystemCall(engine, funcId, call) )
+		return false;
+	return (call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack) &&
+		!call.retOnStack && call.ret == SJITSystemCall::VALUE_VOID && !call.returnAutoHandle;
+}
+
 // asBC_Thiscall1 calls a method with an int, which returns a reference
 bool CJITCppGen::GetSystemCall(const SJITInstr &instr, SJITSystemCall &call) const
 {
@@ -1147,6 +1155,80 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	Emit("}");
 }
 
+// Allocates a registered value type and calls its constructor directly. The
+// constructor has the stack layout of a system call after the new object pointer
+// is pushed. The destination is popped and filled afterwards like asBC_ALLOC does
+void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
+{
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE };
+	const asUINT pos = m_pos;
+	const int P = AS_PTR_SIZE;
+	int off = P;
+
+	std::vector<std::string> params, args;
+	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back(call.adjustThis ? "t_" : "m_"); }
+	if( call.auxiliaryThis )                    { params.push_back("void*"); args.push_back("h_"); }
+	if( call.obj == SJITSystemCall::OBJ_FIRST ) { params.push_back("void*"); args.push_back("m_"); }
+	for( asUINT n = 0; n < call.args.size(); n++ )
+	{
+		int kind = call.args[n];
+		params.push_back(types[kind]);
+		args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
+		off += sizes[kind];
+	}
+	if( call.obj == SJITSystemCall::OBJ_LAST ) { params.push_back("void*"); args.push_back("m_"); }
+	std::string paramList, argList;
+	for( asUINT n = 0; n < params.size(); n++ )
+	{
+		paramList += (n ? ", " : "") + params[n];
+		argList += (n ? ", " : "") + args[n];
+	}
+
+	Emit("\t\t{");
+	Emit("\t\t\tasCScriptFunction *d_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1 + P);
+	if( call.auxiliaryThis )
+		Emit("\t\t\tvoid *h_ = d_->sysFuncIntf->auxiliary;");
+	Emit("\t\t\tvoid *m_ = ctx->m_engine->CallAlloc(o_);");
+	Emit("\t\t\tsp -= %d; AOT_S(pw, 0) = (asPWORD)m_;", P);
+	if( call.adjustThis )
+	{
+		Emit("\t\t\tvoid *t_ = (void*)((char*)m_ + d_->sysFuncIntf->compositeOffset);");
+		Emit("\t\t\tif( d_->sysFuncIntf->isCompositeIndirect ) t_ = *(void**)t_;");
+#if defined(__GNUC__) && defined(AS_ARM64)
+		Emit("\t\t\tt_ = (void*)((char*)t_ + (d_->sysFuncIntf->baseOffset >> 1));");
+#else
+		Emit("\t\t\tt_ = (void*)((char*)t_ + d_->sysFuncIntf->baseOffset);");
+#endif
+	}
+	Emit("\t\t\tregs->programPointer = bc + %u;", pos);
+	Emit("\t\t\tregs->stackPointer = sp;");
+	Emit("\t\t\tctx->m_callingSystemFunction = d_;");
+	std::string target = "d_->sysFuncIntf->func";
+	if( call.virtualThis )
+	{
+		Emit("\t\t\tasFUNCTION_t f_ = (*(asFUNCTION_t**)%s)[FuncPtrToUInt(d_->sysFuncIntf->func) / sizeof(void*)];",
+			call.adjustThis ? "t_" : call.thisFromStack ? "m_" : "h_");
+		target = "f_";
+	}
+	Emit("\t\t\t((void (AOT_CDECL*)(%s))%s)(%s);", paramList.c_str(), target.c_str(), argList.c_str());
+	Emit("\t\t\tctx->m_callingSystemFunction = 0;");
+	if( call.cleanAutoHandles )
+		Emit("\t\t\tJIT_CleanupAutoHandles(regs, d_);");
+	Emit("\t\t\tsp += %d;", call.popSize);
+	Emit("\t\t\tvoid **a_ = (void**)AOT_S(pw, 0);");
+	Emit("\t\t\tsp += %d;", P);
+	Emit("\t\t\tif( a_ ) *a_ = m_;");
+	Emit("\t\t\tif( AOT_SUSPENDING() )");
+	Emit("\t\t\t{");
+	Emit("\t\t\t\tregs->stackPointer = sp;");
+	Emit("\t\t\t\tif( JIT_AfterDirectAlloc(regs, m_, a_) )");
+	Emit("\t\t\t\t\treturn 1;");
+	Emit("\t\t\t}");
+	Emit("\t\t}");
+}
+
 bool CJITCppGen::EmitInstr(asUINT idx)
 {
 	const SJITInstr &instr = m_code.GetInstructions()[idx];
@@ -1481,13 +1563,13 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 			// arguments. Then they are pushed for the constructor, a script function
 			// called like by asBC_CALL
 			//
-			// Registered types without a constructor only need an allocation and the
-			// store through the destination address. Constructors still use JIT_Alloc;
-			// calling them directly would need their call shape in the AOT key like
-			// asBC_CALLSYS.
+			// Registered types are allocated here. Constructors whose native ABI is
+			// described by GetConstructorCall are called directly; the rest use JIT_Alloc.
 			asCScriptEngine *engine = static_cast<asCScriptEngine*>(m_code.GetFunction()->GetEngine());
 			int id = asBC_INTARG(instr.bc + P);
 			asCScriptFunction *callee = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+			SJITSystemCall constructor;
+			bool directConstructor = id != 0 && GetConstructorCall(engine, id, constructor);
 			Emit("{");
 			Emit("\tasCObjectType *o_ = (asCObjectType*)AOT_PW(%u);", pos + 1);
 			EmitSync("\t");
@@ -1527,6 +1609,8 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 				Emit("\t\t\t}");
 				Emit("\t\t}");
 			}
+			else if( directConstructor )
+				EmitConstructor(idx, constructor);
 			else
 			{
 				Emit("\t\tif( JIT_Alloc(regs, o_, AOT_INT(%u)) )", pos + 1 + P);

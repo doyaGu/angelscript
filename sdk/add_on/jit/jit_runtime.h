@@ -132,6 +132,11 @@ int    JIT_Thiscall1(asSVMRegisters *regs, int funcId) noexcept;
 // type returned by value, or null
 int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) noexcept;
 
+// The corresponding status check after a registered constructor called directly
+// by the AOT code. The allocation has already been stored at dst. On exception it
+// is freed and the destination is cleared, like JIT_Alloc does
+int    JIT_AfterDirectAlloc(asSVMRegisters *regs, void *mem, void **dst) noexcept;
+
 // Set in jitArg when the generated code is entered through JIT_GuardedEntry
 const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
 
