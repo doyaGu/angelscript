@@ -397,6 +397,66 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			m_uc.store_u32(Var(a0), alo);
 			m_uc.store_u32(Var(a0, 4), ahi);
 		}
+		else if( !Is64Bit() && (instr.op == asBC_BSLL64 || instr.op == asBC_BSRL64 || instr.op == asBC_BSRA64) )
+		{
+			Gp alo = m_uc.new_gp32();
+			Gp ahi = m_uc.new_gp32();
+			Gp countSrc = Load32(a2);
+			Gp count = m_uc.new_gp32();
+			Gp shift = m_uc.new_gp32();
+			Gp inverse = m_uc.new_gp32();
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			Gp loSmall = m_uc.new_gp32();
+			Gp hiSmall = m_uc.new_gp32();
+			Gp loLarge = m_uc.new_gp32();
+			Gp hiLarge = m_uc.new_gp32();
+			Gp cross = m_uc.new_gp32();
+			Gp crossRaw = m_uc.new_gp32();
+			Gp zero = m_uc.new_gp32();
+			m_uc.load_u32(alo, Var(a1));
+			m_uc.load_u32(ahi, Var(a1, 4));
+			m_uc.and_(count, countSrc, Imm(63));
+			m_uc.and_(shift, count, Imm(31));
+			m_uc.neg(inverse, shift);
+			m_uc.and_(inverse, inverse, Imm(31));
+			m_uc.mov(zero, Imm(0));
+
+			if( instr.op == asBC_BSLL64 )
+			{
+				m_uc.shl(loSmall, alo, shift);
+				m_uc.shl(hiSmall, ahi, shift);
+				m_uc.shr(crossRaw, alo, inverse);
+				m_uc.select(cross, zero, crossRaw, test_z(shift));
+				m_uc.or_(hiSmall, hiSmall, cross);
+				m_uc.mov(loLarge, zero);
+				m_uc.shl(hiLarge, alo, shift);
+			}
+			else
+			{
+				m_uc.shr(loSmall, alo, shift);
+				m_uc.shl(crossRaw, ahi, inverse);
+				m_uc.select(cross, zero, crossRaw, test_z(shift));
+				m_uc.or_(loSmall, loSmall, cross);
+				m_uc.shr(loLarge, ahi, shift);
+				if( instr.op == asBC_BSRL64 )
+				{
+					m_uc.shr(hiSmall, ahi, shift);
+					m_uc.mov(hiLarge, zero);
+				}
+				else
+				{
+					m_uc.sar(hiSmall, ahi, shift);
+					m_uc.sar(loLarge, ahi, shift);
+					m_uc.sar(hiLarge, ahi, Imm(31));
+				}
+			}
+
+			m_uc.select(lo, loLarge, loSmall, ucmp_ge(count, Imm(32)));
+			m_uc.select(hi, hiLarge, hiSmall, ucmp_ge(count, Imm(32)));
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
+		}
 		else if( instr.op == asBC_POWi64 || instr.op == asBC_POWu64 )
 		{
 			Gp dst = m_uc.new_gp_ptr();
