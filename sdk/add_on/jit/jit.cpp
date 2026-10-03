@@ -14,6 +14,7 @@
 
 #include <asmjit/ujit.h>
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <set>
@@ -23,14 +24,11 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Call imported functions natively, and the delegates of interface methods like
-//    those of the other script methods. They still go through JIT_CallScript
-//    (jit_codegen_call.cpp, EmitScriptCall).
 //  - Inline the methods that several classes implement for the type of the handle, which
 //    the bytecode doesn't tell for the methods overridden by derived classes
 //    (jit_bytecode.cpp, FindInlinees).
 //  - Note the classes that the calls see while the VM executes the deferred functions
-//    too, so that their first code inlines the methods (TieredEntry below).
+//    too, so that their first code inlines the methods (ResolveEntry below).
 //  - Inline calls in the code generated ahead of time, and borrow the references of the
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
@@ -103,6 +101,27 @@ struct CJITCompiler::SImpl
 	asUINT                 profileThreshold; // see SetProfileThreshold
 	std::set<asJITFunction> exactCode;   // the code that checks for line callbacks at every statement, see CompileExact
 
+	// The engine keeps the entry function immutable while scripts may execute it.
+	// The entry dispatches through this state, whose code pointer and tiering
+	// counters can be updated atomically by background compilation.
+	struct SEntry
+	{
+		SEntry(SImpl *owner, asCScriptFunction *function, JITFunction initialCode, const std::vector<asUINT> &initialCounts)
+			: impl(owner), func(function), code(initialCode), counts(initialCounts.size()), wrapper(0)
+		{
+			for( size_t n = 0; n < initialCounts.size(); n++ )
+				counts[n].store(initialCounts[n], std::memory_order_relaxed);
+		}
+
+		SImpl                             *impl;
+		asCScriptFunction                 *func;
+		std::atomic<JITFunction>           code;
+		std::vector<std::atomic<asUINT> > counts;
+		asJITFunction                      wrapper;
+	};
+	std::map<asJITFunction, SEntry*> entries; // by the immutable wrapper given to the engine
+	std::map<asCScriptFunction*, SEntry*> functionEntries;
+
 	// The profile of the code of a function, which is passed to Recompile when the code
 	// has counted down the calls
 	struct SProfile : SJITProfile
@@ -135,11 +154,15 @@ struct CJITCompiler::SImpl
 	};
 
 	bool IsLogged(asCScriptFunction *func) const;
-	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose = COMPILE_FIRST, const SProfile *source = 0, bool exact = false);
-	JITFunction TierUp(asCScriptFunction *func, bool exact);
+	int  Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose = COMPILE_FIRST, const SProfile *source = 0, bool exact = false, bool setEntryArgs = true);
+	JITFunction TierUp(SEntry *entry, bool exact);
 	JITFunction CompileExact(asCScriptFunction *func);
 	void Replace(asCScriptFunction *func, asJITFunction code);
 	void Release(asJITFunction code);
+	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output);
+	SEntry *FindEntry(asCScriptFunction *func);
+	static asPWORD ResolveEntry(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg);
+	static int ContinueInVM(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 	static int Recompile(SJITProfile *profile);
 	static int ExactEntry(void *impl, asSVMRegisters *regs, asPWORD jitArg);
 };
@@ -175,6 +198,8 @@ CJITCompiler::~CJITCompiler()
 	for( std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.begin(); it != m_impl->histories.end(); ++it )
 		for( size_t n = 0; n < it->second.profiles.size(); n++ )
 			delete it->second.profiles[n];
+	for( std::map<asJITFunction, SImpl::SEntry*>::iterator it = m_impl->entries.begin(); it != m_impl->entries.end(); ++it )
+		delete it->second;
 	delete m_impl;
 }
 
@@ -236,8 +261,7 @@ void CJITCompiler::SetMaxInlineSize(asUINT sizeInDWords)
 
 int CJITCompiler::SetCompileThresholds(asUINT calls, asUINT iterations)
 {
-	// The code compiled before calls the deferred functions natively, see
-	// SJITCodeGenOptions::tieredEntry
+	// The generated calls resolve the current code through immutable entries.
 	std::lock_guard<std::mutex> lock(m_impl->mutex);
 	if( m_impl->stats.functionsCompiled > 0 || m_impl->stats.functionsDeferred > 0 )
 		return asERROR;
@@ -434,6 +458,134 @@ bool CJITCompiler::SImpl::IsLogged(asCScriptFunction *func) const
 	       (logFilter.empty() || strstr(func->GetDeclaration(true, true), logFilter.c_str()) != 0);
 }
 
+CJITCompiler::SImpl::SEntry *CJITCompiler::SImpl::FindEntry(asCScriptFunction *func)
+{
+	std::map<asCScriptFunction*, SEntry*>::iterator it = functionEntries.find(func);
+	return it != functionEntries.end() ? it->second : 0;
+}
+
+asJITFunction JIT_GetNativeTarget(asCScriptFunction *func)
+{
+	if( func == 0 || func->engine == 0 || func->engine->jitCompiler == 0 )
+		return 0;
+	CJITCompiler *compiler = static_cast<CJITCompiler*>(static_cast<asIJITCompiler*>(func->engine->jitCompiler));
+	std::lock_guard<std::mutex> lock(compiler->m_impl->mutex);
+	CJITCompiler::SImpl::SEntry *entry = compiler->m_impl->FindEntry(func);
+	return entry ? reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire)) : 0;
+}
+
+int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output)
+{
+	using namespace asmjit;
+	using namespace asmjit::ujit;
+
+	SEntry *entry = new SEntry(this, func, reinterpret_cast<JITFunction>(code), counts);
+	CodeHolder holder;
+	holder.init(runtime.environment(), runtime.cpu_features());
+	CJITErrorHandler errorHandler;
+	holder.set_error_handler(&errorHandler);
+	BackendCompiler cc;
+	holder.attach(&cc);
+	UniCompiler uc(&cc, runtime.cpu_features(), CpuHints::kNone);
+	uc.init_vec_width(VecWidth::k128);
+
+	FuncSignature signature = FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT, asDWORD*>();
+	FuncNode *wrapperFunc = uc.add_func(signature);
+#ifdef JIT_NATIVE_RETURN
+	JIT_AddVRReturn(wrapperFunc->detail());
+#endif
+	Gp regs = uc.new_gp_ptr("regs");
+	Gp jitArg = uc.new_gp_ptr("jitArg");
+	Gp callLimit = uc.new_gp32("callLimit");
+	Gp stackPointer = uc.new_gp_ptr("stackPointer");
+	wrapperFunc->set_arg(0, regs);
+	wrapperFunc->set_arg(1, jitArg);
+	wrapperFunc->set_arg(2, callLimit);
+	wrapperFunc->set_arg(3, stackPointer);
+
+	Gp target = uc.new_gp_ptr("target");
+	InvokeNode *resolve = JIT_Invoke(uc, (const void*)ResolveEntry, FuncSignature::build<asPWORD, SEntry*, asSVMRegisters*, asPWORD>());
+	resolve->set_arg(0, Imm(int64_t(asPWORD(entry))));
+	resolve->set_arg(1, regs);
+	resolve->set_arg(2, jitArg);
+	resolve->set_ret(0, target);
+
+	Label fallback = uc.new_label();
+	uc.j(fallback, test_z(target));
+	InvokeNode *call = 0;
+	uc.cc->invoke(Out(call), target, signature);
+	call->set_arg(0, regs);
+	call->set_arg(1, jitArg);
+	call->set_arg(2, callLimit);
+	call->set_arg(3, stackPointer);
+	Gp result = uc.new_gp32("result");
+	call->set_ret(0, result);
+#ifdef JIT_NATIVE_RETURN
+	JIT_AddVRReturn(call->detail());
+	Gp value = uc.new_gp64("value");
+	call->set_ret(1, value);
+	uc.ret(result, value);
+#else
+	uc.ret(result);
+#endif
+
+	uc.bind(fallback);
+	InvokeNode *leave = JIT_Invoke(uc, (const void*)ContinueInVM, FuncSignature::build<int, SEntry*, asSVMRegisters*, asPWORD, asUINT, asDWORD*>());
+	leave->set_arg(0, Imm(int64_t(asPWORD(entry))));
+	leave->set_arg(1, regs);
+	leave->set_arg(2, jitArg);
+	leave->set_arg(3, callLimit);
+	leave->set_arg(4, stackPointer);
+	leave->set_ret(0, result);
+	uc.ret(result);
+	uc.end_func();
+
+	bool ok = cc.finalize() == Error::kOk && errorHandler.error == Error::kOk;
+	CJITUnwindInfo unwind;
+	bool hasUnwind = false;
+#ifndef AS_NO_EXCEPTIONS
+	if( ok && CJITUnwindInfo::IsSupported() )
+	{
+		hasUnwind = unwind.Prepare(cc, wrapperFunc);
+		ok = hasUnwind;
+	}
+#endif
+
+	asJITFunction wrapper = 0;
+	void *unwindHandle = 0;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if( ok )
+			ok = runtime.add(&wrapper, &holder) == Error::kOk;
+		if( ok && hasUnwind )
+			ok = unwind.Register((void*)wrapper, &unwindHandle);
+		if( !ok && wrapper )
+			runtime.release(wrapper);
+		if( ok )
+		{
+			entry->wrapper = wrapper;
+			entries[wrapper] = entry;
+			functionEntries[func] = entry;
+			codeSizes[wrapper] = holder.code_size();
+			stats.codeSize += codeSizes[wrapper];
+			if( unwindHandle )
+				unwindInfo[wrapper] = unwindHandle;
+		}
+	}
+	if( !ok )
+	{
+		if( unwindHandle )
+			CJITUnwindInfo::Unregister(unwindHandle);
+		delete entry;
+		std::lock_guard<std::mutex> lock(mutex);
+		stats.functionsFailed++;
+		return asERROR;
+	}
+
+	*output = wrapper;
+	return asSUCCESS;
+}
+
 // Sets the index of the entry point in the JitEntry instructions, which the VM passes to the function
 static void SetEntryArgs(asCScriptFunction *func, const CJITByteCode &code)
 {
@@ -444,18 +596,16 @@ static void SetEntryArgs(asCScriptFunction *func, const CJITByteCode &code)
 		asBC_PTRARG(byteCode + instrs[entries[n]].pos) = asPWORD(n + 1);
 }
 
-// Sets the arguments of the JitEntry instructions for TieredEntry, which counts the
-// calls at the first one, and the iterations of each loop at the first one in the
-// loop, see JIT_ENTRY_COUNT_SHIFT. The others are 0, so the VM doesn't call it there.
-// Returns false if the entry points don't allow it
-static bool SetTieredEntryArgs(asCScriptFunction *func, const CJITByteCode &code, asUINT calls, asUINT iterations)
+// Gets the deferred-compilation counts: calls at the first entry, and iterations
+// at the first entry in each loop. Returns false if the entry points don't allow it.
+static bool GetDeferredEntryCounts(const CJITByteCode &code, asUINT calls, asUINT iterations, std::vector<asUINT> &counts)
 {
 	const std::vector<asUINT> &entries = code.GetEntries();
 	const std::vector<SJITInstr> &instrs = code.GetInstructions();
 	if( entries.empty() || entries[0] != 0 || entries.size() > JIT_ENTRY_INDEX_MASK )
 		return false;
 
-	std::vector<asUINT> counts(entries.size(), 0);
+	counts.assign(entries.size(), 0);
 	counts[0] = calls;
 	for( asUINT n = 0; iterations > 0 && n < instrs.size(); n++ )
 	{
@@ -477,9 +627,6 @@ static bool SetTieredEntryArgs(asCScriptFunction *func, const CJITByteCode &code
 			count = iterations;
 	}
 
-	asDWORD *byteCode = func->scriptData->byteCode.AddressOf();
-	for( asUINT n = 0; n < entries.size(); n++ )
-		asBC_PTRARG(byteCode + instrs[entries[n]].pos) = counts[n] ? asPWORD(n + 1) | (asPWORD(counts[n]) << JIT_ENTRY_COUNT_SHIFT) : 0;
 	return true;
 }
 
@@ -495,13 +642,18 @@ int CJITCompiler::CompileDeferred(asIScriptModule *module)
 	for( asUINT n = 0; n < mod->m_scriptFunctions.GetLength(); n++ )
 		funcs.push_back(mod->m_scriptFunctions[n]);
 
-	asJITFunction stub = reinterpret_cast<asJITFunction>(TieredEntry);
 	int compiled = 0;
 	for( size_t n = 0; n < funcs.size(); n++ )
 	{
 		asCScriptFunction *func = funcs[n];
-		if( func && func->funcType == asFUNC_SCRIPT && func->scriptData && func->scriptData->jitFunction == stub )
-			if( m_impl->TierUp(func, false) )
+		SImpl::SEntry *entry = 0;
+		if( func && func->funcType == asFUNC_SCRIPT && func->scriptData )
+		{
+			std::lock_guard<std::mutex> lock(m_impl->mutex);
+			entry = m_impl->FindEntry(func);
+		}
+		if( entry && !entry->counts.empty() && entry->code.load(std::memory_order_acquire) == 0 )
+			if( m_impl->TierUp(entry, false) )
 				compiled++;
 	}
 	return compiled;
@@ -564,10 +716,22 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 			if( log )
 				fprintf(m_impl->logFile, "\n; ---- %s ----\n; generated ahead of time as %s\n", func->GetDeclaration(true, true), JIT_GetAOTName(key).c_str());
 			SetEntryArgs(func, code);
-			std::lock_guard<std::mutex> lock(m_impl->mutex);
-			m_impl->stats.functionsAOT++;
-			*output = reinterpret_cast<asJITFunction>(it->second);
-			return asSUCCESS;
+			// AOT is also supported on platforms for which AsmJit cannot emit the
+			// immutable dispatch wrapper. No runtime replacement is possible there.
+			if( !IsSupported() )
+			{
+				std::lock_guard<std::mutex> lock(m_impl->mutex);
+				m_impl->stats.functionsAOT++;
+				*output = reinterpret_cast<asJITFunction>(it->second);
+				return asSUCCESS;
+			}
+			int wrapped = m_impl->CreateEntry(func, reinterpret_cast<asJITFunction>(it->second), std::vector<asUINT>(), output);
+			if( wrapped >= 0 )
+			{
+				std::lock_guard<std::mutex> lock(m_impl->mutex);
+				m_impl->stats.functionsAOT++;
+			}
+			return wrapped;
 		}
 		if( (m_impl->flags & JIT_AOT_ONLY) || !IsSupported() )
 		{
@@ -577,18 +741,41 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 		}
 	}
 
-	// The function is compiled when it is executed often enough, see TieredEntry
-	if( m_impl->callThreshold > 0 && SetTieredEntryArgs(func, code, m_impl->callThreshold, m_impl->loopThreshold) )
+	// The function is compiled when it is executed often enough, see ResolveEntry.
+	std::vector<asUINT> tieredCounts;
+	if( m_impl->callThreshold > 0 && GetDeferredEntryCounts(code, m_impl->callThreshold, m_impl->loopThreshold, tieredCounts) )
 	{
+		SetEntryArgs(func, code);
 		if( log )
 			fprintf(m_impl->logFile, "\n; ---- %s ----\n; compilation deferred\n", func->GetDeclaration(true, true));
-		std::lock_guard<std::mutex> lock(m_impl->mutex);
-		m_impl->stats.functionsDeferred++;
-		*output = reinterpret_cast<asJITFunction>(TieredEntry);
-		return asSUCCESS;
+		int wrapped = m_impl->CreateEntry(func, 0, tieredCounts, output);
+		if( wrapped >= 0 )
+		{
+			std::lock_guard<std::mutex> lock(m_impl->mutex);
+			m_impl->stats.functionsDeferred++;
+		}
+		return wrapped;
 	}
 
-	return m_impl->Compile(func, code, log, output);
+	asJITFunction compiled = 0;
+	int compiledResult = m_impl->Compile(func, code, log, &compiled);
+	if( compiledResult < 0 )
+		return compiledResult;
+	int wrapped = m_impl->CreateEntry(func, compiled, std::vector<asUINT>(), output);
+	if( wrapped < 0 )
+	{
+		std::lock_guard<std::mutex> lock(m_impl->mutex);
+		std::map<asJITFunction, SImpl::SHistory>::iterator history = m_impl->histories.find(compiled);
+		if( history != m_impl->histories.end() )
+		{
+			for( size_t n = 0; n < history->second.profiles.size(); n++ )
+				delete history->second.profiles[n];
+			m_impl->histories.erase(history);
+		}
+		m_impl->Release(compiled);
+		m_impl->stats.functionsCompiled--;
+	}
+	return wrapped;
 }
 
 // Analyses the decoded bytecode of the function and generates its code. The entry
@@ -596,7 +783,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 // the classes in the profile of the source, see Recompile. With exact the code checks
 // for suspension and line callbacks at every statement, and so does the code compiled
 // again with its profile
-int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose, const SProfile *source, bool exact)
+int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bool log, asJITFunction *output, ECompile purpose, const SProfile *source, bool exact, bool setEntryArgs)
 {
 	using namespace asmjit;
 	using namespace asmjit::ujit;
@@ -677,7 +864,6 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	options.syncEveryInstr = (flags & JIT_SYNC_EVERY_INSTR) != 0;
 	options.maxNativeCallDepth = maxNativeCallDepth;
 	options.interop = !aotFunctions.empty();
-	options.tieredEntry = callThreshold > 0 ? (const void*)TieredEntry : 0;
 	options.profile   = profile;
 	options.recompile = (const void*)Recompile;
 	options.exactEntry = (const void*)ExactEntry;
@@ -777,7 +963,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 			fprintf(logFile, "; %u calls note their classes\n", gen.GetProfiledCallCount());
 	}
 
-	SetEntryArgs(func, code);
+	if( setEntryArgs )
+		SetEntryArgs(func, code);
 	*output = jitFunc;
 	return asSUCCESS;
 }
@@ -785,35 +972,31 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 // Compiles a deferred function, unless another thread does. Returns the code of the
 // function, or null if it isn't compiled. With exact the code checks at every
 // statement, see CompileExact
-JITFunction CJITCompiler::SImpl::TierUp(asCScriptFunction *func, bool exact)
+JITFunction CJITCompiler::SImpl::TierUp(SEntry *entry, bool exact)
 {
-	asJITFunction stub = reinterpret_cast<asJITFunction>(TieredEntry);
+	asCScriptFunction *func = entry->func;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		if( func->scriptData->jitFunction != stub )
-			return reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
+		JITFunction current = entry->code.load(std::memory_order_acquire);
+		if( current )
+			return current;
 		if( !compiling.insert(func).second )
 			return 0;
 	}
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_FIRST, 0, exact) >= 0;
+	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_FIRST, 0, exact, false) >= 0;
 
 	std::lock_guard<std::mutex> lock(mutex);
 	compiling.erase(func);
 	if( !ok )
 	{
-		// The VM doesn't call the stub anymore, which stays the code of the function
-		// as the VM reads it again after reading the argument
-		const std::vector<asUINT> &entries = code.GetEntries();
-		const std::vector<SJITInstr> &instrs = code.GetInstructions();
-		for( asUINT n = 0; n < entries.size(); n++ )
-			asBC_PTRARG(func->scriptData->byteCode.AddressOf() + instrs[entries[n]].pos) = 0;
+		for( size_t n = 0; n < entry->counts.size(); n++ )
+			entry->counts[n].store(0, std::memory_order_relaxed);
 		return 0;
 	}
-	// Compile has set the entry points
-	func->scriptData->jitFunction = jitFunc;
+	entry->code.store(reinterpret_cast<JITFunction>(jitFunc), std::memory_order_release);
 	return reinterpret_cast<JITFunction>(jitFunc);
 }
 
@@ -830,7 +1013,8 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 	asCScriptFunction *func = profile->func;
 	{
 		std::lock_guard<std::mutex> lock(impl->mutex);
-		bool current = func->scriptData->jitFunction == profile->code;
+		SEntry *entry = impl->FindEntry(func);
+		bool current = entry && entry->code.load(std::memory_order_acquire) == reinterpret_cast<JITFunction>(profile->code);
 		if( profile->recompiled || !current )
 		{
 			// The calls of the code don't come here again for a long time
@@ -850,7 +1034,7 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	bool ok = code.Decode(func) >= 0 && impl->Compile(func, code, impl->IsLogged(func), &jitFunc, COMPILE_AGAIN, profile) >= 0;
+	bool ok = code.Decode(func) >= 0 && impl->Compile(func, code, impl->IsLogged(func), &jitFunc, COMPILE_AGAIN, profile, false, false) >= 0;
 
 	std::lock_guard<std::mutex> lock(impl->mutex);
 	impl->compiling.erase(func);
@@ -869,7 +1053,10 @@ JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
 	const SProfile *source = 0;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		asJITFunction current = func->scriptData->jitFunction;
+		SEntry *entry = FindEntry(func);
+		asJITFunction current = entry ? reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire)) : 0;
+		if( !entry )
+			return 0;
 		if( exactCode.count(current) )
 			return reinterpret_cast<JITFunction>(current);
 		if( !compiling.insert(func).second )
@@ -883,7 +1070,7 @@ JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
 
 	CJITByteCode code;
 	asJITFunction jitFunc = 0;
-	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_EXACT, source) >= 0;
+	bool ok = code.Decode(func) >= 0 && Compile(func, code, IsLogged(func), &jitFunc, COMPILE_EXACT, source, false, false) >= 0;
 
 	std::lock_guard<std::mutex> lock(mutex);
 	compiling.erase(func);
@@ -899,7 +1086,10 @@ JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
 // thread that is compiling the function, see compiling
 void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
 {
-	asJITFunction current = func->scriptData->jitFunction;
+	SEntry *entry = FindEntry(func);
+	if( !entry )
+		return;
+	asJITFunction current = reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire));
 	std::map<asJITFunction, SHistory>::iterator old = histories.find(current);
 	SHistory &history = histories[code];
 	history.retired.push_back(current);
@@ -909,7 +1099,7 @@ void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
 		history.profiles.insert(history.profiles.end(), old->second.profiles.begin(), old->second.profiles.end());
 		histories.erase(old);
 	}
-	func->scriptData->jitFunction = code;
+	entry->code.store(reinterpret_cast<JITFunction>(code), std::memory_order_release);
 }
 
 // Called by the code that checks for suspension and line callbacks only where they may
@@ -930,56 +1120,50 @@ int CJITCompiler::SImpl::ExactEntry(void *impl, asSVMRegisters *regs, asPWORD ji
 	return 0;
 }
 
-// The code of the deferred functions, which counts down the argument of the JitEntry
-// instruction, see JIT_ENTRY_COUNT_SHIFT, and compiles the function when it runs out.
-// The VM enters it at the instruction at the program pointer, and native callers at
-// the first one, which have set the current function. The function continues in its
-// compiled code then, and otherwise in the VM
+// Resolves an immutable function wrapper to its current code. Deferred functions
+// count calls and loop iterations here, then publish their code through the entry.
 //
 // TODO: runtime optimize: The classes of the objects that the virtual and interface
 //                         calls see until the function is compiled could be noted too,
 //                         so that the first code inlines their methods, see SJITProfile.
-int CJITCompiler::TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer)
+asPWORD CJITCompiler::SImpl::ResolveEntry(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg)
 {
-	asCContext *ctx = static_cast<asCContext*>(regs->ctx);
-	asCScriptFunction *func = ctx->m_currentFunction;
-	asDWORD *byteCode = func->scriptData->byteCode.AddressOf();
-	JITFunction code = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
-	if( code == TieredEntry )
+	JITFunction code = entry->code.load(std::memory_order_acquire);
+	if( code == 0 && !entry->counts.empty() )
 	{
-		// The index of the entry point stays for the compiled code, and a count of 0
-		// means that the function is being compiled, or couldn't be
-		asPWORD &arg = asBC_PTRARG(jitArg ? regs->programPointer : byteCode);
-		asPWORD value = arg;
-		asPWORD count = value >> JIT_ENTRY_COUNT_SHIFT;
-		code = 0;
-		if( count > 1 )
-			arg = value - (asPWORD(1) << JIT_ENTRY_COUNT_SHIFT);
-		else if( count == 1 )
+		asUINT index = asUINT(jitArg & JIT_ENTRY_INDEX_MASK);
+		asUINT entryIndex = index ? index - 1 : 0;
+		if( entryIndex < entry->counts.size() )
 		{
-			// The function executed with a line callback is compiled for it, see ExactEntry
-			arg = value & JIT_ENTRY_INDEX_MASK;
-			CJITCompiler *compiler = static_cast<CJITCompiler*>(static_cast<asIJITCompiler*>(ctx->m_engine->jitCompiler));
-			code = compiler->m_impl->TierUp(func, ctx->m_lineCallback);
+			std::atomic<asUINT> &counter = entry->counts[entryIndex];
+			asUINT count = counter.load(std::memory_order_relaxed);
+			while( count && !counter.compare_exchange_weak(count, count - 1, std::memory_order_acq_rel, std::memory_order_relaxed) ) {}
+			if( count == 1 )
+				code = entry->impl->TierUp(entry, static_cast<asCContext*>(regs->ctx)->m_lineCallback);
 		}
+		if( code == 0 )
+			code = entry->code.load(std::memory_order_acquire);
 	}
+	return asPWORD(code);
+}
 
+// Continues in the VM when a deferred function has no code yet. The VM enters at
+// the JitEntry at programPointer; native callers enter at the first instruction.
+int CJITCompiler::SImpl::ContinueInVM(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg, asUINT, asDWORD *stackPointer)
+{
+	asDWORD *byteCode = entry->func->scriptData->byteCode.AddressOf();
 	if( jitArg )
 	{
-		if( code )
-			return code(regs, jitArg & JIT_ENTRY_INDEX_MASK, 0, 0);
 		regs->programPointer += 1 + AS_PTR_SIZE;
 		return 0;
 	}
 
-	if( code )
-		return code(regs, 0, callLimit, stackPointer);
-
 	// Set up the frame for the VM like asCContext::CallScriptFunction, which goes on
-	// after the JitEntry instruction counted here unless it must stop
+	// after the first JitEntry unless it must stop.
 #if AS_PTR_SIZE == 2
 	regs->stackPointer = stackPointer;
 #endif
+	static_cast<asCContext*>(regs->ctx)->m_currentFunction = entry->func;
 	regs->programPointer = byteCode;
 	if( JIT_PrepareFrame(regs) == 0 )
 		regs->programPointer += 1 + AS_PTR_SIZE;
@@ -988,25 +1172,40 @@ int CJITCompiler::TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callL
 
 void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 {
-	if( func == 0 || func == reinterpret_cast<asJITFunction>(TieredEntry) )
+	if( func == 0 )
 		return;
 
 	std::lock_guard<std::mutex> lock(m_impl->mutex);
-	// The functions generated ahead of time are part of the application
+	// AOT functions are returned directly on platforms where wrappers cannot be
+	// generated, and are part of the application rather than the JIT runtime.
 	if( m_impl->aotPointers.count(func) )
 		return;
+	std::map<asJITFunction, SImpl::SEntry*>::iterator found = m_impl->entries.find(func);
+	if( found == m_impl->entries.end() )
+		return;
+	SImpl::SEntry *entry = found->second;
+	asJITFunction code = reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire));
+	bool releasable = code && !m_impl->aotPointers.count(code);
+
 	// The code that the function had before goes with it, see Recompile
-	std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.find(func);
+	std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.find(code);
 	if( it != m_impl->histories.end() )
 	{
 		for( size_t n = 0; n < it->second.retired.size(); n++ )
-			m_impl->Release(it->second.retired[n]);
+			if( !m_impl->aotPointers.count(it->second.retired[n]) )
+				m_impl->Release(it->second.retired[n]);
 		for( size_t n = 0; n < it->second.profiles.size(); n++ )
 			delete it->second.profiles[n];
 		m_impl->histories.erase(it);
 	}
+	if( releasable )
+		m_impl->Release(code);
 	m_impl->Release(func);
-	m_impl->stats.functionsReleased++;
+	m_impl->functionEntries.erase(entry->func);
+	m_impl->entries.erase(found);
+	delete entry;
+	if( releasable )
+		m_impl->stats.functionsReleased++;
 }
 
 // Frees the code and its unwind information. Must be called with the lock held

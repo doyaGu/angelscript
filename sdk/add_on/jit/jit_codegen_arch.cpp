@@ -104,6 +104,13 @@ InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 	return node;
 }
 
+InvokeNode *JIT_Invoke(UniCompiler &uc, const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
+	return node;
+}
+
 // The sign bit of a 64bit register isn't an immediate that OR can take
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
@@ -112,6 +119,11 @@ void CJITCodeGen::SetSignBit(const Gp &r)
 
 // The second return register, which a 64bit value in two registers would use
 void CJITCodeGen::AddVRReturn(FuncDetail &detail)
+{
+	JIT_AddVRReturn(detail);
+}
+
+void JIT_AddVRReturn(FuncDetail &detail)
 {
 	detail.ret(1).init_reg(RegType::kGp64, x86::Gp::kIdDx, TypeId::kUInt64);
 }
@@ -365,12 +377,24 @@ InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 	return node;
 }
 
+InvokeNode *JIT_Invoke(UniCompiler &uc, const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	uc.cc->invoke(Out(node), PtrConst(asPWORD(fn)), sig);
+	return node;
+}
+
 void CJITCodeGen::SetSignBit(const Gp &r)
 {
 	m_uc.cc->orr(r, r, Imm(uint64_t(1) << (r.size() * 8 - 1)));
 }
 
 void CJITCodeGen::AddVRReturn(FuncDetail &detail)
+{
+	JIT_AddVRReturn(detail);
+}
+
+void JIT_AddVRReturn(FuncDetail &detail)
 {
 	detail.ret(1).init_reg(RegType::kGp64, 1, TypeId::kUInt64);
 }
@@ -614,6 +638,13 @@ InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 	return node;
 }
 
+InvokeNode *JIT_Invoke(UniCompiler &uc, const void *fn, const FuncSignature &sig)
+{
+	InvokeNode *node = 0;
+	uc.cc->invoke(Out(node), Imm(int64_t(asPWORD(fn))), sig);
+	return node;
+}
+
 void CJITCodeGen::SetSignBit(const Gp &)
 {
 	m_failed = true;
@@ -622,6 +653,10 @@ void CJITCodeGen::SetSignBit(const Gp &)
 void CJITCodeGen::AddVRReturn(FuncDetail &)
 {
 	m_failed = true;
+}
+
+void JIT_AddVRReturn(FuncDetail &)
+{
 }
 
 void CJITCodeGen::AddReturn(FuncDetail &, int, TypeId)

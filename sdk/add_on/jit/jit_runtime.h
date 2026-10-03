@@ -51,10 +51,13 @@ class asCScriptFunction;
 // and doesn't shrink, or less to allow no more than the maximum number of nested
 // native calls. The return value is 0 if the function returned to its caller, and
 // non-zero if the VM must take over, in which case the VM registers describe where
-// to continue. While the compilation of a function is deferred its code is
-// CJITCompiler::TieredEntry, which needs the current function also when it is called
-// natively, see SJITCodeGenOptions::tieredEntry.
+// to continue. The engine calls an immutable wrapper that dispatches to the current
+// code and counts entries while compilation is deferred.
 typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
+
+// Returns the code behind the immutable wrapper of a compiled script function,
+// or null while its compilation is still deferred.
+asJITFunction JIT_GetNativeTarget(asCScriptFunction *func);
 
 // Maximum depth of nested native calls when the VM enters one of the functions
 // generated ahead of time, see CJITCompiler::SetNativeCallDepth. It is shared by all
@@ -132,14 +135,8 @@ int    JIT_AfterDirectCall(asSVMRegisters *regs, int funcId, void *retPointer) n
 // Set in jitArg when the generated code is entered through JIT_GuardedEntry
 const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
 
-// The arguments of the JitEntry instructions have the index of the entry point in
-// the lower bits. While the compilation of a function is deferred, the instructions
-// where CJITCompiler::TieredEntry counts the calls or the iterations of a loop have
-// the count in the upper bits, below JIT_GUARDED_ENTRY, and the others 0. The VM may
-// have read the argument with the count just before the function is compiled, which
-// the generated code masks off then
+// The arguments of the JitEntry instructions have the index of the entry point.
 const asPWORD JIT_ENTRY_INDEX_MASK  = 0xFFFF;
-const int     JIT_ENTRY_COUNT_SHIFT = 16;
 const asUINT  JIT_ENTRY_MAX_COUNT   = 0x3FFF;
 
 // Catches the C++ exceptions thrown by registered functions that the generated
@@ -167,6 +164,10 @@ int    JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra,
 // The implementation of the interface method in the class, or null if the class
 // doesn't implement the interface
 asCScriptFunction *JIT_FindInterfaceMethod(asCObjectType *objType, asCScriptFunction *func) noexcept;
+
+// The script function currently bound to an imported function, or null if it is
+// unbound, bound to a registered function, or has no compiled entry
+asCScriptFunction *JIT_GetBoundScriptFunction(asIScriptEngine *engine, int funcId) noexcept;
 
 // Sets up the frame of a function entered natively with jitArg 0, when the stack
 // block is too small or regs->doProcessSuspend is set. The stack pointer in the VM

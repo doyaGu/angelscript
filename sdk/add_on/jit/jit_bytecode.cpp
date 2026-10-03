@@ -2108,10 +2108,21 @@ void CJITByteCode::AddSlotUse(int offset, asUINT kind)
 
 void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
 {
-	const asDWORD *bc = instr.bc;
-	int a0 = asBC_SWORDARG0(bc);
-	int a1 = asBC_SWORDARG1(bc);
-	int a2 = asBC_SWORDARG2(bc);
+	// Decode an operand only when the opcode below actually uses it, so
+	// one-dword instructions aren't read past their end.
+	struct SLazyWordArg
+	{
+		const SJITInstr &instr;
+		int offset;
+		operator int() const
+		{
+			asASSERT(offset == 1 || instr.size > 1);
+			return *(reinterpret_cast<const short*>(instr.bc) + offset);
+		}
+	};
+	SLazyWordArg a0 = { instr, 1 };
+	SLazyWordArg a1 = { instr, 2 };
+	SLazyWordArg a2 = { instr, 3 };
 
 	switch( instr.op )
 	{

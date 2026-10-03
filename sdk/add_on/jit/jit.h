@@ -10,6 +10,8 @@
 
 BEGIN_AS_NAMESPACE
 
+class asCScriptFunction;
+
 // Statistics gathered by the JIT compiler
 struct SJITStatistics
 {
@@ -236,10 +238,9 @@ public:
 	static void  FreeMemory(void *mem);
 
 protected:
+	friend asJITFunction JIT_GetNativeTarget(asCScriptFunction *func);
 	struct SImpl;
 	SImpl *m_impl;
-
-	static int TieredEntry(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimit, asDWORD *stackPointer);
 };
 
 // A script function bound to a context for the application to call it many times,

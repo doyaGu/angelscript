@@ -239,7 +239,11 @@ asUINT JIT_nativeCallDepth = 256;
 int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 {
 	asCContext *ctx = GetContext(regs);
-	JITFunction func = reinterpret_cast<JITFunction>(ctx->m_currentFunction->scriptData->jitFunction);
+	// Call the generated code directly so an exception unwinds from it to this
+	// catch point without passing through the immutable dispatch wrapper.
+	JITFunction func = reinterpret_cast<JITFunction>(JIT_GetNativeTarget(ctx->m_currentFunction));
+	if( func == 0 )
+		func = reinterpret_cast<JITFunction>(ctx->m_currentFunction->scriptData->jitFunction);
 #ifdef AS_NO_EXCEPTIONS
 	return func(regs, jitArg | JIT_GUARDED_ENTRY, 0, 0);
 #else
@@ -270,7 +274,9 @@ bool JIT_CatchException(asSVMRegisters *regs)
 // Returns 0 if the function has returned already
 static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *func, asUINT callLimit)
 {
-	JITFunction jitFunc = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
+	JITFunction jitFunc = reinterpret_cast<JITFunction>(JIT_GetNativeTarget(func));
+	if( jitFunc == 0 )
+		jitFunc = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
 	if( jitFunc == 0 || ctx->m_callStack.GetLength() >= callLimit )
 	{
 		ctx->CallScriptFunction(func);
@@ -315,6 +321,19 @@ asCScriptFunction *JIT_FindInterfaceMethod(asCObjectType *objType, asCScriptFunc
 		if( objType->interfaces[n] == func->objectType )
 			return objType->virtualFunctionTable[func->vfTableIdx + objType->interfaceVFTOffsets[n]];
 	return 0;
+}
+
+asCScriptFunction *JIT_GetBoundScriptFunction(asIScriptEngine *scriptEngine, int funcId) noexcept
+{
+	asCScriptEngine *engine = static_cast<asCScriptEngine*>(scriptEngine);
+	asUINT index = asUINT(funcId & ~FUNC_IMPORTED);
+	if( index >= engine->importedFunctions.GetLength() || engine->importedFunctions[index] == 0 )
+		return 0;
+	int boundId = engine->importedFunctions[index]->boundFunctionId;
+	if( boundId <= 0 || asUINT(boundId) >= engine->scriptFunctions.GetLength() )
+		return 0;
+	asCScriptFunction *func = engine->scriptFunctions[boundId];
+	return func && func->funcType == asFUNC_SCRIPT && func->scriptData && func->scriptData->jitFunction ? func : 0;
 }
 
 int JIT_CallScript(asSVMRegisters *regs, int kind, int funcId, asPWORD extra, asUINT callLimit)

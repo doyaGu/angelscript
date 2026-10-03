@@ -25,12 +25,15 @@ struct SJITCodeGenOptions
 	bool guardedEntry;      // enter through JIT_GuardedEntry when called by the VM
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 	bool interop;           // set the current function for the native calls and don't mark their call states, for the functions generated ahead of time, see JITFunction
-	const void *tieredEntry; // the code of the functions whose compilation is deferred, whose calls are left to the helpers unless interop is set, or null
 	SJITProfile *profile;    // where the calls marked with JIT_INSTR_PROFILE note their classes, or null
 	const void *recompile;   // int (*)(SJITProfile*), called when the profile has counted down the calls, returns non-zero if the function has new code, which the VM goes on in after the call
 	const void *exactEntry;  // int (*)(void *exactParam, asSVMRegisters*, asPWORD jitArg), called in place of the code when the VM enters it while a line callback is set or a suspension is requested, if elideSuspend is set, see CJITCodeGen::Generate
 	void       *exactParam;
 };
+
+// Architecture-specific pieces used by the generated function wrappers too.
+asmjit::InvokeNode *JIT_Invoke(asmjit::ujit::UniCompiler &uc, const void *fn, const asmjit::FuncSignature &sig);
+void JIT_AddVRReturn(asmjit::FuncDetail &detail);
 
 // Translates the analysed bytecode of one function to machine code through
 // AsmJit's arch neutral UniCompiler. The generated function has the signature

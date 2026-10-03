@@ -99,12 +99,20 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 	asCScriptFunction *callee = 0;
 	if( funcId >= 0 && asUINT(funcId) < func->engine->scriptFunctions.GetLength() )
 		callee = func->engine->scriptFunctions[funcId];
+	else if( kind == JIT_CALL_BOUND )
+	{
+		asUINT imported = asUINT(funcId & ~FUNC_IMPORTED);
+		if( imported < func->engine->importedFunctions.GetLength() && func->engine->importedFunctions[imported] )
+			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
+	}
 
 	bool native = false;
 	if( kind == JIT_CALL_SCRIPT || kind == JIT_CALL_ALLOC )
 		native = callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData;
 	else if( kind == JIT_CALL_INTERFACE )
 		native = callee && (callee->funcType == asFUNC_VIRTUAL || callee->funcType == asFUNC_INTERFACE);
+	else if( kind == JIT_CALL_BOUND )
+		native = callee != 0;
 	else if( kind == JIT_CALL_PTR )
 		native = true;
 
@@ -169,6 +177,18 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			m_uc.load(target, Addr(method, layout.scriptData));
 			m_uc.load(target, Addr(target, layout.jitFunction));
 		}
+		else if( kind == JIT_CALL_BOUND )
+		{
+			method = m_uc.new_gp_ptr();
+			InvokeNode *resolve = Invoke((const void*)JIT_GetBoundScriptFunction, FuncSignature::build<asCScriptFunction*, asIScriptEngine*, int>());
+			resolve->set_arg(0, Imm(int64_t(asPWORD(func->engine))));
+			resolve->set_arg(1, Imm(funcId));
+			resolve->set_ret(0, method);
+			m_uc.j(slow, test_z(method));
+			target = m_uc.new_gp_ptr();
+			m_uc.load(target, Addr(method, layout.scriptData));
+			m_uc.load(target, Addr(target, layout.jitFunction));
+		}
 		else if( kind == JIT_CALL_PTR )
 		{
 			// The function pointer is loaded from its variable wherever it is needed,
@@ -194,10 +214,10 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( target.is_valid() )
 		{
 			m_uc.j(slow, test_z(target));
-			// The code of the functions whose compilation is deferred finds them as the
-			// current function, which the helper sets
-			if( m_options.tieredEntry && !m_options.interop )
-				m_uc.j(slow, cmp_eq(target, PtrConst(asPWORD(m_options.tieredEntry))));
+			// jitFunction is an immutable wrapper that dispatches to the current code,
+			// and continues in the VM while compilation is still deferred. Call it
+			// directly instead of resolving its target through the compiler's locked
+			// function map on every script call.
 		}
 		if( m_options.interop && !method.is_valid() )
 			method = PtrConst(asPWORD(callee));
@@ -257,14 +277,16 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 
 // Calls the method of a delegate natively, like the VM does for asBC_CallPtr: the
 // object of the delegate is pushed below the arguments, and a virtual method is
-// looked up in the virtual function table of the object. The delegates of interface
-// methods and of registered functions are left to the helper. This is cold code
-// after the call of a plain function pointer, which it rejoins
+// looked up in the virtual function table of the object. Interface methods are
+// resolved from the object's implementation, and registered functions are left to
+// the helper. This is cold code after the call of a plain function pointer, which
+// it rejoins
 void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegate, const Label &slow, const Gp &result, bool mark, bool vrInReg)
 {
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
 	Label done       = m_uc.new_label();
-	Label notVirtual = m_uc.new_label();
+	Label interfaceMethod = m_uc.new_label();
+	Label haveMethod      = m_uc.new_label();
 	BaseNode *cold = BeginCold(delegate);
 	Gp func   = LoadPtr(funcVar);
 	Gp obj    = m_uc.new_gp_ptr();
@@ -274,7 +296,8 @@ void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegat
 	m_uc.load(method, Addr(func, layout.funcForDelegate));
 	m_uc.j(slow, test_z(obj));
 	m_uc.load_u32(type, Addr(method, layout.funcType));
-	m_uc.j(notVirtual, cmp_ne(type, Imm(int(asFUNC_VIRTUAL))));
+	m_uc.j(interfaceMethod, cmp_eq(type, Imm(int(asFUNC_INTERFACE))));
+	m_uc.j(haveMethod, cmp_ne(type, Imm(int(asFUNC_VIRTUAL))));
 	Gp table = m_uc.new_gp_ptr();
 	Gp index = m_uc.new_gp_ptr();
 	m_uc.load(table, Addr(obj, layout.objectType));
@@ -282,14 +305,21 @@ void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegat
 	m_uc.load_u32(index, Addr(method, layout.vfTableIdx));
 	m_uc.load(method, PtrElement(table, index));
 	m_uc.load_u32(type, Addr(method, layout.funcType));
-	m_uc.bind(notVirtual);
+	m_uc.j(haveMethod);
+	m_uc.bind(interfaceMethod);
+	m_uc.load(table, Addr(obj, layout.objectType));
+	InvokeNode *resolve = Invoke((const void*)JIT_FindInterfaceMethod, FuncSignature::build<asCScriptFunction*, asCObjectType*, asCScriptFunction*>());
+	resolve->set_arg(0, table);
+	resolve->set_arg(1, method);
+	resolve->set_ret(0, method);
+	m_uc.j(slow, test_z(method));
+	m_uc.load_u32(type, Addr(method, layout.funcType));
+	m_uc.bind(haveMethod);
 	m_uc.j(slow, cmp_ne(type, Imm(int(asFUNC_SCRIPT))));
 	Gp target = m_uc.new_gp_ptr();
 	m_uc.load(target, Addr(method, layout.scriptData));
 	m_uc.load(target, Addr(target, layout.jitFunction));
 	m_uc.j(slow, test_z(target));
-	if( m_options.tieredEntry && !m_options.interop )
-		m_uc.j(slow, cmp_eq(target, PtrConst(asPWORD(m_options.tieredEntry))));
 	Gp sp = m_uc.new_gp_ptr();
 	m_uc.sub(sp, StackPointer(), Imm(PTR_BYTES));
 	m_uc.store(mem_ptr(sp), obj);
