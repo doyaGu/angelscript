@@ -339,7 +339,13 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	{
 		const asCDataType &pt = descr->parameterTypes[n];
 		if( pt.GetTokenType() == ttQuestion )
-			return false;
+		{
+			// The native signature has an address and a type id for each ?&.
+			call.args.push_back(SJITSystemCall::VALUE_PTR);
+			call.args.push_back(SJITSystemCall::VALUE_I32);
+			size += AS_PTR_SIZE + 1;
+			intArgs += 2;
+		}
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { call.args.push_back(SJITSystemCall::VALUE_PTR); size += AS_PTR_SIZE; intArgs++; }
 		else if( pt.IsFloatType() )               { call.args.push_back(SJITSystemCall::VALUE_F32); size += 1; floatArgs++; }
 		else if( pt.IsDoubleType() )              { call.args.push_back(SJITSystemCall::VALUE_F64); size += 2; floatArgs++; }

@@ -1466,7 +1466,21 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		arg.stackOff = stackPos;
 		arg.autoHandle = n < sysFunc->paramAutoHandles.GetLength() && sysFunc->paramAutoHandles[n];
 		if( pt.GetTokenType() == ttQuestion )
-			return false;
+		{
+			// A variable-type parameter is passed to the application as two arguments:
+			// its address followed by the runtime type id.
+			if( arg.autoHandle )
+				return false;
+			arg.kind = ARG_PTR;
+			arg.type = TypeId::kUIntPtr;
+			args.push_back(arg);
+			arg.kind = ARG_I32;
+			arg.type = TypeId::kInt32;
+			arg.stackOff += AS_PTR_SIZE;
+			args.push_back(arg);
+			stackPos += AS_PTR_SIZE + 1;
+			continue;
+		}
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
 		else if( pt.IsFloatType() )                { arg.kind = ARG_F32; arg.type = TypeId::kFloat32; stackPos += 1; }
 		else if( pt.IsDoubleType() )               { arg.kind = ARG_F64; arg.type = TypeId::kFloat64; stackPos += 2; }
