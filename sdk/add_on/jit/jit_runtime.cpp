@@ -1382,7 +1382,7 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 //------------------------------------------------------------------------
 // Bound calls, see CJITCall
 
-CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_returnObject(0), m_limitWords(0), m_scriptFunc(false), m_returnReference(false), m_returnOnStack(false)
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_returnObject(0), m_limitWords(0), m_scriptFunc(false), m_returnReference(false), m_returnOnStack(false), m_returnObjectValue(false), m_returnObjectHandle(false)
 {
 }
 
@@ -1399,12 +1399,19 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	m_scriptFunc     = func && func->GetFuncType() == asFUNC_SCRIPT;
 	m_returnReference = false;
 	m_returnOnStack   = false;
+	m_returnObjectValue = false;
+	m_returnObjectHandle = false;
 	m_argOffsets.clear();
 	if( func )
 	{
 		asCScriptFunction *scriptFunc = static_cast<asCScriptFunction*>(func);
 		m_returnReference = scriptFunc->returnType.IsReference();
 		m_returnOnStack = scriptFunc->DoesReturnOnStack();
+		if( !m_returnReference && (scriptFunc->returnType.IsObject() || scriptFunc->returnType.IsFuncdef()) )
+		{
+			m_returnObjectHandle = scriptFunc->returnType.IsObjectHandle();
+			m_returnObjectValue = !m_returnObjectHandle;
+		}
 		asUINT offset = (scriptFunc->objectType ? AS_PTR_SIZE : 0) + (scriptFunc->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
 		m_argOffsets.reserve(scriptFunc->parameterTypes.GetLength());
 		for( asUINT n = 0; n < scriptFunc->parameterTypes.GetLength(); n++ )

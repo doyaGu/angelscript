@@ -251,8 +251,8 @@ protected:
 // faster than through CJITCompiler::Prepare and Execute: what those check and look
 // up at every call is done once when the call is bound. Prepare and Execute have the
 // same effects as the methods of the compiler. Primitive and address arguments may be
-// set and primitive return values read with the unchecked methods below, or all values
-// with the methods of the context as usual. The call must be used by the thread that
+// set and return values read with the unchecked methods below, or all values with the
+// methods of the context as usual. The call must be used by the thread that
 // bound it, as it keeps the thread's list of active contexts; bind it again to use it
 // from another thread.
 // Prepare falls back to the compiler's Prepare unless the context is where the last
@@ -295,6 +295,14 @@ public:
 	double  GetReturnDouble() const { return *reinterpret_cast<double*>(m_returnValue); }
 	void   *GetReturnAddress() const { return m_returnReference ? ReturnReference() : *m_returnObject; }
 	void   *GetReturnObject() const  { return m_returnReference ? *reinterpret_cast<void**>(asPWORD(*m_returnValue)) : *m_returnObject; }
+	void   *GetAddressOfReturnValue() const
+	{
+		if( m_returnObjectValue )
+			return *m_returnObject;
+		if( m_returnObjectHandle )
+			return m_returnObject;
+		return m_returnValue;
+	}
 
 	asIScriptContext  *GetContext() const  { return m_ctx; }
 	asIScriptFunction *GetFunction() const { return m_func; }
@@ -315,6 +323,8 @@ protected:
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
 	bool               m_returnReference; // the return is a reference stored in the value register
 	bool               m_returnOnStack; // the object return uses the hidden pointer in the stack frame
+	bool               m_returnObjectValue; // the return is a non-reference object value
+	bool               m_returnObjectHandle; // the return is a non-reference object handle
 };
 
 // Adds the indexers of the opIndex methods of CScriptArray to the compiler, see
