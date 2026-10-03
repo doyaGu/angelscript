@@ -369,6 +369,55 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			m_uc.store_u32(Var(a0), lo);
 			m_uc.store_u32(Var(a0, 4), hi);
 		}
+		else if( !Is64Bit() && instr.op == asBC_MULi64 )
+		{
+			Gp alo = m_uc.new_gp32();
+			Gp ahi = m_uc.new_gp32();
+			Gp blo = m_uc.new_gp32();
+			Gp bhi = m_uc.new_gp32();
+			Gp aLow16 = m_uc.new_gp32();
+			Gp aHigh16 = m_uc.new_gp32();
+			Gp bLow16 = m_uc.new_gp32();
+			Gp bHigh16 = m_uc.new_gp32();
+			Gp w0 = m_uc.new_gp32();
+			Gp w1 = m_uc.new_gp32();
+			Gp w2 = m_uc.new_gp32();
+			Gp t = m_uc.new_gp32();
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			m_uc.load_u32(alo, Var(a1));
+			m_uc.load_u32(ahi, Var(a1, 4));
+			m_uc.load_u32(blo, Var(a2));
+			m_uc.load_u32(bhi, Var(a2, 4));
+
+			// Compute both halves of alo * blo from four 16bit products. The
+			// other two products only contribute their low halves to the result.
+			m_uc.and_(aLow16, alo, Imm(0xFFFF));
+			m_uc.shr(aHigh16, alo, Imm(16));
+			m_uc.and_(bLow16, blo, Imm(0xFFFF));
+			m_uc.shr(bHigh16, blo, Imm(16));
+			m_uc.mul(w0, aLow16, bLow16);
+			m_uc.shr(t, w0, Imm(16));
+			m_uc.mul(w1, aHigh16, bLow16);
+			m_uc.add(w1, w1, t);
+			m_uc.shr(w2, w1, Imm(16));
+			m_uc.and_(w1, w1, Imm(0xFFFF));
+			m_uc.mul(t, aLow16, bHigh16);
+			m_uc.add(w1, w1, t);
+			m_uc.mul(hi, aHigh16, bHigh16);
+			m_uc.add(hi, hi, w2);
+			m_uc.shr(t, w1, Imm(16));
+			m_uc.add(hi, hi, t);
+			m_uc.shl(lo, w1, Imm(16));
+			m_uc.and_(w0, w0, Imm(0xFFFF));
+			m_uc.add(lo, lo, w0);
+			m_uc.mul(t, alo, bhi);
+			m_uc.add(hi, hi, t);
+			m_uc.mul(t, ahi, blo);
+			m_uc.add(hi, hi, t);
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
+		}
 		else if( !Is64Bit() && (instr.op == asBC_BAND64 || instr.op == asBC_BOR64 || instr.op == asBC_BXOR64) )
 		{
 			Gp alo = m_uc.new_gp32();
