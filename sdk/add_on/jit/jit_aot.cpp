@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 15;
+const asQWORD JIT_AOT_FORMAT_VERSION = 16;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -176,7 +176,12 @@ static asUINT GetKeyOperands(asEBCInstr op)
 
 SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
 {
-	asCScriptFunction *func = code.GetFunction();
+	// Borrowing handle arguments depends on the bytecode of the statically called
+	// functions. Hash the result of the same analysis that generates the code, rather
+	// than engine-local function ids or pointers.
+	CJITByteCode analysed(code);
+	analysed.AnalyseForAOT(JIT_AOT_MAX_LOCALS, indexers);
+	asCScriptFunction *func = analysed.GetFunction();
 	CJITAOTHasher hash;
 	hash.Add(JIT_AOT_FORMAT_VERSION);
 	hash.Add(ANGELSCRIPT_VERSION);
@@ -207,13 +212,17 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 	for( std::set<int>::const_iterator it = named.begin(); it != named.end(); ++it )
 		hash.Add(asQWORD(asINT64(*it)));
 
-	hash.Add(code.GetLength());
-	const std::vector<SJITInstr> &instrs = code.GetInstructions();
+	hash.Add(analysed.GetBorrowableParams());
+	hash.Add(analysed.GetLength());
+	const std::vector<SJITInstr> &instrs = analysed.GetInstructions();
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
 		const SJITInstr &instr = instrs[n];
 		const asDWORD *bc = instr.bc;
-		hash.Add(asQWORD(instr.op) | ((instr.flags & JIT_INSTR_SKIP) ? 0x100 : 0));
+		hash.Add(asQWORD(instr.op) | ((instr.flags & JIT_INSTR_SKIP) ? 0x100 : 0) |
+		         ((instr.flags & JIT_INSTR_BORROW) ? 0x200 : 0));
+		if( instr.op == asBC_CALL || instr.op == asBC_CALLINTF )
+			hash.Add(analysed.GetBorrowedArgs(n));
 
 		asUINT operands = GetKeyOperands(instr.op);
 		if( operands & KEY_ALL )
@@ -544,7 +553,7 @@ int CJITAOTOutput::Write()
 		{
 			content += "int " + *it + "(asSVMRegisters *, asPWORD, asUINT, asDWORD *);\n";
 			content += local[index[*it]] ? "static int " : "int ";
-			content += *it + "_d(asCContext *, asCScriptFunction *, asDWORD *, asUINT);\n";
+			content += *it + "_d(asCContext *, asCScriptFunction *, asDWORD *, asUINT, asUINT);\n";
 		}
 
 		for( asUINT m = 0; m < members.size(); m++ )

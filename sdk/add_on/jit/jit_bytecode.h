@@ -28,7 +28,7 @@ enum EJITInstrFlags
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
 	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinees
-	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to the inlined call, see AnalyseBorrows
+	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to a native script call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
@@ -355,8 +355,8 @@ public:
 	// releases, so that the calls inlining it can lend it their references
 	asUINT GetBorrowableParams() const { return m_borrowableParams; }
 
-	// Returns the mask of the parameters of the function inlined by the instruction
-	// that borrow the references of the caller, see AnalyseBorrows
+	// Returns the mask of the parameters of the function called by the instruction
+	// that borrow the references of the caller, see AnalyseBorrows and AnalyseForAOT
 	asUINT GetBorrowedArgs(asUINT instrIdx) const;
 
 	// Returns the variables that must be null for the copies of the references lent
@@ -392,7 +392,8 @@ protected:
 	void AnalyseBorrows();
 	void ClearBorrows();
 	void FindBorrowableParams();
-	void FindBorrowedArgs();
+	void FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlinee> > &callees);
+	void FindAOTBorrowedArgs();
 	void FindMovedRefs();
 	void FindInPlaceRefCounts();
 	void FindListFrees();
@@ -435,7 +436,7 @@ protected:
 	std::map<asUINT, SJITIndexerCall> m_indexers; // by instruction, see GetIndexer
 	asUINT                  m_borrowableParams; // see GetBorrowableParams
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
-	std::map<asUINT, asUINT> m_borrowedArgs;    // by instruction, for the inlined calls
+	std::map<asUINT, asUINT> m_borrowedArgs;    // by call instruction
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions

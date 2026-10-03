@@ -30,7 +30,9 @@ class asCScriptEngine;
 // nothing that the key leaves out.
 //
 // The script calls to the functions whose code is generated too call the code
-// directly if the function called at run time has that code, see AOT_PopCall. The
+// directly if the function called at run time has that code, see AOT_PopCall. Plain
+// script calls may lend handle arguments to the direct entry, which receives their
+// parameter mask and owns them before exposing its frame. The
 // lines of the code for that are a region, which begins with a line of
 // JIT_CPPGEN_REGION followed by the name of the code called, and ends with a line of
 // JIT_CPPGEN_REGION_END. The output keeps the region, without the two lines, if it
@@ -114,10 +116,11 @@ protected:
 	void Put(const std::string &line);
 	void EmitEntry(bool calls);
 	bool EmitInstr(asUINT idx);
+	void EmitOwnBorrowed(const char *indent = "");
 	void EmitSync(const char *indent = "");
 	void EmitReload(const char *indent = "");
-	void EmitScriptCall(const SJITInstr &instr);
-	void EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow);
+	void EmitScriptCall(asUINT idx, const SJITInstr &instr);
+	void EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow, asUINT borrowed = 0);
 	void EmitIndexer(asUINT idx);
 	void EmitSystemCall(asUINT idx, const SJITSystemCall &call);
 	void EmitConstructor(asUINT idx, const SJITSystemCall &call);

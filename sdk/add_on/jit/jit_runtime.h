@@ -194,6 +194,7 @@ void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *f
 // Adds a reference to the objects of the handle parameters in the mask, in a frame
 // of the function whose parameters borrowed the references of the caller, before
 // the VM or the called function releases them, see CJITByteCode::AnalyseBorrows
+// and CJITByteCode::AnalyseForAOT
 void   JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcept;
 
 // JIT_OwnParams for the frames of the inlined functions on the call stack, whose

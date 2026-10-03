@@ -25,17 +25,18 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Inline calls in the code generated ahead of time, and borrow the references of the
-//    handle arguments there, which is where the JIT compiled code is still much faster.
-//    The key would have to include the bytecode of the callees (jit_bytecode.cpp,
-//    AnalyseForAOT).
+//  - Borrow the references of handle arguments passed through virtual and interface
+//    calls in the code generated ahead of time. Plain script calls already do so; the
+//    remaining calls need all possible implementations analysed (jit_bytecode.cpp,
+//    FindAOTBorrowedArgs).
 //  - Objects passed by value to direct system calls (jit_codegen_call.cpp,
 //    EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
-//  - Borrow the references of the handle arguments on 32bit hosts, whose call states have
-//    no room to note the borrowed parameters, and for the calls that aren't inlined, which
-//    would need entry points of the callees that don't release the parameters
+//  - Borrow the references of the handle arguments in the runtime-generated code on
+//    32bit hosts, whose call states have no room to note the borrowed parameters, and
+//    for the calls that aren't inlined, which would need entry points of the callees
+//    that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots),
 //    and local variables for the variables in the code generated ahead of time on big endian

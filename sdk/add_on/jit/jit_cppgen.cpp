@@ -501,7 +501,7 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 	std::string text;
 	if( direct )
 	{
-		text = Format("int %s_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp, asUINT callLimit)\n{\n", name);
+		text = Format("int %s_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp, asUINT callLimit, asUINT borrowed)\n{\n", name);
 		text += "\tasSVMRegisters *regs = &ctx->m_regs;\n";
 		text += "\tasDWORD *bc, *sp;\n";
 		text += "\tasQWORD vr = 0;\n";
@@ -581,6 +581,7 @@ void CJITCppGen::EmitEntry(bool calls)
 		Emit("bc = self->scriptData->byteCode.AddressOf();");
 		Emit("if( fp - (%u + RESERVE_STACK) < ctx->m_stackBlocks[ctx->m_stackIndex] || regs->doProcessSuspend )", func->scriptData->stackNeeded);
 		Emit("{");
+		EmitOwnBorrowed("\t");
 		Emit("\tctx->m_currentFunction = self;");
 		Emit("\tregs->stackPointer = fp;");
 		Emit("\tregs->programPointer = bc;");
@@ -871,11 +872,23 @@ std::string CJITCppGen::FieldLoads(asUINT mask)
 std::string CJITCppGen::Bail() const
 {
 	std::string sync = m_sync;
+	if( m_direct )
+		sync = "if( borrowed ) { JIT_OwnParams(self, fp, borrowed); borrowed = 0; }" +
+		       (sync.empty() ? "" : " " + sync);
 	if( m_frame )
 		sync += sync.empty() ? "AOT_FRAME();" : " AOT_FRAME();";
 	if( sync.empty() )
 		return Format("AOT_BAIL(%u);", m_pos);
 	return Format("{ %s AOT_BAIL(%u); }", sync.c_str(), m_pos);
+}
+
+// Gives the direct entry's borrowed handle parameters references of their own
+// before the VM, the engine, or the application can see its frame. Their normal
+// FREE instructions release those references later.
+void CJITCppGen::EmitOwnBorrowed(const char *indent)
+{
+	if( m_direct )
+		Emit("%sif( borrowed ) { JIT_OwnParams(self, fp, borrowed); borrowed = 0; }", indent);
 }
 
 // Where the VM, the engine, or the application may see the frame, i.e. at the
@@ -886,6 +899,7 @@ std::string CJITCppGen::Bail() const
 // modified, see GetReloadMask
 void CJITCppGen::EmitSync(const char *indent)
 {
+	EmitOwnBorrowed(indent);
 	if( !m_sync.empty() )
 		Emit("%s%s", indent, m_sync.c_str());
 	if( m_frame )
@@ -936,7 +950,7 @@ asCScriptFunction *CJITCppGen::FindCallee(asCScriptFunction *func, bool virtualC
 	return found;
 }
 
-void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
+void CJITCppGen::EmitScriptCall(asUINT idx, const SJITInstr &instr)
 {
 	asUINT pos = m_pos;
 	bool virtualCall = instr.op == asBC_CALLINTF;
@@ -946,6 +960,7 @@ void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 	callee = FindCallee(callee, virtualCall);
 
 	Emit("{");
+	EmitOwnBorrowed("\t");
 	Put(m_sync.empty() ? "" : "\t" + m_sync);
 	if( virtualCall )
 	{
@@ -958,7 +973,10 @@ void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 		Emit("\tasCScriptFunction *f_ = ctx->m_engine->scriptFunctions[AOT_INT(%u)];", pos + 1);
 		Emit("\tJITFunction t_ = (JITFunction)f_->scriptData->jitFunction;");
 	}
-	EmitCall(callee, pos + 2, "\t", Format("JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit)", virtualCall ? "JIT_CALL_INTERFACE" : "JIT_CALL_SCRIPT", pos + 1));
+	EmitCall(callee, pos + 2, "\t",
+	         Format("JIT_CallScript(regs, %s, AOT_INT(%u), 0, callLimit)",
+	                virtualCall ? "JIT_CALL_INTERFACE" : "JIT_CALL_SCRIPT", pos + 1),
+	         m_code.GetBorrowedArgs(idx));
 	EmitReload("\t");
 	Emit("}");
 }
@@ -969,7 +987,7 @@ void CJITCppGen::EmitScriptCall(const SJITInstr &instr)
 // the function expected is called directly if the function has it, see AOT_PopCall.
 // The call state gets the frame, which is only stored for JIT_CallScript. next is
 // the position after the instruction
-void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow)
+void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow, asUINT borrowed)
 {
 	std::string target;
 	if( m_target && callee && callee->funcType == asFUNC_SCRIPT && callee->scriptData )
@@ -985,7 +1003,7 @@ void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *in
 		Emit("%sif( t_ == %s && n_ < callLimit )", indent, target.c_str());
 		Emit("%s{", indent);
 		Emit("%s\tAOT_PushCall(ctx, n_, self, fp, bc + %u, sp);", indent, next);
-		Emit("%s\tif( %s_d(ctx, f_, sp, callLimit) )", indent, target.c_str());
+		Emit("%s\tif( %s_d(ctx, f_, sp, callLimit, %uu) )", indent, target.c_str(), borrowed);
 		Emit("%s\t\treturn 1;", indent);
 		Emit("%s\tsp += %d;", indent, CJITByteCode::GetPopSize(callee));
 		Emit("%s\tvr = regs->valueRegister;", indent);
@@ -996,12 +1014,16 @@ void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *in
 	}
 	Emit("%sif( t_ && n_ < callLimit )", indent);
 	Emit("%s{", indent);
+	if( borrowed )
+		Emit("%s\tJIT_OwnParams(f_, sp, %uu);", indent, borrowed);
 	Emit("%s\tif( AOT_CallNative(regs, ctx, n_, self, f_, t_, fp, bc + %u, sp, callLimit) )", indent, next);
 	Emit("%s\t\treturn 1;", indent);
 	Emit("%s\tAOT_RELOAD();", indent);
 	Emit("%s}", indent);
 	Emit("%selse", indent);
 	Emit("%s{", indent);
+	if( borrowed )
+		Emit("%s\tJIT_OwnParams(f_, sp, %uu);", indent, borrowed);
 	if( m_frame )
 		Emit("%s\tAOT_FRAME();", indent);
 	Emit("%s\tAOT_SYNC(%u);", indent, m_pos);
@@ -1095,6 +1117,7 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	}
 	if( call.retOnStack )
 		Emit("\tvoid *r_ = (void*)AOT_S(pw, %d);", retOff);
+	EmitOwnBorrowed("\t");
 	Put(m_sync.empty() ? "" : "\t" + m_sync);
 	if( m_frame )
 		Emit("\tAOT_FRAME();");
@@ -1288,7 +1311,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 
 	case asBC_CALL:
 	case asBC_CALLINTF:
-		EmitScriptCall(instr);
+		EmitScriptCall(idx, instr);
 		break;
 
 	case asBC_RET:
@@ -1624,42 +1647,62 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_FREE:
+	{
+		int borrowedParam = m_direct ? m_code.FindParam(SW0) : -1;
+		bool canBorrow = borrowedParam >= 0 && borrowedParam < 31 &&
+		                 ((m_code.GetBorrowableParams() >> borrowedParam) & 1) != 0;
+		if( canBorrow )
+		{
+			asUINT bit = 1u << borrowedParam;
+			Emit("if( borrowed & %uu )", bit);
+			Emit("{");
+			Emit("\t%s", SetVar("pw", SW0, "0").c_str());
+			Emit("\tborrowed &= ~%uu;", bit);
+			Emit("}");
+			Emit("else");
+			Emit("{");
+		}
 		if( instr.flags & JIT_INSTR_MOVED )
 		{
 			// The copy before has taken over the reference, see CJITByteCode::FindMovedRefs
 			Put(SetVar("pw", SW0, "0"));
-			break;
-		}
-		Emit("if( %s )", Var("pw", SW0).c_str());
-		Emit("{");
-		if( instr.flags & JIT_INSTR_FREE_LIST )
-		{
-			// Nothing in the list is destroyed, see CJITByteCode::FindListFrees
-			Emit("\tJIT_FreeMem((void*)%s);", Var("pw", SW0).c_str());
-			Emit("\t%s", SetVar("pw", SW0, "0").c_str());
-		}
-		else if( instr.flags & JIT_INSTR_REFCOUNT )
-		{
-			// The references of the script objects are counted in place, see
-			// CJITByteCode::FindInPlaceRefCounts. Like the VM the variable is cleared
-			// after the release
-			Emit("\tvoid *o_ = (void*)%s;", Var("pw", SW0).c_str());
-			Emit("\tif( !AOT_Release(o_) )");
-			Emit("\t{");
-			EmitSync("\t\t");
-			Emit("\t\tJIT_ReleaseScriptObject(o_);");
-			Emit("\t}");
-			Emit("\t%s", SetVar("pw", SW0, "0").c_str());
 		}
 		else
 		{
-			// The release may execute a script destructor, which leaves the variables
-			// kept in local variables alone
-			EmitSync("\t");
-			Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
+			Emit("if( %s )", Var("pw", SW0).c_str());
+			Emit("{");
+			if( instr.flags & JIT_INSTR_FREE_LIST )
+			{
+				// Nothing in the list is destroyed, see CJITByteCode::FindListFrees
+				Emit("\tJIT_FreeMem((void*)%s);", Var("pw", SW0).c_str());
+				Emit("\t%s", SetVar("pw", SW0, "0").c_str());
+			}
+			else if( instr.flags & JIT_INSTR_REFCOUNT )
+			{
+				// The references of the script objects are counted in place, see
+				// CJITByteCode::FindInPlaceRefCounts. Like the VM the variable is cleared
+				// after the release
+				Emit("\tvoid *o_ = (void*)%s;", Var("pw", SW0).c_str());
+				Emit("\tif( !AOT_Release(o_) )");
+				Emit("\t{");
+				EmitSync("\t\t");
+				Emit("\t\tJIT_ReleaseScriptObject(o_);");
+				Emit("\t}");
+				Emit("\t%s", SetVar("pw", SW0, "0").c_str());
+			}
+			else
+			{
+				// The release may execute a script destructor, which leaves the variables
+				// kept in local variables alone
+				EmitSync("\t");
+				Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
+			}
+			Emit("}");
 		}
-		Emit("}");
+		if( canBorrow )
+			Emit("}");
 		break;
+	}
 
 	case asBC_LOADOBJ:  Emit("regs->objectType = 0; regs->objectRegister = (void*)%s; %s", Var("pw", SW0).c_str(), SetVar("pw", SW0, "0").c_str()); break;
 	case asBC_STOREOBJ: Emit("%s regs->objectRegister = 0;", SetVar("pw", SW0, "(asPWORD)regs->objectRegister").c_str()); break;
@@ -1679,7 +1722,20 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		else
 			Emit("\tvoid **d_ = (void**)%s;", VarAddr(SW0).c_str());
 		Emit("\tvoid *s_ = (void*)AOT_S(pw, 0);");
-		if( instr.flags & JIT_INSTR_REFCOUNT )
+		if( instr.flags & JIT_INSTR_BORROW )
+		{
+			const std::vector<int> &checks = m_code.GetBorrowChecks(idx);
+			if( !checks.empty() )
+			{
+				std::string any;
+				for( asUINT n = 0; n < checks.size(); n++ )
+					any += (n ? " | " : "") + Var("pw", checks[n]);
+				Emit("\tif( %s )", any.c_str());
+				Emit("\t\t%s", Bail().c_str());
+			}
+			Emit("\t*d_ = s_;");
+		}
+		else if( instr.flags & JIT_INSTR_REFCOUNT )
 		{
 			// The references of the script objects are counted in place, see
 			// CJITByteCode::FindInPlaceRefCounts. Like the VM the old object is

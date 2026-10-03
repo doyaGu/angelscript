@@ -194,7 +194,12 @@ inline int AOT_CallNative(asSVMRegisters *regs, asCContext *ctx, asUINT length, 
 // and stores its frame where it is seen, like JIT_NATIVE_RETURN. The direct entries
 // have the signature
 //
-//   int name_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp, asUINT callLimit)
+//   int name_d(asCContext *ctx, asCScriptFunction *self, asDWORD *fp,
+//              asUINT callLimit, asUINT borrowed)
+//
+// borrowed identifies handle parameters whose references are owned by the caller.
+// The direct entry skips their releases until it must expose the frame, when it
+// gives the remaining parameters references of their own first.
 inline void AOT_PopCall(asCContext *ctx)
 {
 	asUINT length = ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE;

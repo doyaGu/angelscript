@@ -940,24 +940,24 @@ void CJITByteCode::FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *index
 	}
 }
 
-// The depth of the stack depends on the callees, and the borrows on the objects.
-// The moved references, those counted in place, and the list frees only depend on
-// the kinds of the types, which are part of the key, see GetRefKind
-//
-// TODO: runtime optimize: Inline the calls, and borrow the references of the handle
-//                         arguments, with the bytecode of the callees and the kinds of
-//                         the objects in the key. Most of the difference to the JIT
-//                         compiled code is in these calls.
+// The stack depth is used only to recognize handle arguments that static script calls
+// can borrow. The result of that analysis is part of the AOT key. The other code still
+// doesn't depend on the callees, as the direct-call regions are guarded by their
+// function pointers and removed when their targets aren't written.
 void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
 {
 	MarkUnreachable(false);
 	m_aot = true;
-	m_staticStack = false;
-	m_stackDepth.assign(m_instrs.size(), -1);
+	AnalyseStackDepth();
 	m_inlinees.clear();
 	m_inlinedLength = 0;
 	FindIndexers(indexers);
 	ClearBorrows();
+	if( m_staticStack )
+	{
+		FindBorrowableParams();
+		FindAOTBorrowedArgs();
+	}
 	FindMovedRefs();
 	FindInPlaceRefCounts();
 	FindListFrees();
@@ -1075,7 +1075,7 @@ void CJITByteCode::AnalyseBorrows()
 	if( m_staticStack )
 	{
 		FindBorrowableParams();
-		FindBorrowedArgs();
+		FindBorrowedArgs(m_inlinees);
 	}
 #endif
 	FindMovedRefs();
@@ -1230,9 +1230,10 @@ void CJITByteCode::FindBorrowableParams()
 	}
 }
 
-// The inlined calls whose handle arguments can borrow the references of the caller,
-// see AnalyseBorrows. The compiler copies each handle argument into a temporary
-// variable, which is moved into the stack slot of the argument before the call:
+// The native script calls whose handle arguments can borrow the references of the
+// caller, see AnalyseBorrows and AnalyseForAOT. The compiler copies each handle
+// argument into a temporary variable, which is moved into the stack slot of the
+// argument before the call:
 //
 //   PshVPtr vX; RefCpyV vT; PopPtr; ... VAR vT; ... GETOBJ; ... CALL
 //
@@ -1241,7 +1242,7 @@ void CJITByteCode::FindBorrowableParams()
 // in between may return to the VM, which would release vT, or enter the code, so
 // only the arguments may be pushed. The copies must not release anything, i.e. the
 // temporary variables must be null, which the first of the copies checks for all
-void CJITByteCode::FindBorrowedArgs()
+void CJITByteCode::FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlinee> > &callees)
 {
 	struct SCandidate
 	{
@@ -1253,7 +1254,7 @@ void CJITByteCode::FindBorrowedArgs()
 	};
 
 	std::vector<SCandidate> found;
-	for( std::map<asUINT, std::vector<SJITInlinee> >::iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
+	for( std::map<asUINT, std::vector<SJITInlinee> >::const_iterator it = callees.begin(); it != callees.end(); ++it )
 	{
 		asUINT call = it->first;
 		const std::vector<SJITInlinee> &inlinees = it->second;
@@ -1401,6 +1402,46 @@ void CJITByteCode::FindBorrowedArgs()
 		if( !checks.empty() )
 			m_borrowChecks[asUINT(first)] = checks;
 	}
+}
+
+// Analyses the functions called by plain script calls just far enough to find the
+// handle parameters whose references their direct AOT entries can borrow. Virtual
+// calls are left for a separate analysis because the implementation depends on the
+// receiver type. The called function is not emitted in place: its generated direct
+// entry receives the borrowed-parameter mask at run time.
+void CJITByteCode::FindAOTBorrowedArgs()
+{
+	std::map<asUINT, std::vector<SJITInlinee> > callees;
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( instr.op != asBC_CALL || (instr.flags & JIT_INSTR_DEAD) )
+			continue;
+
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
+		                           ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
+			continue;
+
+		std::shared_ptr<CJITByteCode> callee = std::make_shared<CJITByteCode>();
+		if( callee->Decode(func) < 0 )
+			continue;
+		callee->MarkUnreachable(false);
+		callee->AnalyseStackDepth();
+		if( !callee->HasStaticStack() )
+			continue;
+		callee->ClearBorrows();
+		callee->FindBorrowableParams();
+		if( callee->GetBorrowableParams() == 0 )
+			continue;
+
+		SJITInlinee direct;
+		direct.code = callee;
+		callees[n].push_back(direct);
+	}
+	FindBorrowedArgs(callees);
 }
 
 // Returns the instruction that replaces the variable pushed by the asBC_VAR with
