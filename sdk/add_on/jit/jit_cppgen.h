@@ -57,7 +57,7 @@ struct SJITSystemCall
 	bool             retInMemory; // through the hidden pointer, which is passed first,
 	bool             retAfterThis; // or after the native this pointer
 	bool             returnAutoHandle; // add a reference to a returned handle
-	bool             cleanAutoHandles; // release the handles passed through @+
+	bool             cleanArgs;   // clean value objects and handles passed through @+
 	int              ret;         // the kind of the value returned, VALUE_VOID for retInMemory
 	int              retParts;    // or of the members of the struct returned, if not 0,
 	int              retBytes;    // whose first bytes are the object

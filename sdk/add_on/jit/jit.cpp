@@ -25,10 +25,9 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Objects passed by value to AOT direct system calls, and small, trivial objects
-//    passed by value to runtime direct system calls. The runtime supports complex and
-//    large value objects, which the native ABI passes indirectly (jit_codegen_call.cpp,
-//    EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
+//  - Small, trivial objects passed by value to direct system calls. Complex and
+//    large value objects, which the native ABI passes indirectly, are supported
+//    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
 //  - Borrow the references of the handle arguments in the runtime-generated code on

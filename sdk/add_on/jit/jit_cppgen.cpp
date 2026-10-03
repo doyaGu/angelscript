@@ -243,8 +243,6 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	}
 
-	if( sysFunc->takesObjByVal )
-		return false;
 	call.adjustThis = sysFunc->compositeOffset || sysFunc->isCompositeIndirect || sysFunc->baseOffset;
 	if( call.adjustThis && !call.thisFromStack )
 		return false;
@@ -253,7 +251,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	int cleanupCount = JIT_GetSystemCallCleanupCount(descr);
 	if( cleanupCount < 0 )
 		return false;
-	call.cleanAutoHandles = cleanupCount != 0;
+	call.cleanArgs = cleanupCount != 0;
 
 	// The value returned. A value type returned by value is stored where the caller
 	// pushed the location, by the function itself through the hidden pointer or from
@@ -1118,7 +1116,7 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	case SJITSystemCall::VALUE_PTR: Emit("\tAOT_SETVR(asPWORD, (asPWORD)x_);"); break;
 	default: break;
 	}
-	if( call.cleanAutoHandles )
+	if( call.cleanArgs )
 		Emit("\tJIT_CleanupSystemCallArgs(regs, d_);");
 	Emit("\tsp += %d;", call.popSize);
 
@@ -1194,7 +1192,7 @@ void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 	}
 	Emit("\t\t\t((void (AOT_CDECL*)(%s))%s)(%s);", paramList.c_str(), target.c_str(), argList.c_str());
 	Emit("\t\t\tctx->m_callingSystemFunction = 0;");
-	if( call.cleanAutoHandles )
+	if( call.cleanArgs )
 		Emit("\t\t\tJIT_CleanupSystemCallArgs(regs, d_);");
 	Emit("\t\t\tsp += %d;", call.popSize);
 	Emit("\t\t\tvoid **a_ = (void**)AOT_S(pw, 0);");

@@ -15,7 +15,7 @@ BEGIN_AS_NAMESPACE
 
 // Changes whenever the generated code changes, so that the code generated before
 // isn't used for the functions anymore
-const asQWORD JIT_AOT_FORMAT_VERSION = 17;
+const asQWORD JIT_AOT_FORMAT_VERSION = 18;
 
 // The variables that the code keeps in local variables. The booleans are in the
 // high bytes of the dwords on big endian hosts, which the code doesn't handle
@@ -69,7 +69,7 @@ static void AddSystemCallKey(CJITAOTHasher &hash, const SJITSystemCall &call)
 	hash.Add(1 | (call.obj << 1) | (call.thisFromStack << 3) | (call.auxiliaryThis << 4) |
 		(call.virtualThis << 5) | (call.adjustThis << 6) | (call.retOnStack << 7) |
 		(call.retInMemory << 8) | (call.retAfterThis << 9) | (call.returnAutoHandle << 10) |
-		(call.cleanAutoHandles << 11) | (call.ret << 12) | (call.retParts << 15) |
+		(call.cleanArgs << 11) | (call.ret << 12) | (call.retParts << 15) |
 		(call.retBytes << 18));
 	hash.Add(call.popSize);
 	hash.Add(call.args.size());
