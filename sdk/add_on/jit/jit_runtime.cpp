@@ -1403,6 +1403,7 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	m_returnObjectValue = false;
 	m_returnObjectHandle = false;
 	m_argOffsets.clear();
+	m_objectArgs.clear();
 	if( func )
 	{
 		asCScriptFunction *scriptFunc = static_cast<asCScriptFunction*>(func);
@@ -1416,10 +1417,26 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 		}
 		asUINT offset = (scriptFunc->objectType ? AS_PTR_SIZE : 0) + (scriptFunc->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
 		m_argOffsets.reserve(scriptFunc->parameterTypes.GetLength());
+		m_objectArgs.reserve(scriptFunc->parameterTypes.GetLength());
 		for( asUINT n = 0; n < scriptFunc->parameterTypes.GetLength(); n++ )
 		{
+			const asCDataType &dt = scriptFunc->parameterTypes[n];
+			SObjectArgument objectArg = { 0, 0, false };
+			if( (dt.IsObject() || dt.IsFuncdef()) && !dt.IsReference() )
+			{
+				if( dt.IsObjectHandle() )
+				{
+					if( dt.IsFuncdef() )
+						objectArg.funcdef = true;
+					else
+						objectArg.addRef = dt.GetBehaviour()->addref;
+				}
+				else
+					objectArg.copyType = dt.GetTypeInfo();
+			}
 			m_argOffsets.push_back(offset);
-			offset += scriptFunc->parameterTypes[n].GetSizeOnStackDWords();
+			m_objectArgs.push_back(objectArg);
+			offset += dt.GetSizeOnStackDWords();
 		}
 	}
 	return compiler && ctx && m_threadData ? asSUCCESS : asINVALID_ARG;
@@ -1430,6 +1447,19 @@ void CJITCall::SetObject(void *obj)
 	*reinterpret_cast<asPWORD*>(m_arguments) = asPWORD(obj);
 	if( obj && m_scriptObjectMethod )
 		reinterpret_cast<asCScriptObject*>(obj)->AddRef();
+}
+
+void CJITCall::SetArgObject(asUINT arg, void *obj)
+{
+	const SObjectArgument &objectArg = m_objectArgs[arg];
+	asCScriptEngine *engine = static_cast<asCContext*>(m_ctx)->m_engine;
+	if( objectArg.copyType )
+		obj = engine->CreateScriptObjectCopy(obj, objectArg.copyType);
+	else if( obj && objectArg.funcdef )
+		reinterpret_cast<asIScriptFunction*>(obj)->AddRef();
+	else if( obj && objectArg.addRef )
+		engine->CallObjectMethod(obj, objectArg.addRef);
+	*reinterpret_cast<asPWORD*>(Argument(arg)) = asPWORD(obj);
 }
 
 // Like JIT_Prepare, for a context that has finished executing the function

@@ -275,9 +275,9 @@ public:
 	// These skip the state, index, and type checks of asIScriptContext, and use the
 	// argument offsets cached by Bind. Call them only after this call's Prepare has
 	// succeeded and before its Execute, with the method that matches the argument.
-	// SetObject is only for a bound method and must be called at most once per
-	// preparation. Like asIScriptContext::SetObject, it retains script objects until
-	// the context is prepared or unprepared again.
+	// SetObject is only for a bound method. Call it and SetArgObject at most once per
+	// destination after each preparation; they retain or copy objects exactly like
+	// the corresponding methods of asIScriptContext.
 	void SetObject(void *obj);
 	void SetArgByte(asUINT arg, asBYTE value)       { *reinterpret_cast<asBYTE*>(Argument(arg)) = value; }
 	void SetArgWord(asUINT arg, asWORD value)       { *reinterpret_cast<asWORD*>(Argument(arg)) = value; }
@@ -286,6 +286,7 @@ public:
 	void SetArgFloat(asUINT arg, float value)       { *reinterpret_cast<float*>(Argument(arg)) = value; }
 	void SetArgDouble(asUINT arg, double value)     { *reinterpret_cast<double*>(Argument(arg)) = value; }
 	void SetArgAddress(asUINT arg, void *value)     { *reinterpret_cast<asPWORD*>(Argument(arg)) = asPWORD(value); }
+	void SetArgObject(asUINT arg, void *obj);
 
 	// These likewise skip the context's state and return type checks. Call them only
 	// after Execute has returned asEXECUTION_FINISHED, with the method that matches the
@@ -312,6 +313,13 @@ public:
 	asIScriptFunction *GetFunction() const { return m_func; }
 
 protected:
+	struct SObjectArgument
+	{
+		asITypeInfo *copyType; // value objects are copied with this type
+		int          addRef; // behaviour of non-funcdef handles, or 0
+		bool         funcdef; // non-reference funcdef handles use their own AddRef
+	};
+
 	void *Argument(asUINT arg) const { return m_arguments + m_argOffsets[arg]; }
 	void *ReturnReference() const { return *reinterpret_cast<void* const*>(m_returnValue); }
 
@@ -323,6 +331,7 @@ protected:
 	asQWORD           *m_returnValue; // value register of the bound context
 	void             **m_returnObject; // object register or hidden return pointer in the stack frame
 	std::vector<asUINT> m_argOffsets; // dword offsets of the parameters in the stack frame
+	std::vector<SObjectArgument> m_objectArgs; // ownership action cached for each parameter
 	asUINT             m_limitWords; // words of call states that the native calls may push
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters
 	bool               m_scriptObjectMethod; // SetObject must retain the method's script object
