@@ -251,9 +251,10 @@ protected:
 // faster than through CJITCompiler::Prepare and Execute: what those check and look
 // up at every call is done once when the call is bound. Prepare and Execute have the
 // same effects as the methods of the compiler. Primitive and address arguments may be
-// set with the unchecked methods below, or all arguments with the methods of the
-// context as usual. The call must be used by the thread that bound it, as it keeps the
-// thread's list of active contexts; bind it again to use it from another thread.
+// set and primitive return values read with the unchecked methods below, or all values
+// with the methods of the context as usual. The call must be used by the thread that
+// bound it, as it keeps the thread's list of active contexts; bind it again to use it
+// from another thread.
 // Prepare falls back to the compiler's Prepare unless the context is where the last
 // call of the function left it, e.g. after the context has been used for another
 // function, and Execute falls back to the compiler's Execute unless the context has
@@ -282,6 +283,16 @@ public:
 	void SetArgDouble(asUINT arg, double value)     { *reinterpret_cast<double*>(Argument(arg)) = value; }
 	void SetArgAddress(asUINT arg, void *value)     { *reinterpret_cast<asPWORD*>(Argument(arg)) = asPWORD(value); }
 
+	// These likewise skip the context's state and return type checks. Call them only
+	// after Execute has returned asEXECUTION_FINISHED, with the method that matches the
+	// primitive return type.
+	asBYTE  GetReturnByte() const   { return *reinterpret_cast<asBYTE*>(m_returnValue); }
+	asWORD  GetReturnWord() const   { return *reinterpret_cast<asWORD*>(m_returnValue); }
+	asDWORD GetReturnDWord() const  { return *reinterpret_cast<asDWORD*>(m_returnValue); }
+	asQWORD GetReturnQWord() const  { return *m_returnValue; }
+	float   GetReturnFloat() const  { return *reinterpret_cast<float*>(m_returnValue); }
+	double  GetReturnDouble() const { return *reinterpret_cast<double*>(m_returnValue); }
+
 	asIScriptContext  *GetContext() const  { return m_ctx; }
 	asIScriptFunction *GetFunction() const { return m_func; }
 
@@ -293,6 +304,7 @@ protected:
 	asIScriptFunction *m_func;
 	void              *m_threadData; // asCThreadLocalData of the thread that bound the call
 	asDWORD           *m_arguments;  // stack frame of the successful Prepare
+	asQWORD           *m_returnValue; // value register of the bound context
 	std::vector<asUINT> m_argOffsets; // dword offsets of the parameters in the stack frame
 	asUINT             m_limitWords; // words of call states that the native calls may push
 	bool               m_scriptFunc; // the function is a script function, whose compiled code Execute enters

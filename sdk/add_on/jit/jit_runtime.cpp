@@ -1382,7 +1382,7 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 //------------------------------------------------------------------------
 // Bound calls, see CJITCall
 
-CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_limitWords(0), m_scriptFunc(false)
+CJITCall::CJITCall() : m_compiler(0), m_ctx(0), m_func(0), m_threadData(0), m_arguments(0), m_returnValue(0), m_limitWords(0), m_scriptFunc(false)
 {
 }
 
@@ -1393,6 +1393,7 @@ int CJITCall::Bind(CJITCompiler *compiler, asIScriptContext *ctx, asIScriptFunct
 	m_func       = func;
 	m_threadData = asCThreadManager::GetLocalData();
 	m_arguments  = 0;
+	m_returnValue = ctx ? &static_cast<asCContext*>(ctx)->m_regs.valueRegister : 0;
 	m_limitWords = compiler ? NativeCallLimitWords(compiler->GetNativeCallDepth()) : 0;
 	m_scriptFunc = func && func->GetFuncType() == asFUNC_SCRIPT;
 	m_argOffsets.clear();
