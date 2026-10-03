@@ -398,6 +398,7 @@ protected:
 	void FindListFrees();
 	int  FindVarConsumer(asUINT idx) const;
 	int  FindPush(asUINT idx, int top) const;
+	asCObjectType *FindReceiverType(asUINT call) const;
 	bool HoldsReference(int var) const;
 	bool LeavesFrameDirty(asUINT instrIdx) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;

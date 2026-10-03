@@ -25,9 +25,6 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Inline the methods that several classes implement for the type of the handle, which
-//    the bytecode doesn't tell for the methods overridden by derived classes
-//    (jit_bytecode.cpp, FindInlinees).
 //  - Inline calls in the code generated ahead of time, and borrow the references of the
 //    handle arguments there, which is where the JIT compiled code is still much faster.
 //    The key would have to include the bytecode of the callees (jit_bytecode.cpp,

@@ -561,6 +561,35 @@ bool CJITByteCode::CanBeInlined() const
 	return true;
 }
 
+// Returns the static type of the handle whose value is at the top of the stack
+// for a virtual call, when it was pushed directly from a variable. The compiler
+// only reuses a variable slot for the same type, and records the types of named
+// and temporary variables in the function, so this remains valid when their
+// scopes don't. More involved expressions are left to the class profile.
+asCObjectType *CJITByteCode::FindReceiverType(asUINT call) const
+{
+	if( call >= m_instrs.size() || m_instrs[call].op != asBC_CALLINTF || m_stackDepth[call] < AS_PTR_SIZE )
+		return 0;
+
+	int push = FindPush(call, m_stackDepth[call]);
+	if( push < 0 || asUINT(push + 1) != call || m_instrs[push].op != asBC_PshVPtr )
+		return 0;
+	int offset = asBC_SWORDARG0(m_instrs[push].bc);
+
+	if( offset == 0 && m_func->objectType )
+		return m_func->objectType;
+
+	const asCArray<asSScriptVariable*> &vars = m_func->scriptData->variables;
+	for( asUINT n = 0; n < vars.GetLength(); n++ )
+		if( vars[n]->stackOffset == offset && vars[n]->type.IsObjectHandle() )
+			return CastToObjectType(vars[n]->type.GetTypeInfo());
+
+	int param = FindParam(offset);
+	if( param >= 0 && m_func->parameterTypes[param].IsObjectHandle() )
+		return CastToObjectType(m_func->parameterTypes[param].GetTypeInfo());
+	return 0;
+}
+
 // Returns the implementation of a virtual or interface method in a class, like
 // asCContext::CallInterfaceMethod, or null if the class doesn't implement it
 static asCScriptFunction *GetImplementation(asCObjectType *cls, asCScriptFunction *method)
@@ -578,22 +607,26 @@ static asCScriptFunction *GetImplementation(asCObjectType *cls, asCScriptFunctio
 	return index < cls->virtualFunctionTable.GetLength() ? cls->virtualFunctionTable[index] : 0;
 }
 
-// Returns true if objects of the class can call the virtual or interface method
-static bool CanCall(asCObjectType *cls, asCScriptFunction *method)
+// Returns true if objects of the class can call the virtual or interface method,
+// and can be held by the statically known receiver type if there is one
+static bool CanCall(asCObjectType *cls, asCScriptFunction *method, asCObjectType *receiverType)
 {
 	if( !(cls->flags & asOBJ_SCRIPT_OBJECT) || (cls->flags & asOBJ_ABSTRACT) || cls->IsInterface() )
 		return false;
-	return method->funcType == asFUNC_INTERFACE ? cls->Implements(method->objectType) : cls->DerivesFrom(method->objectType);
+	if( method->funcType == asFUNC_INTERFACE ? !cls->Implements(method->objectType) : !cls->DerivesFrom(method->objectType) )
+		return false;
+	return receiverType == 0 || (receiverType->IsInterface() ? cls->Implements(receiverType) : cls->DerivesFrom(receiverType));
 }
 
 // Returns the implementation of a virtual or interface method in the classes of the
-// module of the caller that objects calling it can be of, or null if they implement
-// it differently. If only one class can, it is returned in objType, and the class of
-// the object is checked. Otherwise the method must be virtual, whose implementation
-// is checked in the table of the class of the object. The classes of other modules
-// may derive from the shared classes and implement the shared interfaces, so the
-// object must still be checked
-static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *&objType)
+// module of the caller that objects calling it can be of, narrowed to the static
+// receiver type when known, or null if they implement it differently. If only one
+// class can, it is returned in objType, and the class of the object is checked.
+// Otherwise the method must be virtual, whose implementation is checked in the
+// table of the class of the object. The classes of other modules may derive from
+// the shared classes and implement the shared interfaces, so the object must still
+// be checked
+static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *receiverType, asCObjectType *&objType)
 {
 	objType = 0;
 	if( caller->module == 0 || method->objectType == 0 || method->vfTableIdx < 0 )
@@ -605,7 +638,7 @@ static asCScriptFunction *FindImplementation(asCScriptFunction *caller, asCScrip
 	for( asUINT n = 0; n < classes.GetLength(); n++ )
 	{
 		asCObjectType *cls = classes[n];
-		if( !CanCall(cls, method) )
+		if( !CanCall(cls, method, receiverType) )
 			continue;
 		asCScriptFunction *impl = GetImplementation(cls, method);
 		if( impl == 0 || (count > 0 && (impl != found || method->funcType == asFUNC_INTERFACE)) )
@@ -632,10 +665,10 @@ static bool IsModuleClass(asCScriptFunction *func, asCObjectType *seen)
 // Returns the implementation of a virtual or interface method in the class that the
 // profile has seen at the call, which is returned in objType, if it is a class of the
 // module of the caller that objects calling the method can be of
-static asCScriptFunction *FindSeenImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *seen, asCObjectType *&objType)
+static asCScriptFunction *FindSeenImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *receiverType, asCObjectType *seen, asCObjectType *&objType)
 {
 	objType = 0;
-	if( method->objectType == 0 || method->vfTableIdx < 0 || !IsModuleClass(caller, seen) || !CanCall(seen, method) )
+	if( method->objectType == 0 || method->vfTableIdx < 0 || !IsModuleClass(caller, seen) || !CanCall(seen, method, receiverType) )
 		return 0;
 	objType = seen;
 	return GetImplementation(seen, method);
@@ -644,7 +677,7 @@ static asCScriptFunction *FindSeenImplementation(asCScriptFunction *caller, asCS
 // Returns true if a class of the module of the caller that objects calling a virtual
 // or interface method can be of implements it with a script function small enough
 // to be inlined, so that the classes that the call sees are worth noting
-static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction *method, asUINT maxSize)
+static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction *method, asCObjectType *receiverType, asUINT maxSize)
 {
 	if( caller->module == 0 || method->objectType == 0 || method->vfTableIdx < 0 )
 		return false;
@@ -652,7 +685,7 @@ static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction 
 	const asCArray<asCObjectType*> &classes = caller->module->m_classTypes;
 	for( asUINT n = 0; n < classes.GetLength(); n++ )
 	{
-		asCScriptFunction *impl = CanCall(classes[n], method) ? GetImplementation(classes[n], method) : 0;
+		asCScriptFunction *impl = CanCall(classes[n], method, receiverType) ? GetImplementation(classes[n], method) : 0;
 		if( impl && impl->funcType == asFUNC_SCRIPT && impl->scriptData && impl->scriptData->byteCode.GetLength() <= maxSize )
 			return true;
 	}
@@ -743,12 +776,13 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 // its code in turn, down to the levels left. The code inlined into a function is
 // limited by the budget, so that the functions calling many don't grow without
 // bounds. Recursion and functions with catch blocks are left to the calls. The
-// virtual and interface methods are inlined if the classes that can implement them
-// all have the same implementation, which the object is checked for, see
-// FindImplementation. Otherwise the calls note the classes that they see in the
-// profile, and the methods are inlined for the classes that a call has seen when the
-// function is compiled again with it, each checked for, where the call notes the
-// others then. The classes that share an implementation share its code
+// virtual and interface methods are inlined if the classes that can implement them,
+// narrowed to the static type of a directly pushed handle when known, all have the
+// same implementation, which the object is checked for, see FindImplementation.
+// Otherwise the calls note the classes that they see in the profile, and the methods
+// are inlined for the classes that a call has seen when the function is compiled
+// again with it, each checked for, where the call notes the others then. The classes
+// that share an implementation share its code
 void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
@@ -775,8 +809,9 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 			asCScriptFunction *method = func;
 			if( method->funcType == asFUNC_VIRTUAL || method->funcType == asFUNC_INTERFACE )
 			{
+				asCObjectType *receiverType = FindReceiverType(n);
 				asCObjectType *objType = 0;
-				asCScriptFunction *impl = FindImplementation(m_func, method, objType);
+				asCScriptFunction *impl = FindImplementation(m_func, method, receiverType, objType);
 				if( impl )
 					impls.push_back(std::make_pair(impl, objType));
 				else
@@ -784,13 +819,13 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 					const SJITSeenClasses *seen = inlining.classes ? inlining.classes->Find(m_func, n) : 0;
 					for( asUINT c = 0; seen && c < JIT_PROFILE_CLASSES && seen->types[c]; c++ )
 					{
-						impl = FindSeenImplementation(m_func, method, seen->types[c], objType);
+						impl = FindSeenImplementation(m_func, method, receiverType, seen->types[c], objType);
 						if( impl )
 							impls.push_back(std::make_pair(impl, objType));
 					}
 					if( !impls.empty() )
 						profiled = inlining.profile;
-					else if( inlining.profile && HasSmallImplementation(m_func, method, inlining.maxSize) )
+					else if( inlining.profile && HasSmallImplementation(m_func, method, receiverType, inlining.maxSize) )
 						instr.flags |= JIT_INSTR_PROFILE;
 				}
 			}
