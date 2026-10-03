@@ -1037,23 +1037,24 @@ bool CJITCodeGen::EmitCompare(asUINT idx, asUINT &consumed)
 		return true;
 	}
 
-	// 64bit compares on 32bit hosts go through a helper that produces the -1/0/1 result
+	// On 32bit hosts compare the high dwords first, signed or unsigned as requested,
+	// and the low dwords as unsigned when the high ones are equal
 	if( is64 && !Is64Bit() )
 	{
-		Mem tmp = m_uc.new_stack(4, 4);
-		Gp dst = m_uc.new_gp_ptr();
-		Gp pa = m_uc.new_gp_ptr();
-		Gp pb = m_uc.new_gp_ptr();
-		m_uc.lea(dst, tmp);
-		LeaVar(pa, a0);
-		LeaVar(pb, a1);
-		InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-		call->set_arg(0, Imm(int(instr.op)));
-		call->set_arg(1, dst);
-		call->set_arg(2, pa);
-		call->set_arg(3, pb);
+		Gp alo = m_uc.new_gp32();
+		Gp ahi = m_uc.new_gp32();
+		Gp blo = m_uc.new_gp32();
+		Gp bhi = m_uc.new_gp32();
+		Gp loResult = m_uc.new_gp32();
+		Gp hiResult = m_uc.new_gp32();
 		Gp r = m_uc.new_gp32();
-		m_uc.load_u32(r, tmp);
+		m_uc.load_u32(alo, Var(a0));
+		m_uc.load_u32(ahi, Var(a0, 4));
+		m_uc.load_u32(blo, Var(a1));
+		m_uc.load_u32(bhi, Var(a1, 4));
+		EmitCompareResult(loResult, ucmp_lt(alo, blo), ucmp_gt(alo, blo));
+		EmitCompareResult(hiResult, MakeCond(REL_LT, isUnsigned, ahi, bhi), MakeCond(REL_GT, isUnsigned, ahi, bhi));
+		m_uc.select(r, loResult, hiResult, cmp_eq(ahi, bhi));
 		if( fuseJump )
 		{
 			consumed = 2;
