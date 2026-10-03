@@ -237,6 +237,12 @@ bool CJITCodeGen::Generate()
 	m_uc.ret(one);
 
 	m_uc.end_func();
+	for( asUINT n = 0; n < m_jumpTables.size(); n++ )
+	{
+		m_uc.bind(m_jumpTables[n].label);
+		for( asUINT k = 0; k < m_jumpTables[n].targets.size(); k++ )
+			m_uc.embed_label_delta(m_jumpTables[n].targets[k], m_jumpTables[n].label, 4);
+	}
 	if( hasCalls )
 		AssignHomeRegs(liveAcrossCalls);
 	return true;
@@ -2556,19 +2562,22 @@ bool CJITCodeGen::EmitBranch(asUINT idx)
 
 	if( instr.op == asBC_JMPP )
 	{
-		// Switch. The index is compared against the cases with a binary search.
-		// Out of range values return to the VM, which will misbehave the same
-		// way it would have without the JIT
-		//
-		// TODO: runtime optimize: Large switches would be faster with a jump table
-		//                         embedded in the code (embed_label for the entries,
-		//                         and an indirect jump emitted with the arch specific
-		//                         compiler in jit_codegen_arch.cpp). The register
-		//                         allocator must be told about the successors, i.e.
-		//                         the jump needs a JumpAnnotation (new_jump_annotation
-		//                         and add_label) listing the case labels
+		// Switch. Large ones use a jump table, while small ones compare the index
+		// against the cases with a binary search. Out of range values return to the
+		// VM, which will misbehave the same way it would have without the JIT
 		Gp v = Load32(asBC_SWORDARG0(instr.bc));
 		const std::vector<int> &targets = m_code->GetSwitchTargets(idx);
+		if( targets.size() >= 8 )
+		{
+			m_uc.j(BailLabel(idx), ucmp_ge(v, Imm(int(targets.size()))));
+			SJumpTable table;
+			table.label = m_uc.new_label();
+			for( asUINT n = 0; n < targets.size(); n++ )
+				table.targets.push_back(InstrLabel(targets[n]));
+			m_jumpTables.push_back(table);
+			EmitJumpTable(v, table.label, table.targets);
+			return !m_failed;
+		}
 
 		struct SRange
 		{

@@ -72,6 +72,36 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 	cc->mov(dst, isMod ? hi : lo);
 }
 
+// Loads the signed offset of a switch target from the table and jumps to it.
+// The annotation tells the register allocator about the indirect successors
+void CJITCodeGen::EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets)
+{
+	x86::Compiler *cc = m_uc.cc;
+	Gp base = m_uc.new_gp_ptr();
+	Gp target = m_uc.new_gp_ptr();
+	cc->lea(base, x86::ptr(table));
+	if( Is64Bit() )
+		cc->movsxd(target, x86::dword_ptr(base, index.clone_as(base), 2));
+	else
+		cc->mov(target, x86::dword_ptr(base, index.clone_as(base), 2));
+	cc->add(target, base);
+
+	JumpAnnotation *annotation = cc->new_jump_annotation();
+	if( annotation == 0 )
+	{
+		m_failed = true;
+		return;
+	}
+	for( asUINT n = 0; n < targets.size(); n++ )
+		if( !annotation->has_label(targets[n]) )
+			if( annotation->add_label(targets[n]) != Error::kOk )
+			{
+				m_failed = true;
+				return;
+			}
+	cc->jmp(target, annotation);
+}
+
 // The element of an array of pointers, which x86 addresses with the scaled index
 // directly, also with the displacements added to the result
 Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
@@ -321,6 +351,32 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 		cc->mov(dst, q);
 }
 
+void CJITCodeGen::EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets)
+{
+	a64::Compiler *cc = m_uc.cc;
+	Gp base = m_uc.new_gp_ptr();
+	Gp offset = m_uc.new_gp_ptr();
+	Gp target = m_uc.new_gp_ptr();
+	cc->adr(base, table);
+	cc->ldrsw(offset, a64::ptr(base, index, a64::sxtw(2)));
+	cc->add(target, base, offset);
+
+	JumpAnnotation *annotation = cc->new_jump_annotation();
+	if( annotation == 0 )
+	{
+		m_failed = true;
+		return;
+	}
+	for( asUINT n = 0; n < targets.size(); n++ )
+		if( !annotation->has_label(targets[n]) )
+			if( annotation->add_label(targets[n]) != Error::kOk )
+			{
+				m_failed = true;
+				return;
+			}
+	cc->br(target, annotation);
+}
+
 // A scaled index can't be combined with a displacement, so the address is computed
 Mem CJITCodeGen::PtrElement(const Gp &array, const Gp &index)
 {
@@ -380,7 +436,9 @@ InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 InvokeNode *JIT_Invoke(UniCompiler &uc, const void *fn, const FuncSignature &sig)
 {
 	InvokeNode *node = 0;
-	uc.cc->invoke(Out(node), PtrConst(asPWORD(fn)), sig);
+	Gp target = uc.new_gp_ptr();
+	uc.mov(target, Imm(int64_t(asPWORD(fn))));
+	uc.cc->invoke(Out(node), target, sig);
 	return node;
 }
 
@@ -600,6 +658,11 @@ void CJITCodeGen::SetHomeRegHints(asUINT)
 }
 
 void CJITCodeGen::EmitSignedDiv(const Gp &, const Gp &, const Gp &, bool)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitJumpTable(const Gp &, const Label &, const std::vector<Label> &)
 {
 	m_failed = true;
 }

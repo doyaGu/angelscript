@@ -118,6 +118,14 @@ protected:
 		bool   borrowed;     // and some of them have borrowed parameters
 	};
 
+	// A table of signed 32bit offsets from the table to switch targets. The data
+	// is emitted after the function so it can't be executed by fallthrough
+	struct SJumpTable
+	{
+		Label              label;
+		std::vector<Label> targets;
+	};
+
 	// A registered behaviour that takes nothing but the object, e.g. AddRef or
 	// Release, called directly with its native calling convention
 	struct SDirectBehaviour
@@ -205,6 +213,7 @@ protected:
 	int  RegsBias() const;
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
+	void EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets);
 	Mem  PtrElement(const Gp &array, const Gp &index);
 	Mem  Addr(const Gp &base, int32_t disp);
 	void Lea(const Gp &dst, const Mem &src);
@@ -356,6 +365,7 @@ protected:
 	std::vector<Label>         m_labels;       // per instruction, valid for block starts
 	std::vector<Label>         m_entryLabels;  // per entry
 	std::vector<SBail>         m_bails;        // bail stubs to emit
+	std::vector<SJumpTable>    m_jumpTables;   // switch tables to emit after the function
 	std::vector<std::pair<asmjit::BaseNode*, asmjit::BaseNode*> > m_cold;  // first and last nodes of the cold ranges
 	Label                      m_bailCommon;
 	Label                      m_bailMaterialized; // the tail of the bail sites in materialized frames

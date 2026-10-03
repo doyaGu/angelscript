@@ -48,7 +48,6 @@
 //  - Register cache for pointer variables and for more than 32 variables (jit_bytecode.cpp, AnalyseSlots),
 //    and local variables for the variables in the code generated ahead of time on big endian
 //    hosts (jit_aot.cpp, JIT_AOT_MAX_LOCALS).
-//  - Jump tables for switch statements instead of the binary search (jit_codegen.cpp, EmitBranch).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit integer
 //    operations instead of calling JIT_I64Op.
 //  - Set the arguments and read the return value of a CJITCall without the checks of
