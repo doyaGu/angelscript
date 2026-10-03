@@ -749,6 +749,16 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 			return size;
 		}
 	}
+#elif defined(AS_X86)
+	// The 32bit x86 backends copy POD aggregates to consecutive dword stack
+	// slots. Keep the direct-call path bounded to small values; larger ones are
+	// uncommon and would consume too many arguments in the generated call.
+	if( dt.GetTypeInfo()->flags & asOBJ_POD )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		if( size >= 1 && size <= 16 )
+			return size;
+	}
 #endif
 	return -1;
 }

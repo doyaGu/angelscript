@@ -1756,8 +1756,35 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				gpArgs[n] = m_uc.new_gp32();
 				gpArgsHi[n] = m_uc.new_gp32();
-				m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
-				m_uc.load_u32(gpArgsHi[n], Stack(args[n].stackOff + 1));
+				if( args[n].valueSize )
+				{
+					valueObjs[n] = m_uc.new_gp_ptr();
+					m_uc.load(valueObjs[n], Stack(args[n].stackOff));
+					m_uc.load_u32(gpArgs[n], Addr(valueObjs[n], args[n].valueOffset));
+					m_uc.mov(gpArgsHi[n], Imm(0));
+					int remaining = args[n].valueSize - 4, partOffset = 4;
+					while( remaining )
+					{
+						int partSize = remaining >= 4 ? 4 : remaining >= 2 ? 2 : 1;
+						Gp part = partOffset == 4 ? gpArgsHi[n] : m_uc.new_gp32();
+						Mem source = Addr(valueObjs[n], args[n].valueOffset + partOffset);
+						if( partSize == 4 ) m_uc.load_u32(part, source);
+						else if( partSize == 2 ) m_uc.load_u16(part, source);
+						else m_uc.load_u8(part, source);
+						if( partOffset != 4 )
+						{
+							m_uc.shl(part, part, Imm((partOffset - 4) * 8));
+							m_uc.or_(gpArgsHi[n], gpArgsHi[n], part);
+						}
+						partOffset += partSize;
+						remaining -= partSize;
+					}
+				}
+				else
+				{
+					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
+					m_uc.load_u32(gpArgsHi[n], Stack(args[n].stackOff + 1));
+				}
 			}
 			break;
 		case ARG_F32:
