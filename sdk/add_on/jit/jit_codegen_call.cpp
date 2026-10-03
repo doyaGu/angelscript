@@ -1455,7 +1455,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
-	struct SArg { int kind; int stackOff; int valueSize; TypeId type; bool autoHandle; SDirectBehaviour release; };
+	struct SArg { int kind; int stackOff; int valueSize; TypeId type; bool valueFloat; bool autoHandle; SDirectBehaviour release; };
 	std::vector<SArg> args;
 	bool hasStackObj = thisFromStack || objFirst || objLast;
 	bool hasThis = thisFromStack || auxiliaryThis;
@@ -1489,12 +1489,20 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
 		else if( pt.IsObject() )
 		{
-			arg.valueSize = JIT_GetInlineValueArgSize(descr, n);
+			arg.valueSize = JIT_GetInlineValueArgSize(descr, n, &arg.valueFloat);
 			if( arg.valueSize > 0 )
 			{
-				arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
-				arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
-				           arg.valueSize == 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+				if( arg.valueFloat )
+				{
+					arg.kind = arg.valueSize == 4 ? ARG_F32 : ARG_F64;
+					arg.type = arg.valueSize == 4 ? TypeId::kFloat32 : TypeId::kFloat64;
+				}
+				else
+				{
+					arg.kind = arg.valueSize <= 4 ? ARG_I32 : ARG_I64;
+					arg.type = arg.valueSize == 1 ? TypeId::kUInt8 : arg.valueSize == 2 ? TypeId::kUInt16 :
+					           arg.valueSize == 4 ? TypeId::kUInt32 : TypeId::kUInt64;
+				}
 			}
 			else
 			{
@@ -1655,11 +1663,25 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			break;
 		case ARG_F32:
 			vecArgs[n] = m_uc.new_vec128_f32x1();
-			m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));
+			if( args[n].valueSize )
+			{
+				valueObjs[n] = m_uc.new_gp_ptr();
+				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
+				m_uc.v_loadu32_f32(vecArgs[n], mem_ptr(valueObjs[n]));
+			}
+			else
+				m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));
 			break;
 		case ARG_F64:
 			vecArgs[n] = m_uc.new_vec128_f64x1();
-			m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
+			if( args[n].valueSize )
+			{
+				valueObjs[n] = m_uc.new_gp_ptr();
+				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
+				m_uc.v_loadu64_f64(vecArgs[n], mem_ptr(valueObjs[n]));
+			}
+			else
+				m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
 			break;
 		}
 	}

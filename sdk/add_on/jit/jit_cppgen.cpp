@@ -162,11 +162,13 @@ const char *CJITCppGen::GetABI()
 
 static bool IsInlineValueArg(int kind)
 {
-	return kind >= SJITSystemCall::VALUE_OBJ1 && kind <= SJITSystemCall::VALUE_OBJ8;
+	return kind >= SJITSystemCall::VALUE_OBJ1 && kind <= SJITSystemCall::VALUE_OBJF8;
 }
 
-static int InlineValueArgKind(int size)
+static int InlineValueArgKind(int size, bool floating)
 {
+	if( floating )
+		return size == 4 ? SJITSystemCall::VALUE_OBJF4 : SJITSystemCall::VALUE_OBJF8;
 	switch( size )
 	{
 	case 1: return SJITSystemCall::VALUE_OBJ1;
@@ -367,10 +369,11 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { call.args.push_back(SJITSystemCall::VALUE_PTR); size += AS_PTR_SIZE; intArgs++; }
 		else if( pt.IsObject() )
 		{
-			int valueSize = JIT_GetInlineValueArgSize(descr, n);
-			call.args.push_back(valueSize > 0 ? InlineValueArgKind(valueSize) : SJITSystemCall::VALUE_PTR);
+			bool valueFloat;
+			int valueSize = JIT_GetInlineValueArgSize(descr, n, &valueFloat);
+			call.args.push_back(valueSize > 0 ? InlineValueArgKind(valueSize, valueFloat) : SJITSystemCall::VALUE_PTR);
 			size += AS_PTR_SIZE;
-			intArgs++;
+			if( valueFloat ) floatArgs++; else intArgs++;
 		}
 		else if( pt.IsFloatType() )               { call.args.push_back(SJITSystemCall::VALUE_F32); size += 1; floatArgs++; }
 		else if( pt.IsDoubleType() )              { call.args.push_back(SJITSystemCall::VALUE_F64); size += 2; floatArgs++; }
@@ -1045,9 +1048,9 @@ void CJITCppGen::EmitIndexer(asUINT idx)
 // would, and the variables are loaded again only after it, like the JIT does
 void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	asUINT pos = m_pos;
 	bool obj = call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack;
 	int retOff = obj ? AS_PTR_SIZE : 0;
@@ -1179,9 +1182,9 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 // is pushed. The destination is popped and filled afterwards like asBC_ALLOC does
 void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD", "float", "double" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64", "f32", "f64" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	const asUINT pos = m_pos;
 	const int P = AS_PTR_SIZE;
 	int off = P;

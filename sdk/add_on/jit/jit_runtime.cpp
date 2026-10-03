@@ -706,8 +706,10 @@ static bool IsIndirectValueArg(asCScriptFunction *func, asUINT param) noexcept
 	return false;
 }
 
-int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param) noexcept
+int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *floating) noexcept
 {
+	if( floating )
+		*floating = false;
 	if( func == 0 || param >= func->parameterTypes.GetLength() )
 		return -1;
 	const asCDataType &dt = func->parameterTypes[param];
@@ -736,6 +738,16 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param) noexcept
 		int size = dt.GetSizeInMemoryBytes();
 		if( size == 1 || size == 2 || size == 4 || size == 8 )
 			return size;
+	}
+	if( (flags & asOBJ_POD) && (flags & (asOBJ_APP_CLASS_ALLFLOATS | asOBJ_APP_FLOAT)) )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		if( size == 4 || size == 8 )
+		{
+			if( floating )
+				*floating = true;
+			return size;
+		}
 	}
 #endif
 	return -1;
