@@ -1076,68 +1076,24 @@ double JIT_uTOd(asUINT v) noexcept
 	return double(v);
 }
 
-int JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept
+asINT64 JIT_DIVi64(asINT64 a, asINT64 b) noexcept
 {
-	// The shift count and the sources of the conversions from 32bit types are
-	// only 32bit wide, so they must not be read as 64bit values
-	switch( op )
-	{
-	case asBC_BSLL64:  *(asQWORD*)dst = *(const asQWORD*)a << *(const asDWORD*)b; return 0;
-	case asBC_BSRL64:  *(asQWORD*)dst = *(const asQWORD*)a >> *(const asDWORD*)b; return 0;
-	case asBC_BSRA64:  *(asINT64*)dst = *(const asINT64*)a >> *(const asDWORD*)b; return 0;
-	case asBC_uTOi64:  *(asINT64*)dst = asINT64(*(const asUINT*)a); return 0;
-	case asBC_iTOi64:  *(asINT64*)dst = asINT64(*(const int*)a); return 0;
-	case asBC_fTOi64:  *(asINT64*)dst = JIT_fTOi64(*(const float*)a); return 0;
-	case asBC_fTOu64:  *(asQWORD*)dst = JIT_fTOu64(*(const float*)a); return 0;
-	default: break;
-	}
+	return a / b;
+}
 
-	asINT64 ia = a ? *(const asINT64*)a : 0;
-	asINT64 ib = b ? *(const asINT64*)b : 0;
-	asQWORD ua = asQWORD(ia), ub = asQWORD(ib);
+asINT64 JIT_MODi64(asINT64 a, asINT64 b) noexcept
+{
+	return a % b;
+}
 
-	switch( op )
-	{
-	case asBC_NEGi64:  *(asINT64*)dst = -ia; break;
-	case asBC_BNOT64:  *(asQWORD*)dst = ~ua; break;
-	case asBC_ADDi64:  *(asQWORD*)dst = ua + ub; break;
-	case asBC_SUBi64:  *(asQWORD*)dst = ua - ub; break;
-	case asBC_MULi64:  *(asQWORD*)dst = ua * ub; break;
-	case asBC_BAND64:  *(asQWORD*)dst = ua & ub; break;
-	case asBC_BOR64:   *(asQWORD*)dst = ua | ub; break;
-	case asBC_BXOR64:  *(asQWORD*)dst = ua ^ ub; break;
-	case asBC_DIVi64:
-		if( ib == 0 || (ib == -1 && ia == (asINT64(1)<<63)) ) return 1;
-		*(asINT64*)dst = ia / ib;
-		break;
-	case asBC_MODi64:
-		if( ib == 0 || (ib == -1 && ia == (asINT64(1)<<63)) ) return 1;
-		*(asINT64*)dst = ia % ib;
-		break;
-	case asBC_DIVu64:
-		if( ub == 0 ) return 1;
-		*(asQWORD*)dst = ua / ub;
-		break;
-	case asBC_MODu64:
-		if( ub == 0 ) return 1;
-		*(asQWORD*)dst = ua % ub;
-		break;
-	case asBC_CMPi64:  *(int*)dst = ia == ib ? 0 : (ia < ib ? -1 : 1); break;
-	case asBC_CMPu64:  *(int*)dst = ua == ub ? 0 : (ua < ub ? -1 : 1); break;
-	case asBC_INCi64:  ++*(asQWORD*)dst; break;
-	case asBC_DECi64:  --*(asQWORD*)dst; break;
-	case asBC_i64TOi:  *(int*)dst = int(ia); break;
-	case asBC_dTOi64:  *(asINT64*)dst = JIT_dTOi64(*(const double*)a); break;
-	case asBC_dTOu64:  *(asQWORD*)dst = JIT_dTOu64(*(const double*)a); break;
-	case asBC_i64TOf:  *(float*)dst = JIT_i64TOf(ia); break;
-	case asBC_u64TOf:  *(float*)dst = JIT_u64TOf(ua); break;
-	case asBC_i64TOd:  *(double*)dst = JIT_i64TOd(ia); break;
-	case asBC_u64TOd:  *(double*)dst = JIT_u64TOd(ua); break;
-	default:
-		return 1;
-	}
+asQWORD JIT_DIVu64(asQWORD a, asQWORD b) noexcept
+{
+	return a / b;
+}
 
-	return 0;
+asQWORD JIT_MODu64(asQWORD a, asQWORD b) noexcept
+{
+	return a % b;
 }
 
 //------------------------------------------------------------------------

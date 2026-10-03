@@ -506,6 +506,52 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			m_uc.store_u32(Var(a0), lo);
 			m_uc.store_u32(Var(a0, 4), hi);
 		}
+		else if( !Is64Bit() && (instr.op == asBC_DIVi64 || instr.op == asBC_MODi64 || instr.op == asBC_DIVu64 || instr.op == asBC_MODu64) )
+		{
+			Gp alo = m_uc.new_gp32();
+			Gp ahi = m_uc.new_gp32();
+			Gp blo = m_uc.new_gp32();
+			Gp bhi = m_uc.new_gp32();
+			Gp nonzero = m_uc.new_gp32();
+			m_uc.load_u32(alo, Var(a1));
+			m_uc.load_u32(ahi, Var(a1, 4));
+			m_uc.load_u32(blo, Var(a2));
+			m_uc.load_u32(bhi, Var(a2, 4));
+
+			Label bail = BailLabel(idx);
+			m_uc.or_(nonzero, blo, bhi);
+			m_uc.j(bail, test_z(nonzero));
+
+			bool isSigned = instr.op == asBC_DIVi64 || instr.op == asBC_MODi64;
+			if( isSigned )
+			{
+				// Signed division also overflows for INT64_MIN / -1. Let the VM
+				// re-execute the instruction so it raises the script exception.
+				Label valid = m_uc.new_label();
+				m_uc.j(valid, cmp_ne(blo, Imm(-1)));
+				m_uc.j(valid, cmp_ne(bhi, Imm(-1)));
+				m_uc.j(valid, test_nz(alo));
+				m_uc.j(bail, cmp_eq(ahi, Imm(int(0x80000000))));
+				m_uc.bind(valid);
+			}
+
+			const void *helper = instr.op == asBC_DIVi64 ? (const void*)JIT_DIVi64 :
+			                     instr.op == asBC_MODi64 ? (const void*)JIT_MODi64 :
+			                     instr.op == asBC_DIVu64 ? (const void*)JIT_DIVu64 : (const void*)JIT_MODu64;
+			InvokeNode *call = Invoke(helper, isSigned ? FuncSignature::build<asINT64, asINT64, asINT64>() :
+			                                           FuncSignature::build<asQWORD, asQWORD, asQWORD>());
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			call->set_arg(0, 0, alo);
+			call->set_arg(0, 1, ahi);
+			call->set_arg(1, 0, blo);
+			call->set_arg(1, 1, bhi);
+			call->set_ret(0, lo);
+			call->set_ret(1, hi);
+			m_uc.store_u32(Var(a0), lo);
+			m_uc.store_u32(Var(a0, 4), hi);
+			ReloadCachedSlot(a0);
+		}
 		else if( instr.op == asBC_POWi64 || instr.op == asBC_POWu64 )
 		{
 			Gp dst = m_uc.new_gp_ptr();
@@ -526,27 +572,6 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
 			EmitDematerialize();
-		}
-		else
-		{
-			// 32bit host: the operation is done by a helper on the memory slots
-			Gp dst = m_uc.new_gp_ptr();
-			Gp pa = m_uc.new_gp_ptr();
-			Gp pb = m_uc.new_gp_ptr();
-			LeaVar(dst, a0);
-			LeaVar(pa, a1);
-			LeaVar(pb, a2);
-			StoreCachedSlot(a1);
-			StoreCachedSlot(a2);
-			InvokeNode *call = Invoke((const void*)JIT_I64Op, FuncSignature::build<int, int, void*, const void*, const void*>());
-			Gp r = m_uc.new_gp32();
-			call->set_arg(0, Imm(int(instr.op)));
-			call->set_arg(1, dst);
-			call->set_arg(2, pa);
-			call->set_arg(3, pb);
-			call->set_ret(0, r);
-			ReloadCachedSlot(a0);
-			m_uc.j(BailLabel(idx), test_nz(r));
 		}
 		break;
 

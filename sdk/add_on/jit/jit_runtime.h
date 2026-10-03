@@ -288,10 +288,12 @@ asUINT  JIT_dTOu(double d) noexcept;
 float   JIT_uTOf(asUINT v) noexcept;
 double  JIT_uTOd(asUINT v) noexcept;
 
-// 64bit integer operations for hosts without 64bit registers. The operands are
-// passed by address. The op is the bytecode instruction. Returns non-zero when
-// the VM must re-execute the instruction to raise an exception
-int    JIT_I64Op(int op, void *dst, const void *a, const void *b) noexcept;
+// 64bit integer division helpers for hosts without 64bit registers. The generated
+// code verifies that the divisor is valid before calling them
+asINT64 JIT_DIVi64(asINT64 a, asINT64 b) noexcept;
+asINT64 JIT_MODi64(asINT64 a, asINT64 b) noexcept;
+asQWORD JIT_DIVu64(asQWORD a, asQWORD b) noexcept;
+asQWORD JIT_MODu64(asQWORD a, asQWORD b) noexcept;
 
 // CJITCompiler::Prepare and Execute, which aren't called from the generated code.
 // JIT_Execute only enters the functions compiled by the compiler, which the engine
