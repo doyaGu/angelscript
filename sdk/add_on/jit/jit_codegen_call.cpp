@@ -1228,17 +1228,17 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // the call.
 // Value types returned in memory are left out where the address is neither passed
 // like an argument nor in a register of its own (see JIT_HIDDEN_RETURN_POINTER).
-// Everything else, e.g. small value objects passed inline or split between native
-// registers, returns false and is called through the engine. Complex and large value
-// objects passed indirectly are already pointers here and can be called directly.
+// Everything else, e.g. value objects with an unsupported native register layout,
+// returns false and is called through the engine. Complex and large value objects
+// passed indirectly are already pointers here and can be called directly.
 //
 // C++ exceptions thrown by the function pass through the generated code and are
 // caught by JIT_GuardedEntry. Where the code has no unwind information for that
 // (see CJITUnwindInfo) this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 //
-// TODO: runtime optimize: Small, trivial objects passed by value could be supported by
-//                         setting up the argument copies the way CallSystemFunction and
-//                         as_callfunc_*.cpp do for each ABI.
+// TODO: runtime optimize: Small, trivial objects passed by value could be supported on
+//                         the other ABIs by setting up the argument copies the way
+//                         CallSystemFunction and as_callfunc_*.cpp do.
 //                         asCALL_GENERIC could be called with an asCGeneric set up inline.
 //                         Each should be measured against CallSystemFunction before adding
 //                         the code.

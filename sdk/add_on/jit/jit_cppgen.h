@@ -46,7 +46,11 @@ const char JIT_CPPGEN_REGION_END = '\x02';
 struct SJITSystemCall
 {
 	enum { OBJ_NONE, OBJ_FIRST, OBJ_LAST };
-	enum { VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE };
+	enum
+	{
+		VALUE_VOID, VALUE_I32, VALUE_I64, VALUE_F32, VALUE_F64, VALUE_PTR, VALUE_HANDLE,
+		VALUE_OBJ1, VALUE_OBJ2, VALUE_OBJ4, VALUE_OBJ8
+	};
 
 	int              obj;         // where the script object is passed as an argument
 	bool             thisFromStack; // it is instead the native this pointer
@@ -61,7 +65,8 @@ struct SJITSystemCall
 	int              ret;         // the kind of the value returned, VALUE_VOID for retInMemory
 	int              retParts;    // or of the members of the struct returned, if not 0,
 	int              retBytes;    // whose first bytes are the object
-	std::vector<int> args;        // the kinds of the arguments, not VALUE_VOID or VALUE_HANDLE
+	std::vector<int> args;        // the kinds of the arguments, not VALUE_VOID or VALUE_HANDLE;
+	                              // VALUE_OBJ* is loaded through the temporary object pointer
 	int              popSize;     // dwords popped off the stack
 };
 

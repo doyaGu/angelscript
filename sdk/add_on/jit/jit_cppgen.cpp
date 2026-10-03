@@ -160,6 +160,23 @@ const char *CJITCppGen::GetABI()
 #endif
 }
 
+static bool IsInlineValueArg(int kind)
+{
+	return kind >= SJITSystemCall::VALUE_OBJ1 && kind <= SJITSystemCall::VALUE_OBJ8;
+}
+
+static int InlineValueArgKind(int size)
+{
+	switch( size )
+	{
+	case 1: return SJITSystemCall::VALUE_OBJ1;
+	case 2: return SJITSystemCall::VALUE_OBJ2;
+	case 4: return SJITSystemCall::VALUE_OBJ4;
+	case 8: return SJITSystemCall::VALUE_OBJ8;
+	default: return SJITSystemCall::VALUE_VOID;
+	}
+}
+
 // With the same restrictions as CJITCodeGen::EmitDirectSystemCall, and those of the
 // ABI, see JIT_AOT_ABI. The arguments are passed as the types of their size, like
 // the engine does, and so are the values returned
@@ -248,7 +265,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 		return false;
 	if( sysFunc->auxiliary && !call.auxiliaryThis )
 		return false;
-	int cleanupCount = JIT_GetSystemCallCleanupCount(descr, false);
+	int cleanupCount = JIT_GetSystemCallCleanupCount(descr, true);
 	if( cleanupCount < 0 )
 		return false;
 	call.cleanArgs = cleanupCount != 0;
@@ -347,7 +364,14 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 			size += AS_PTR_SIZE + 1;
 			intArgs += 2;
 		}
-		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsObject() || pt.IsFuncdef() ) { call.args.push_back(SJITSystemCall::VALUE_PTR); size += AS_PTR_SIZE; intArgs++; }
+		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { call.args.push_back(SJITSystemCall::VALUE_PTR); size += AS_PTR_SIZE; intArgs++; }
+		else if( pt.IsObject() )
+		{
+			int valueSize = JIT_GetInlineValueArgSize(descr, n);
+			call.args.push_back(valueSize > 0 ? InlineValueArgKind(valueSize) : SJITSystemCall::VALUE_PTR);
+			size += AS_PTR_SIZE;
+			intArgs++;
+		}
 		else if( pt.IsFloatType() )               { call.args.push_back(SJITSystemCall::VALUE_F32); size += 1; floatArgs++; }
 		else if( pt.IsDoubleType() )              { call.args.push_back(SJITSystemCall::VALUE_F64); size += 2; floatArgs++; }
 		else if( pt.GetSizeOnStackDWords() == 2 ) { call.args.push_back(SJITSystemCall::VALUE_I64); size += 2; intArgs++; }
@@ -1021,15 +1045,16 @@ void CJITCppGen::EmitIndexer(asUINT idx)
 // would, and the variables are loaded again only after it, like the JIT does
 void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	asUINT pos = m_pos;
 	bool obj = call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack;
 	int retOff = obj ? AS_PTR_SIZE : 0;
 	int off = retOff + (call.retOnStack ? AS_PTR_SIZE : 0);
 
 	std::vector<std::string> params, args;
+	std::vector<int> valueOff(call.args.size(), -1);
 	if( call.retInMemory && !call.retAfterThis ) { params.push_back("void*"); args.push_back("r_"); }
 	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back(call.adjustThis ? "t_" : "o_"); }
 	if( call.auxiliaryThis )                    { params.push_back("void*"); args.push_back("h_"); }
@@ -1039,7 +1064,13 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	{
 		int kind = call.args[n];
 		params.push_back(types[kind]);
-		args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
+		if( IsInlineValueArg(kind) )
+		{
+			args.push_back(Format("v_%u", n));
+			valueOff[n] = off;
+		}
+		else
+			args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
 		off += sizes[kind];
 	}
 	if( call.obj == SJITSystemCall::OBJ_LAST )  { params.push_back("void*"); args.push_back("o_"); }
@@ -1072,6 +1103,16 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 	}
 	if( call.retOnStack )
 		Emit("\tvoid *r_ = (void*)AOT_S(pw, %d);", retOff);
+	for( asUINT n = 0; n < call.args.size(); n++ )
+		if( valueOff[n] >= 0 )
+		{
+			int kind = call.args[n];
+			Emit("\tvoid *p_%u = (void*)AOT_S(pw, %d);", n, valueOff[n]);
+			Emit("\t%s v_%u = *(aot_%s*)p_%u;", types[kind], n, stack[kind], n);
+		}
+	for( asUINT n = 0; n < call.args.size(); n++ )
+		if( valueOff[n] >= 0 )
+			Emit("\tJIT_FreeValueArg(regs, p_%u);", n);
 	EmitOwnBorrowed("\t");
 	Put(m_sync.empty() ? "" : "\t" + m_sync);
 	if( m_frame )
@@ -1138,14 +1179,15 @@ void CJITCppGen::EmitSystemCall(asUINT idx, const SJITSystemCall &call)
 // is pushed. The destination is popped and filled afterwards like asBC_ALLOC does
 void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 {
-	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*" };
-	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw" };
-	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE };
+	static const char *const types[] = { "void", "asDWORD", "asQWORD", "float", "double", "void*", "void*", "asBYTE", "asWORD", "asDWORD", "asQWORD" };
+	static const char *const stack[] = { "", "u32", "u64", "f32", "f64", "pw", "pw", "u8", "u16", "u32", "u64" };
+	static const int sizes[] = { 0, 1, 2, 1, 2, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE, AS_PTR_SIZE };
 	const asUINT pos = m_pos;
 	const int P = AS_PTR_SIZE;
 	int off = P;
 
 	std::vector<std::string> params, args;
+	std::vector<int> valueOff(call.args.size(), -1);
 	if( call.thisFromStack )                    { params.push_back("void*"); args.push_back(call.adjustThis ? "t_" : "m_"); }
 	if( call.auxiliaryThis )                    { params.push_back("void*"); args.push_back("h_"); }
 	if( call.obj == SJITSystemCall::OBJ_FIRST ) { params.push_back("void*"); args.push_back("m_"); }
@@ -1153,7 +1195,13 @@ void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 	{
 		int kind = call.args[n];
 		params.push_back(types[kind]);
-		args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
+		if( IsInlineValueArg(kind) )
+		{
+			args.push_back(Format("v_%u", n));
+			valueOff[n] = off;
+		}
+		else
+			args.push_back(Format(kind == SJITSystemCall::VALUE_PTR ? "(void*)AOT_S(%s, %d)" : "AOT_S(%s, %d)", stack[kind], off));
 		off += sizes[kind];
 	}
 	if( call.obj == SJITSystemCall::OBJ_LAST ) { params.push_back("void*"); args.push_back("m_"); }
@@ -1180,6 +1228,16 @@ void CJITCppGen::EmitConstructor(asUINT idx, const SJITSystemCall &call)
 		Emit("\t\t\tt_ = (void*)((char*)t_ + d_->sysFuncIntf->baseOffset);");
 #endif
 	}
+	for( asUINT n = 0; n < call.args.size(); n++ )
+		if( valueOff[n] >= 0 )
+		{
+			int kind = call.args[n];
+			Emit("\t\t\tvoid *p_%u = (void*)AOT_S(pw, %d);", n, valueOff[n]);
+			Emit("\t\t\t%s v_%u = *(aot_%s*)p_%u;", types[kind], n, stack[kind], n);
+		}
+	for( asUINT n = 0; n < call.args.size(); n++ )
+		if( valueOff[n] >= 0 )
+			Emit("\t\t\tJIT_FreeValueArg(regs, p_%u);", n);
 	Emit("\t\t\tregs->programPointer = bc + %u;", pos);
 	Emit("\t\t\tregs->stackPointer = sp;");
 	Emit("\t\t\tctx->m_callingSystemFunction = d_;");
