@@ -89,7 +89,7 @@ static std::string IntLiteral(int value)
 }
 
 CJITCppGen::CJITCppGen(const CJITByteCode &code, TargetCallback target, void *targetParam) :
-	m_code(code), m_target(target), m_targetParam(targetParam), m_direct(false), m_failed(false), m_pos(0), m_frame(false)
+	m_code(code), m_target(target), m_targetParam(targetParam), m_direct(false), m_failed(false), m_pos(0), m_frame(false), m_suspendChecked(true)
 {
 	// The variables that the analysis keeps in registers, in the order of their bits
 	const std::vector<SJITSlot> &slots = code.GetSlots();
@@ -135,6 +135,19 @@ void CJITCppGen::GetHeapVariables(asCScriptFunction *func, std::vector<int> &off
 bool CJITCppGen::CallsScript(asEBCInstr op)
 {
 	return op == asBC_CALL || op == asBC_CALLINTF || op == asBC_CALLBND || op == asBC_CallPtr || op == asBC_ALLOC;
+}
+
+// True if continuing after the instruction may find the suspend flag set. This
+// mirrors the conservative call detection of CJITCodeGen::EmitBody. Releases may
+// run script destructors, except where the analysis removed the release or proved
+// that it only frees plain memory
+static bool MayRequestSuspend(const SJITInstr &instr)
+{
+	if( instr.flags & (JIT_INSTR_MOVED | JIT_INSTR_FREE_LIST) )
+		return false;
+	if( instr.op == asBC_FREE || (instr.flags & JIT_INSTR_REFCOUNT) )
+		return true;
+	return CJITByteCode::IsSyncPoint(instr.op) && !(instr.flags & (JIT_INSTR_BORROW | JIT_INSTR_INDEXER));
 }
 
 const char *CJITCppGen::GetABI()
@@ -344,6 +357,7 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 	// warnings. The VM doesn't enter the direct entry
 	bool calls = false, systemCalls = false;
 	m_labels.assign(instrs.size(), false);
+	std::vector<char> checkedIn(instrs.size(), 1);
 	for( asUINT n = 0; n < entries.size() && !direct; n++ )
 		m_labels[entries[n]] = true;
 	for( asUINT n = 0; n < instrs.size(); n++ )
@@ -351,12 +365,20 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		if( instrs[n].flags & JIT_INSTR_DEAD )
 			continue;
 		if( instrs[n].target >= 0 )
+		{
 			m_labels[instrs[n].target] = true;
+			if( asUINT(instrs[n].target) <= n )
+				checkedIn[instrs[n].target] = 0;
+		}
 		if( instrs[n].op == asBC_JMPP )
 		{
 			const std::vector<int> &targets = m_code.GetSwitchTargets(n);
 			for( asUINT t = 0; t < targets.size(); t++ )
+			{
 				m_labels[targets[t]] = true;
+				if( asUINT(targets[t]) <= n )
+					checkedIn[targets[t]] = 0;
+			}
 		}
 		if( CallsScript(instrs[n].op) )
 			calls = true;
@@ -366,10 +388,16 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 	}
 
 	EmitEntry(calls);
+	bool fallsIn = true;
+	m_suspendChecked = true; // the entry checks the flag, see EmitEntry
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
 		if( instrs[n].flags & JIT_INSTR_DEAD )
+		{
+			fallsIn = false;
 			continue;
+		}
+		m_suspendChecked = (m_suspendChecked || !fallsIn) && checkedIn[n];
 		if( m_labels[n] )
 			m_out += Format("L_%u:;\n", n);
 
@@ -379,6 +407,22 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 		if( !EmitInstr(n) )
 			return false;
 		Put(Stores(m_code.GetStoresAfter(n)));
+
+		const SJITInstr &instr = instrs[n];
+		if( instr.op == asBC_SUSPEND && !(instr.flags & JIT_INSTR_SKIP) )
+			m_suspendChecked = true;
+		else if( MayRequestSuspend(instr) )
+			m_suspendChecked = false;
+		if( instr.target > int(n) )
+			checkedIn[instr.target] &= char(m_suspendChecked);
+		if( instr.op == asBC_JMPP )
+		{
+			const std::vector<int> &targets = m_code.GetSwitchTargets(n);
+			for( asUINT t = 0; t < targets.size(); t++ )
+				if( asUINT(targets[t]) > n )
+					checkedIn[targets[t]] &= char(m_suspendChecked);
+		}
+		fallsIn = instr.op != asBC_JMP && instr.op != asBC_JMPP && instr.op != asBC_RET;
 	}
 	if( m_failed )
 		return false;
@@ -1326,14 +1370,10 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		break;
 
 	case asBC_SUSPEND:
-		// The debugger may modify the variables in the line callback
-		//
-		// TODO: runtime optimize: Only check where a suspension or line callback may
-		// have been requested since the last check, like the JIT compiled code, see
-		// CJITCodeGen::EmitBody. The functions can't be compiled again for the line
-		// callbacks, so the VM would execute them while a line callback is set, or
-		// the code of each function would have a second variant with all the checks
-		Emit("if( AOT_SUSPENDING() )");
+		// The debugger may modify the variables in the line callback. The full flag is
+		// read only where it may have been set since the last check. A line callback
+		// still checks every statement, as AOT functions have no exact-code variant
+		Emit("if( %s )", m_suspendChecked ? "ctx->m_lineCallback" : "AOT_SUSPENDING()");
 		Emit("{");
 		EmitSync("\t");
 		Emit("\tif( JIT_Suspend(regs) )");

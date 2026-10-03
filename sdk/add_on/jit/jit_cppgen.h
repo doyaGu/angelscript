@@ -146,6 +146,7 @@ protected:
 	std::string         m_sync;
 	std::string         m_reload;
 	bool                m_frame;
+	bool                m_suspendChecked; // the suspend flag was checked on every path to the instruction
 };
 
 END_AS_NAMESPACE
