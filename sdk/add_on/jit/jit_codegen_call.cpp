@@ -105,7 +105,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( imported < func->engine->importedFunctions.GetLength() && func->engine->importedFunctions[imported] )
 			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
 	}
-	asUINT borrowed = kind == JIT_CALL_SCRIPT ? m_code->GetBorrowedArgs(idx) : 0;
+	asCScriptFunction *borrowTarget = kind == JIT_CALL_INTERFACE ? m_code->GetBorrowedTarget(idx) : 0;
+	asUINT borrowed = (kind == JIT_CALL_SCRIPT || borrowTarget) ? m_code->GetBorrowedArgs(idx) : 0;
 
 	bool native = false;
 	if( kind == JIT_CALL_SCRIPT || kind == JIT_CALL_ALLOC )
@@ -174,6 +175,8 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		else if( kind == JIT_CALL_INTERFACE )
 		{
 			method = EmitFindMethod(callee, slow, (instr.flags & JIT_INSTR_INLINE) ? 0 : ProfileCell(idx));
+			if( borrowed )
+				m_uc.j(slow, cmp_ne(method, PtrConst(asPWORD(borrowTarget))));
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, Addr(method, layout.scriptData));
 			m_uc.load(target, Addr(target, layout.jitFunction));

@@ -374,6 +374,12 @@ asUINT CJITByteCode::GetBorrowedArgs(asUINT instrIdx) const
 	return it == m_borrowedArgs.end() ? 0 : it->second;
 }
 
+asCScriptFunction *CJITByteCode::GetBorrowedTarget(asUINT instrIdx) const
+{
+	std::map<asUINT, asCScriptFunction*>::const_iterator it = m_borrowedTargets.find(instrIdx);
+	return it == m_borrowedTargets.end() ? 0 : it->second;
+}
+
 const std::vector<int> &CJITByteCode::GetBorrowChecks(asUINT instrIdx) const
 {
 	std::map<asUINT, std::vector<int> >::const_iterator it = m_borrowChecks.find(instrIdx);
@@ -1082,10 +1088,11 @@ void CJITByteCode::AnalyseBorrows(bool borrowCalls)
 	FindListFrees();
 }
 
-// Finds the statically known script functions called without being inlined. Their
-// generated native entries receive the borrowed-parameter mask through the call
-// state. If a target is deferred, generated ahead of time, or left to the VM, its
-// immutable wrapper gives the arguments references of their own before entering it.
+// Finds script functions, or the unique checked implementations of virtual and
+// interface methods, called without being inlined. Their generated native entries
+// receive the borrowed-parameter mask through the call state. If a target is
+// deferred, generated ahead of time, or left to the VM, its immutable wrapper gives
+// the arguments references of their own before entering it.
 void CJITByteCode::FindCalledBorrowedArgs()
 {
 	std::map<asUINT, std::vector<SJITInlinee> > callees;
@@ -1093,12 +1100,18 @@ void CJITByteCode::FindCalledBorrowedArgs()
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( instr.op != asBC_CALL || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INLINE)) )
+		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF) ||
+		    (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INLINE)) )
 			continue;
 
 		int id = asBC_INTARG(instr.bc);
 		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
 		                           ? engine->scriptFunctions[id] : 0;
+		if( func && instr.op == asBC_CALLINTF )
+		{
+			asCObjectType *objType = 0;
+			func = FindImplementation(m_func, func, FindReceiverType(n), objType);
+		}
 		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
 			continue;
 
@@ -1117,6 +1130,8 @@ void CJITByteCode::FindCalledBorrowedArgs()
 		SJITInlinee direct;
 		direct.code = callee;
 		callees[n].push_back(direct);
+		if( instr.op == asBC_CALLINTF )
+			m_borrowedTargets[n] = func;
 	}
 	FindBorrowedArgs(callees);
 }
@@ -1128,6 +1143,7 @@ void CJITByteCode::ClearBorrows()
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_borrowedArgs.clear();
+	m_borrowedTargets.clear();
 	m_borrowChecks.clear();
 }
 

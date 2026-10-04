@@ -183,7 +183,7 @@ struct SJITInlineOptions
 	void  *filterParam;
 	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
 	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
-	bool   borrowCalls; // borrow handle arguments of non-inlined calls with static targets
+	bool   borrowCalls; // borrow handle arguments of non-inlined calls with checked targets
 	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
 };
 
@@ -368,6 +368,10 @@ public:
 	// that borrow the references of the caller, see AnalyseBorrows and AnalyseForAOT
 	asUINT GetBorrowedArgs(asUINT instrIdx) const;
 
+	// Returns the implementation a non-inlined virtual/interface call may lend its
+	// arguments to, which the generated code checks against the resolved method
+	asCScriptFunction *GetBorrowedTarget(asUINT instrIdx) const;
+
 	// Returns the variables that must be null for the copies of the references lent
 	// to a native script call not to release anything, which the first of the copies
 	// checks for all of them
@@ -447,6 +451,7 @@ protected:
 	asUINT                  m_borrowableParams; // see GetBorrowableParams
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
 	std::map<asUINT, asUINT> m_borrowedArgs;    // by call instruction
+	std::map<asUINT, asCScriptFunction*> m_borrowedTargets; // checked targets of virtual/interface calls
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
