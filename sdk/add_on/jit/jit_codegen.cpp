@@ -2139,10 +2139,13 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 
 	case asBC_PshListElmnt:
 		{
+			// LoadPtr may return the register cache of the list variable, which must
+			// stay at the start of the buffer while the element address is formed.
 			Gp var = LoadPtr(a0);
-			m_uc.add(var, var, Imm(int(asBC_DWORDARG(bc))));
+			Gp elem = m_uc.new_gp_ptr();
+			m_uc.add(elem, var, Imm(int(asBC_DWORDARG(bc))));
 			PushStack(PTR_BYTES);
-			m_uc.store(Stack(0), var);
+			m_uc.store(Stack(0), elem);
 		}
 		break;
 

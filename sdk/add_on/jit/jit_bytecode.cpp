@@ -2524,9 +2524,8 @@ void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
 	}
 }
 
-// TODO: runtime optimize: Local pointer variables have implicit lifetime operations
-//                         that aren't all tied to bytecode operands yet. The dirty
-//                         and live masks are 32bit, so at most 32 variables can be cached;
+// TODO: runtime optimize: The dirty and live masks are 64bit, so at most 63
+//                         variables can be cached;
 //                         larger functions would need a wider mask or a second pass
 //                         choosing the variables per loop rather than per function.
 void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
@@ -2590,10 +2589,6 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 		{
 			// The C++ AOT generator keeps pointers in the frame for now.
 			if( m_aot )
-				continue;
-			// Positive offsets can be local handles whose lifetime also changes
-			// through implicit object operations that aren't tied to an operand.
-			if( slot.offset > 0 )
 				continue;
 			asUINT compatible = JIT_SLOT_PTR | (sizeof(void*) == 8 ? JIT_SLOT_ANY64 : JIT_SLOT_ANY32);
 			if( kinds & ~compatible )

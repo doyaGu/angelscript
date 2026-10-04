@@ -2555,7 +2555,10 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			const std::vector<int> &checks = m_code->GetBorrowChecks(idx);
 			if( !checks.empty() )
 			{
-				Gp any = LoadPtr(checks[0]);
+				// LoadPtr may return a cached variable, so accumulate in a temporary
+				// instead of overwriting the first checked pointer with the OR result.
+				Gp any = m_uc.new_gp_ptr();
+				m_uc.mov(any, LoadPtr(checks[0]));
 				for( asUINT n = 1; n < checks.size(); n++ )
 					m_uc.or_(any, any, LoadPtr(checks[n]));
 				m_uc.j(BailLabel(idx), test_nz(any));
