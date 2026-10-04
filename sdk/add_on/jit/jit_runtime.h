@@ -218,8 +218,9 @@ void   JIT_RefCpy(asSVMRegisters *regs, asCObjectType *objType, void **dst, void
 
 // Returns the size of a value parameter passed inline by a supported native ABI,
 // zero if it is passed indirectly, or -1 if direct calls don't support it. When
-// requested, floating says whether the bits are passed in a floating-point slot
-int    JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *floating = 0) noexcept;
+// requested, floating says whether the bits are passed in floating-point slots.
+// hfaPartSize is 4 or 8 for an AArch64 homogeneous floating-point aggregate
+int    JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *floating = 0, int *hfaPartSize = 0) noexcept;
 
 // Returns the number of argument cleanups of a direct system call, or -1 if they
 // include value objects that the direct call cannot pass. allowInlineValues is for

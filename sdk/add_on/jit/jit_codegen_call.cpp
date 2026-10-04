@@ -1455,7 +1455,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
-	struct SArg { int kind; int stackOff; int valueSize; int valueOffset; TypeId type; bool valueFloat; bool valueFree; bool autoHandle; SDirectBehaviour release; };
+	struct SArg { int kind; int stackOff; int valueSize; int valueOffset; int valueParts; TypeId type; bool valueFloat; bool valueFree; bool autoHandle; SDirectBehaviour release; };
 	std::vector<SArg> args;
 	bool hasStackObj = thisFromStack || objFirst || objLast;
 	bool hasThis = thisFromStack || auxiliaryThis;
@@ -1489,11 +1489,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		else if( pt.IsReference() || pt.IsObjectHandle() || pt.IsFuncdef() ) { arg.kind = ARG_PTR; arg.type = TypeId::kUIntPtr; stackPos += AS_PTR_SIZE; }
 		else if( pt.IsObject() )
 		{
-			int valueSize = JIT_GetInlineValueArgSize(descr, n, &arg.valueFloat);
+			int hfaPartSize = 0;
+			int valueSize = JIT_GetInlineValueArgSize(descr, n, &arg.valueFloat, &hfaPartSize);
 			if( valueSize > 0 )
 			{
-				arg.valueSize = valueSize > 8 ? 8 : valueSize;
-				arg.valueFree = valueSize <= 8;
+				int valuePartSize = hfaPartSize ? hfaPartSize : valueSize > 8 ? 8 : valueSize;
+				int valueParts = hfaPartSize ? valueSize / hfaPartSize : valueSize > 8 ? 2 : 1;
+				arg.valueParts = valueParts;
+				arg.valueSize = valuePartSize;
+				arg.valueFree = valueParts == 1;
 				if( arg.valueFloat )
 				{
 					arg.kind = arg.valueSize == 4 ? ARG_F32 : ARG_F64;
@@ -1506,17 +1510,19 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 					           arg.valueSize <= 4 ? TypeId::kUInt32 : TypeId::kUInt64;
 				}
 				args.push_back(arg);
-				if( valueSize > 8 )
+				for( int part = 1; part < valueParts; part++ )
 				{
-					arg.valueSize = valueSize - 8;
-					arg.valueOffset = 8;
-					arg.valueFree = true;
+					arg.valueParts = 0;
+					arg.valueOffset = part * valuePartSize;
+					arg.valueSize = hfaPartSize ? valuePartSize : valueSize - arg.valueOffset;
+					arg.valueFree = part + 1 == valueParts;
 					if( arg.valueFloat )
 					{
 						// A full eightbyte stack slot is needed for the last float of a
-						// 12-byte aggregate. Its upper bits are zeroed when it is loaded.
-						arg.kind = ARG_F64;
-						arg.type = TypeId::kFloat64;
+						// 12-byte System V aggregate. Its upper bits are zeroed when it is
+						// loaded. AArch64 HFAs instead keep their member type here.
+						arg.kind = hfaPartSize == 4 ? ARG_F32 : ARG_F64;
+						arg.type = hfaPartSize == 4 ? TypeId::kFloat32 : TypeId::kFloat64;
 					}
 					else
 					{
@@ -1563,8 +1569,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		retAfterThis = true;
 	}
 #endif
-	// Keep two-slot aggregates wholly in registers or wholly on the stack. AsmJit
-	// sees their slots as separate primitive arguments and may otherwise split a pair
+	// Keep multi-slot aggregates wholly in registers or wholly on the stack. AsmJit
+	// sees their slots as separate primitive arguments and may otherwise split them
 	// at the end of an argument register bank.
 	const Environment &env = m_uc.cc->environment();
 	int forceStackGpArg = -1, forceStackVecArg = -1, forceStackArmGpArg = -1;
@@ -1620,11 +1626,26 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	UNUSED_VAR(env);
 	{
 		asUINT gpArgs = (hasThis ? 1 : 0) + (objFirst ? 1 : 0);
+		asUINT vecArgs = 0;
 		for( asUINT n = 0; n < args.size(); n++ )
 		{
 			bool twoSlotValue = args[n].valueSize && !args[n].valueFree;
 			bool floating = args[n].kind == ARG_F32 || args[n].kind == ARG_F64;
-			if( twoSlotValue && !floating )
+			if( args[n].valueParts && floating )
+			{
+				// AAPCS64 never splits an HFA between registers and the stack. Leave
+				// such a call to the engine until the packed stack form is supported.
+				if( vecArgs + asUINT(args[n].valueParts) > 8 )
+					return false;
+				vecArgs += asUINT(args[n].valueParts);
+				n += asUINT(args[n].valueParts - 1);
+			}
+			else if( floating )
+			{
+				if( vecArgs < 8 )
+					vecArgs++;
+			}
+			else if( twoSlotValue )
 			{
 				if( gpArgs <= 6 )
 					gpArgs += 2;
@@ -1829,7 +1850,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				valueObjs[n] = m_uc.new_gp_ptr();
 				m_uc.load(valueObjs[n], Stack(args[n].stackOff));
-				m_uc.v_loadu32_f32(vecArgs[n], mem_ptr(valueObjs[n]));
+				m_uc.v_loadu32_f32(vecArgs[n], Addr(valueObjs[n], args[n].valueOffset));
 			}
 			else
 				m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));

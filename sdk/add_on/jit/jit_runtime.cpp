@@ -706,10 +706,12 @@ static bool IsIndirectValueArg(asCScriptFunction *func, asUINT param) noexcept
 	return false;
 }
 
-int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *floating) noexcept
+int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *floating, int *hfaPartSize) noexcept
 {
 	if( floating )
 		*floating = false;
+	if( hfaPartSize )
+		*hfaPartSize = 0;
 	if( func == 0 || param >= func->parameterTypes.GetLength() )
 		return -1;
 	const asCDataType &dt = func->parameterTypes[param];
@@ -761,8 +763,8 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 	}
 #elif defined(AS_ARM64)
 	// AArch64 passes non-HFA aggregates of up to 16 bytes in one or two general
-	// purpose argument slots. Leave homogeneous floating-point aggregates to the
-	// fallback until the direct callers can keep all of their members together.
+	// purpose argument slots. Homogeneous aggregates use one floating-point
+	// register for each of their one to four float or double members.
 	asQWORD flags = dt.GetTypeInfo()->flags;
 	if( (flags & asOBJ_POD) &&
 	    (flags & (asOBJ_APP_CLASS_ALLINTS | asOBJ_APP_PRIMITIVE)) )
@@ -770,6 +772,19 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 		int size = dt.GetSizeInMemoryBytes();
 		if( size >= 1 && size <= 16 )
 			return size;
+	}
+	if( (flags & asOBJ_POD) && (flags & asOBJ_APP_CLASS_ALLFLOATS) )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		int partSize = (flags & asOBJ_APP_CLASS_ALIGN8) ? 8 : 4;
+		if( size >= partSize && size <= 4 * partSize && size % partSize == 0 )
+		{
+			if( floating )
+				*floating = true;
+			if( hfaPartSize )
+				*hfaPartSize = partSize;
+			return size;
+		}
 	}
 #endif
 	return -1;
