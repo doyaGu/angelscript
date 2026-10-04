@@ -1090,12 +1090,13 @@ void CJITByteCode::AnalyseBorrows(bool borrowCalls)
 }
 
 // Finds script functions, checked implementations of virtual and interface methods,
-// or the current script target of a bound import, called without being inlined. Their
-// generated native entries receive the borrowed-parameter mask through the call
-// state. The implementations may lend the arguments only if all of them can; a
-// dynamic call checks its resolved target against this set. If a target is unknown,
-// rebound, deferred, generated ahead of time, or left to the VM, the fallback gives
-// the arguments references of their own first.
+// the current script target of a bound import, or script functions named by local
+// function-pointer literals, called without being inlined. Their generated native
+// entries receive the borrowed-parameter mask through the call state. The
+// implementations may lend the arguments only if all of them can; a dynamic call
+// checks its resolved target against this set. If a target is unknown, rebound,
+// deferred, generated ahead of time, or left to the VM, the fallback gives the
+// arguments references of their own first.
 void CJITByteCode::FindCalledBorrowedArgs()
 {
 	std::map<asUINT, std::vector<SJITInlinee> > callees;
@@ -1103,11 +1104,11 @@ void CJITByteCode::FindCalledBorrowedArgs()
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF && instr.op != asBC_CALLBND) ||
+		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF && instr.op != asBC_CALLBND && instr.op != asBC_CallPtr) ||
 		    (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INLINE)) )
 			continue;
 
-		int id = asBC_INTARG(instr.bc);
+		int id = instr.op == asBC_CallPtr ? 0 : asBC_INTARG(instr.bc);
 		asCScriptFunction *func = 0;
 		if( instr.op == asBC_CALLBND )
 		{
@@ -1119,10 +1120,24 @@ void CJITByteCode::FindCalledBorrowedArgs()
 					func = engine->scriptFunctions[bound];
 			}
 		}
-		else if( id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
+		else if( instr.op != asBC_CallPtr && id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
 			func = engine->scriptFunctions[id];
 		std::vector<asCScriptFunction*> targets;
-		if( func && instr.op == asBC_CALLINTF && m_func->module )
+		if( instr.op == asBC_CallPtr )
+		{
+			func = FindFuncdef(m_func, asBC_SWORDARG1(instr.bc));
+			for( asUINT i = 0; func && i < m_instrs.size(); i++ )
+			{
+				if( m_instrs[i].op != asBC_FuncPtr )
+					continue;
+				asCScriptFunction *target = reinterpret_cast<asCScriptFunction*>(asBC_PTRARG(m_instrs[i].bc));
+				if( target && target->funcType == asFUNC_SCRIPT && target->scriptData &&
+				    func->IsSignatureExceptNameEqual(target) &&
+				    std::find(targets.begin(), targets.end(), target) == targets.end() )
+					targets.push_back(target);
+			}
+		}
+		else if( func && instr.op == asBC_CALLINTF && m_func->module )
 		{
 			asCObjectType *receiverType = FindReceiverType(n);
 			const asCArray<asCObjectType*> &classes = m_func->module->m_classTypes;
@@ -1158,17 +1173,19 @@ void CJITByteCode::FindCalledBorrowedArgs()
 			SJITInlinee direct;
 			direct.code = callee;
 			callees[n].push_back(direct);
-			if( instr.op == asBC_CALLINTF || instr.op == asBC_CALLBND )
+			if( instr.op == asBC_CALLINTF || instr.op == asBC_CALLBND || instr.op == asBC_CallPtr )
 				m_borrowedTargets[n].push_back(target);
 		}
 	}
 	FindBorrowedArgs(callees);
 
-	// Bound functions may be unbound and destroyed while their caller stays alive.
+	// Bound functions may be unbound while their caller stays alive, and function
+	// literals are normally released just before their caller's generated code.
 	// Keep only the targets whose addresses the generated checks actually use.
 	for( std::map<asUINT, std::vector<asCScriptFunction*> >::const_iterator it = m_borrowedTargets.begin(); it != m_borrowedTargets.end(); ++it )
 	{
-		if( GetBorrowedArgs(it->first) == 0 || m_instrs[it->first].op != asBC_CALLBND )
+		asEBCInstr op = m_instrs[it->first].op;
+		if( GetBorrowedArgs(it->first) == 0 || (op != asBC_CALLBND && op != asBC_CallPtr) )
 			continue;
 		for( asUINT t = 0; t < it->second.size(); t++ )
 			if( std::find(m_borrowedDependencies.begin(), m_borrowedDependencies.end(), it->second[t]) == m_borrowedDependencies.end() )

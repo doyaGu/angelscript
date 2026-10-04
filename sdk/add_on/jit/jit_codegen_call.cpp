@@ -97,7 +97,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	asCScriptFunction *func = m_code->GetFunction();
 	asCScriptFunction *callee = 0;
-	if( funcId >= 0 && asUINT(funcId) < func->engine->scriptFunctions.GetLength() )
+	if( kind == JIT_CALL_PTR )
+		callee = func->GetCalledFunction(instr.pos);
+	else if( funcId >= 0 && asUINT(funcId) < func->engine->scriptFunctions.GetLength() )
 		callee = func->engine->scriptFunctions[funcId];
 	else if( kind == JIT_CALL_BOUND )
 	{
@@ -105,7 +107,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( imported < func->engine->importedFunctions.GetLength() && func->engine->importedFunctions[imported] )
 			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
 	}
-	const std::vector<asCScriptFunction*> *borrowTargets = (kind == JIT_CALL_INTERFACE || kind == JIT_CALL_BOUND) ? &m_code->GetBorrowedTargets(idx) : 0;
+	const std::vector<asCScriptFunction*> *borrowTargets = (kind == JIT_CALL_INTERFACE || kind == JIT_CALL_BOUND || kind == JIT_CALL_PTR) ? &m_code->GetBorrowedTargets(idx) : 0;
 	asUINT borrowed = (kind == JIT_CALL_SCRIPT || (borrowTargets && !borrowTargets->empty())) ? m_code->GetBorrowedArgs(idx) : 0;
 
 	bool native = false;
@@ -217,6 +219,14 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			Gp func = LoadPtr(int(extra));
 			Gp type = m_uc.new_gp32();
 			m_uc.j(slow, test_z(func));
+			if( borrowed )
+			{
+				Label accepted = m_uc.new_label();
+				for( asUINT n = 0; n + 1 < borrowTargets->size(); n++ )
+					m_uc.j(accepted, cmp_eq(func, PtrConst(asPWORD((*borrowTargets)[n]))));
+				m_uc.j(slow, cmp_ne(func, PtrConst(asPWORD(borrowTargets->back()))));
+				m_uc.bind(accepted);
+			}
 			m_uc.load_u32(type, Addr(func, layout.funcType));
 			if( m_staticStack && m_spInArg )
 			{

@@ -372,7 +372,7 @@ public:
 	// to. The generated code checks the resolved function against every one
 	const std::vector<asCScriptFunction*> &GetBorrowedTargets(asUINT instrIdx) const;
 
-	// Returns the bound functions whose addresses are embedded in the generated
+	// Returns the dynamic targets whose addresses are embedded in the generated
 	// code. The compiler keeps them alive until all code of this function is gone
 	const std::vector<asCScriptFunction*> &GetBorrowedDependencies() const { return m_borrowedDependencies; }
 
@@ -456,7 +456,7 @@ protected:
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
 	std::map<asUINT, asUINT> m_borrowedArgs;    // by call instruction
 	std::map<asUINT, std::vector<asCScriptFunction*> > m_borrowedTargets; // checked targets of dynamic calls
-	std::vector<asCScriptFunction*> m_borrowedDependencies; // bound targets embedded in generated code
+	std::vector<asCScriptFunction*> m_borrowedDependencies; // dynamic targets embedded in generated code
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
