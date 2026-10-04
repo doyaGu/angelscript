@@ -32,10 +32,10 @@
 //    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
-//  - Borrow the references of the handle arguments in the runtime-generated code on
-//    32bit hosts, whose call states have no room to note the borrowed parameters, and
-//    for the calls that aren't inlined, which would need entry points of the callees
-//    that don't release the parameters
+//  - Borrow the references of the handle arguments in inlined functions with sync
+//    points on 32bit hosts, whose call states have no room to note the borrowed
+//    parameters, and for the calls that aren't inlined, which would need entry points
+//    of the callees that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for pointer variables in AOT code and for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).

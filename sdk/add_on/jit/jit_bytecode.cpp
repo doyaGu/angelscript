@@ -1067,17 +1067,16 @@ EJITRefKind CJITByteCode::GetRefKind(asCScriptEngine *engine, asCTypeInfo *ti)
 // the VM get references of their own, see CJITCodeGen::EmitInlineExit and
 // JIT_OwnBorrowed, for which the call states of the materialized frames note the
 // borrowed parameters in the upper half of the stack index. Only 64bit hosts have
-// room there
+// room there; 32bit hosts can still borrow for functions without sync points, whose
+// frames are either never materialized or get their own references in JIT_ExitInlined
 void CJITByteCode::AnalyseBorrows()
 {
 	ClearBorrows();
-#ifdef JIT_NATIVE_RETURN
 	if( m_staticStack )
 	{
 		FindBorrowableParams();
 		FindBorrowedArgs(m_inlinees);
 	}
-#endif
 	FindMovedRefs();
 	FindInPlaceRefCounts();
 	FindListFrees();
@@ -1390,15 +1389,37 @@ void CJITByteCode::FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlin
 			}
 		}
 
+		asUINT borrowed = 0;
+		for( asUINT c = 0; c < found.size(); c++ )
+			if( found[c].live )
+				borrowed |= 1u << found[c].param;
+		if( !borrowed )
+			continue;
+
+#ifndef JIT_NATIVE_RETURN
+		// A materialized frame notes its borrowed parameters in the upper half of
+		// the stack index, which only has room on 64bit hosts. A function without
+		// sync points never materializes its frame; if it bails, JIT_ExitInlined
+		// gives the frame its own references directly.
+		if( !m_aot )
+		{
+			for( asUINT i = 0; i < inlinees.size(); i++ )
+				if( inlinees[i].code->HasSyncPoints(borrowed) )
+					borrowed = 0;
+			if( !borrowed )
+				continue;
+		}
+#endif
+
 		std::vector<int> checks;
 		for( asUINT c = 0; c < found.size(); c++ )
 		{
 			if( !found[c].live )
 				continue;
 			m_instrs[found[c].var - 2].flags |= JIT_INSTR_BORROW;
-			m_borrowedArgs[call] |= 1u << found[c].param;
 			checks.push_back(found[c].temp);
 		}
+		m_borrowedArgs[call] = borrowed;
 		if( !checks.empty() )
 			m_borrowChecks[asUINT(first)] = checks;
 	}
