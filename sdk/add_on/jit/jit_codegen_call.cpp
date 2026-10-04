@@ -2471,7 +2471,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		{
 			// The caller releases the reference, or the copy before has taken it
 			// over, see CJITByteCode::FindMovedRefs
-			m_uc.store_zero_reg(Var(a0));
+			ClearPtr(a0);
 			break;
 		}
 		if( instr.flags & JIT_INSTR_FREE_LIST )
@@ -2482,7 +2482,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			m_uc.j(skip, test_z(mem));
 			InvokeNode *call = Invoke((const void*)JIT_FreeMem, FuncSignature::build<void, void*>());
 			call->set_arg(0, mem);
-			m_uc.store_zero_reg(Var(a0));
+			ClearPtr(a0);
 			m_uc.bind(skip);
 			break;
 		}
@@ -2493,7 +2493,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			Label skip = m_uc.new_label();
 			m_uc.j(skip, test_z(obj));
 			EmitScriptRelease(idx, obj);
-			m_uc.store_zero_reg(Var(a0));
+			ClearPtr(a0);
 			m_uc.bind(skip);
 			break;
 		}
@@ -2512,7 +2512,6 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			{
 				// Like the VM the variable is cleared after the release
 				EmitBehaviourCall(release, obj);
-				m_uc.store_zero_reg(Var(a0));
 			}
 			else
 			{
@@ -2525,6 +2524,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			}
 			EmitDematerialize();
 			m_uc.bind(skip);
+			ClearPtr(a0);
 		}
 		break;
 
@@ -2533,7 +2533,7 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 			Gp obj = LoadPtr(a0);
 			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
-			m_uc.store_zero_reg(Var(a0));
+			ClearPtr(a0);
 		}
 		break;
 
@@ -2583,8 +2583,14 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				dst = Var(a0);
 			Gp s = m_uc.new_gp_ptr();
 			m_uc.load(s, Stack(0));
-			Gp old = m_uc.new_gp_ptr();
-			m_uc.load(old, dst);
+			Gp old;
+			if( instr.op == asBC_RefCpyV )
+				old = LoadPtr(a0);
+			else
+			{
+				old = m_uc.new_gp_ptr();
+				m_uc.load(old, dst);
+			}
 			Label noOld = m_uc.new_label();
 			m_uc.j(noOld, test_z(old));
 			EmitScriptRelease(idx, old);
@@ -2596,7 +2602,10 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				EmitScriptAddRef(idx, s);
 				m_uc.bind(noNew);
 			}
-			m_uc.store(dst, s);
+			if( instr.op == asBC_RefCpyV )
+				StorePtr(a0, s);
+			else
+				m_uc.store(dst, s);
 			break;
 		}
 		{
@@ -2642,6 +2651,8 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 					}
 				}
 				m_uc.store(mem_ptr(d), s);
+				if( instr.op == asBC_RefCpyV && FindCached(a0) )
+					StorePtr(a0, s);
 			}
 			else if( move )
 			{
@@ -2651,6 +2662,8 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, d);
 				m_uc.store(mem_ptr(d), s);
+				if( instr.op == asBC_RefCpyV && FindCached(a0) )
+					StorePtr(a0, s);
 			}
 			else
 			{
@@ -2659,6 +2672,8 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				call->set_arg(1, Imm(int64_t(asPWORD(objType))));
 				call->set_arg(2, d);
 				call->set_arg(3, s);
+				if( instr.op == asBC_RefCpyV && FindCached(a0) )
+					StorePtr(a0, s);
 			}
 			EmitDematerialize();
 		}

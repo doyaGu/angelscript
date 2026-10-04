@@ -37,7 +37,7 @@
 //    for the calls that aren't inlined, which would need entry points of the callees
 //    that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
-//  - Register cache for pointer variables and for more than 32 variables
+//  - Register cache for local pointer variables and for more than 32 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit
 //    division and modulo instead of calling runtime helpers.
@@ -436,7 +436,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			continue;
 		const char *kind = slots[n].cacheKind == JIT_SLOT_I32 ? "int32" :
 		                   slots[n].cacheKind == JIT_SLOT_I64 ? "int64" :
-		                   slots[n].cacheKind == JIT_SLOT_F32 ? "float" : "double";
+		                   slots[n].cacheKind == JIT_SLOT_F32 ? "float" :
+		                   slots[n].cacheKind == JIT_SLOT_F64 ? "double" : "pointer";
 		fprintf(file, "; v%d cached in register as %s (%d uses)\n", slots[n].offset, kind, slots[n].useCount);
 	}
 

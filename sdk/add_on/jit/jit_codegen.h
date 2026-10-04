@@ -260,6 +260,7 @@ protected:
 	void CommitF32(int offset, const Vec &value);
 	void CommitF64(int offset, const Vec &value);
 	void StorePtr(int offset, const Gp &value);
+	void ClearPtr(int offset);
 	void Copy64(const Mem &dst, const Mem &src);
 	void Copy32(const Mem &dst, const Mem &src);
 

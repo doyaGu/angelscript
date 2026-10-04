@@ -550,6 +550,7 @@ void CJITCodeGen::CreateCachedSlots()
 		case JIT_SLOT_I64: cached.gp  = m_uc.new_gp64(name); break;
 		case JIT_SLOT_F32: cached.vec = m_uc.new_vec128_f32x1(name); break;
 		case JIT_SLOT_F64: cached.vec = m_uc.new_vec128_f64x1(name); break;
+		case JIT_SLOT_PTR: cached.gp  = m_uc.new_gp_ptr(name); break;
 		}
 		m_cachedIndex[cached.offset] = asUINT(m_cached.size());
 		m_cached.push_back(cached);
@@ -1254,7 +1255,7 @@ CJITCodeGen::SCachedSlot *CJITCodeGen::FindCached(int offset)
 Gp CJITCodeGen::Load32(int offset)
 {
 	SCachedSlot *c = FindCached(offset);
-	if( c && c->kind == JIT_SLOT_I32 )
+	if( c && (c->kind == JIT_SLOT_I32 || (c->kind == JIT_SLOT_PTR && !Is64Bit())) )
 		return c->gp;
 
 	Gp t = m_uc.new_gp32();
@@ -1269,7 +1270,7 @@ Gp CJITCodeGen::Load64(int offset)
 {
 	assert( Is64Bit() );
 	SCachedSlot *c = FindCached(offset);
-	if( c && c->kind == JIT_SLOT_I64 )
+	if( c && (c->kind == JIT_SLOT_I64 || c->kind == JIT_SLOT_PTR) )
 		return c->gp;
 
 	Gp t = m_uc.new_gp64();
@@ -1282,7 +1283,9 @@ Gp CJITCodeGen::Load64(int offset)
 
 Gp CJITCodeGen::LoadPtr(int offset)
 {
-	// Pointers are never cached
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_PTR )
+		return c->gp;
 	Gp t = m_uc.new_gp_ptr();
 	m_uc.load(t, Var(offset));
 	return t;
@@ -1319,7 +1322,7 @@ Vec CJITCodeGen::LoadF64(int offset)
 Gp CJITCodeGen::Dst32(int offset)
 {
 	SCachedSlot *c = FindCached(offset);
-	if( c && c->kind == JIT_SLOT_I32 )
+	if( c && (c->kind == JIT_SLOT_I32 || (c->kind == JIT_SLOT_PTR && !Is64Bit())) )
 		return c->gp;
 	return m_uc.new_gp32();
 }
@@ -1327,7 +1330,7 @@ Gp CJITCodeGen::Dst32(int offset)
 Gp CJITCodeGen::Dst64(int offset)
 {
 	SCachedSlot *c = FindCached(offset);
-	if( c && c->kind == JIT_SLOT_I64 )
+	if( c && (c->kind == JIT_SLOT_I64 || c->kind == JIT_SLOT_PTR) )
 		return c->gp;
 	return m_uc.new_gp64();
 }
@@ -1356,6 +1359,12 @@ void CJITCodeGen::Commit32(int offset, const Gp &value)
 		if( c->gp.id() != value.id() )
 			m_uc.mov(c->gp, value);
 	}
+	else if( c && c->kind == JIT_SLOT_PTR && !Is64Bit() )
+	{
+		if( c->gp.id() != value.id() )
+			m_uc.mov(c->gp, value);
+		m_uc.store_u32(Var(offset), value);
+	}
 	else if( c && c->kind == JIT_SLOT_F32 )
 		m_uc.s_mov_u32(c->vec, value);
 	else
@@ -1369,6 +1378,12 @@ void CJITCodeGen::Commit64(int offset, const Gp &value)
 	{
 		if( c->gp.id() != value.id() )
 			m_uc.mov(c->gp, value);
+	}
+	else if( c && c->kind == JIT_SLOT_PTR )
+	{
+		if( c->gp.id() != value.id() )
+			m_uc.mov(c->gp, value);
+		m_uc.store_u64(Var(offset), value);
 	}
 	else if( c && c->kind == JIT_SLOT_F64 )
 		m_uc.s_mov_u64(c->vec, value);
@@ -1406,7 +1421,21 @@ void CJITCodeGen::CommitF64(int offset, const Vec &value)
 
 void CJITCodeGen::StorePtr(int offset, const Gp &value)
 {
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_PTR )
+	{
+		if( c->gp.id() != value.id() )
+			m_uc.mov(c->gp, value);
+	}
 	m_uc.store(Var(offset), value);
+}
+
+void CJITCodeGen::ClearPtr(int offset)
+{
+	SCachedSlot *c = FindCached(offset);
+	if( c && c->kind == JIT_SLOT_PTR )
+		m_uc.mov(c->gp, Imm(0));
+	m_uc.store_zero_reg(Var(offset));
 }
 
 void CJITCodeGen::Copy32(const Mem &dst, const Mem &src)
@@ -1683,6 +1712,7 @@ void CJITCodeGen::StoreCachedSlot(int offset)
 	case JIT_SLOT_I64: m_uc.store_u64(Var(c->offset), c->gp); break;
 	case JIT_SLOT_F32: m_uc.v_storeu32_f32(Var(c->offset), c->vec); break;
 	case JIT_SLOT_F64: m_uc.v_storeu64_f64(Var(c->offset), c->vec); break;
+	case JIT_SLOT_PTR: m_uc.store(Var(c->offset), c->gp); break;
 	}
 }
 
@@ -1697,6 +1727,7 @@ void CJITCodeGen::ReloadCachedSlot(int offset)
 	case JIT_SLOT_I64: m_uc.load_u64(c->gp, Var(c->offset)); break;
 	case JIT_SLOT_F32: m_uc.v_loadu32_f32(c->vec, Var(c->offset)); break;
 	case JIT_SLOT_F64: m_uc.v_loadu64_f64(c->vec, Var(c->offset)); break;
+	case JIT_SLOT_PTR: m_uc.load(c->gp, Var(c->offset)); break;
 	}
 }
 
@@ -2195,7 +2226,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		break;
 
 	case asBC_ClrVPtr:
-		m_uc.store_zero_reg(Var(a0));
+		ClearPtr(a0);
 		break;
 
 	case asBC_SetV1:
@@ -2501,8 +2532,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		}
 		else
 		{
-			Gp t = m_uc.new_gp_ptr();
-			m_uc.load(t, Var(0));
+			Gp t = LoadPtr(0);
 			m_uc.j(BailLabel(idx), test_z(t));
 			SetVRAddr(idx, Addr(t, asBC_SWORDARG0(bc)));
 		}

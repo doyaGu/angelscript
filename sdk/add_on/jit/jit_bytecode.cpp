@@ -1680,8 +1680,7 @@ asUINT CJITByteCode::GetReloadMask(asUINT instrIdx) const
 }
 
 // Only the instructions that can have register cached variables as operands
-// matter here, i.e. those working on primitives. Pointers and objects are never
-// cached, so their instructions don't have to be described
+// matter here, i.e. those working on primitives and pointers
 void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool &reads1, bool &reads2)
 {
 	reads0 = writes0 = reads1 = reads2 = false;
@@ -1701,7 +1700,16 @@ void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool
 	case asBC_CMPIf:
 	case asBC_CMPIu:
 	case asBC_JMPP:
+	case asBC_PshVPtr:
+	case asBC_ChkNullV:
+	case asBC_LoadRObjR:
+	case asBC_SetListSize:
+	case asBC_PshListElmnt:
+	case asBC_SetListType:
 		reads0 = true;
+		break;
+	case asBC_CallPtr:
+		reads1 = true;
 		break;
 
 	// Compares read both
@@ -1711,6 +1719,7 @@ void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool
 	case asBC_CMPd:
 	case asBC_CMPi64:
 	case asBC_CMPu64:
+	case asBC_CmpPtr:
 		reads0 = reads1 = true;
 		break;
 
@@ -1738,6 +1747,9 @@ void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool
 	case asBC_dTOu64:
 	case asBC_i64TOd:
 	case asBC_u64TOd:
+	case asBC_FREE:
+	case asBC_LOADOBJ:
+	case asBC_RefCpyV:
 		reads0 = writes0 = true;
 		break;
 
@@ -1826,6 +1838,9 @@ void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool
 	case asBC_RDR2:
 	case asBC_RDR4:
 	case asBC_RDR8:
+	case asBC_ClrVPtr:
+	case asBC_STOREOBJ:
+	case asBC_AllocMem:
 		writes0 = true;
 		break;
 
@@ -1850,6 +1865,8 @@ void CJITByteCode::GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &de
 	if( reads1 && (bit = GetCacheBit(asBC_SWORDARG1(instr.bc))) >= 0 )
 		uses |= asUINT(1) << bit;
 	if( reads2 && (bit = GetCacheBit(asBC_SWORDARG2(instr.bc))) >= 0 )
+		uses |= asUINT(1) << bit;
+	if( instr.op == asBC_LoadThisR && m_func->objectType == 0 && (bit = GetCacheBit(0)) >= 0 )
 		uses |= asUINT(1) << bit;
 }
 
@@ -2486,6 +2503,12 @@ void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
 		AddSlotUse(a0, JIT_SLOT_PTR);
 		AddSlotUse(a1, JIT_SLOT_PTR);
 		break;
+	case asBC_LoadThisR:
+		// Global functions use variable 0 as the implicit object of a property
+		// access. Methods keep their actual this pointer separately instead.
+		if( m_func->objectType == 0 )
+			AddSlotUse(0, JIT_SLOT_PTR);
+		break;
 
 	// the address of the variable is taken
 	case asBC_PSF:
@@ -2501,11 +2524,9 @@ void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
 	}
 }
 
-// TODO: runtime optimize: Only primitive variables are kept in registers. Handles and
-//                         object pointers that are never address-taken could be cached
-//                         the same way, which would help code that indexes arrays or
-//                         calls methods on the same handle in a loop. The dirty and
-//                         live masks are 32bit, so at most 32 variables can be cached;
+// TODO: runtime optimize: Local pointer variables have implicit lifetime operations
+//                         that aren't all tied to bytecode operands yet. The dirty
+//                         and live masks are 32bit, so at most 32 variables can be cached;
 //                         larger functions would need a wider mask or a second pass
 //                         choosing the variables per loop rather than per function.
 void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
@@ -2549,9 +2570,10 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	}
 	m_thisConstant = m_thisConstant && readsThis;
 
-	// Determine which slots hold primitive values of one size and are never accessed
-	// through their address. Only those can be kept in registers. The temporary
-	// variables are reused for values of other types, and the conversions are done
+	// Determine which slots hold primitive values or pointers of one size and are
+	// never accessed through their address. Only those can be kept in registers.
+	// The temporary variables are reused for values of other types, and the
+	// conversions are done
 	// in place, so a slot may hold both integers and floats of the same size. It is
 	// kept in the register of the kind that most of the operations use then, and the
 	// others move the bits between the registers, see CJITCodeGen::Load32
@@ -2562,10 +2584,23 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 		asUINT typed = kinds & (JIT_SLOT_I32 | JIT_SLOT_I64 | JIT_SLOT_F32 | JIT_SLOT_F64);
 
 		slot.cacheKind = JIT_SLOT_NONE;
-		if( kinds & (JIT_SLOT_PTR | JIT_SLOT_ADDR) )
+		if( kinds & JIT_SLOT_ADDR )
 			continue;
-
-		if( typed == (JIT_SLOT_I32 | JIT_SLOT_F32) )
+		if( kinds & JIT_SLOT_PTR )
+		{
+			// The C++ AOT generator keeps pointers in the frame for now.
+			if( m_aot )
+				continue;
+			// Positive offsets can be local handles whose lifetime also changes
+			// through implicit object operations that aren't tied to an operand.
+			if( slot.offset > 0 )
+				continue;
+			asUINT compatible = JIT_SLOT_PTR | (sizeof(void*) == 8 ? JIT_SLOT_ANY64 : JIT_SLOT_ANY32);
+			if( kinds & ~compatible )
+				continue;
+			typed = JIT_SLOT_PTR;
+		}
+		else if( typed == (JIT_SLOT_I32 | JIT_SLOT_F32) )
 			typed = slot.floatUses > slot.intUses ? JIT_SLOT_F32 : JIT_SLOT_I32;
 		else if( typed == (JIT_SLOT_I64 | JIT_SLOT_F64) )
 		{
@@ -2590,7 +2625,8 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 				continue;
 		}
 
-		bool is64 = (typed == JIT_SLOT_I64 || typed == JIT_SLOT_F64);
+		bool is64 = (typed == JIT_SLOT_I64 || typed == JIT_SLOT_F64 ||
+			(typed == JIT_SLOT_PTR && sizeof(void*) == 8));
 		if( is64 && (kinds & JIT_SLOT_ANY32) )
 			continue;
 		if( !is64 && (kinds & JIT_SLOT_ANY64) )
@@ -2608,7 +2644,8 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 	{
 		SJITSlot &slot = m_slots[n];
-		bool is64 = (slot.kinds & (JIT_SLOT_I64 | JIT_SLOT_F64 | JIT_SLOT_ANY64)) != 0;
+		bool is64 = (slot.kinds & (JIT_SLOT_I64 | JIT_SLOT_F64 | JIT_SLOT_ANY64)) != 0 ||
+			((slot.kinds & JIT_SLOT_PTR) && sizeof(void*) == 8);
 		if( is64 )
 		{
 			SJITSlot *other = FindSlot(slot.offset - 1);
