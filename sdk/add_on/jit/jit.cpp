@@ -37,7 +37,7 @@
 //    parameters, and for the calls that aren't inlined, which would need entry points
 //    of the callees that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
-//  - Register cache for pointer variables in AOT code and for more than 63 variables
+//  - Register cache for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit
 //    division and modulo instead of calling runtime helpers.

@@ -2608,9 +2608,6 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 			continue;
 		if( kinds & JIT_SLOT_PTR )
 		{
-			// The C++ AOT generator keeps pointers in the frame for now.
-			if( m_aot )
-				continue;
 			asUINT compatible = JIT_SLOT_PTR | (sizeof(void*) == 8 ? JIT_SLOT_ANY64 : JIT_SLOT_ANY32);
 			if( kinds & ~compatible )
 				continue;

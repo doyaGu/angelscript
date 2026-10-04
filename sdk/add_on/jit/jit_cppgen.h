@@ -16,12 +16,12 @@ class asCScriptEngine;
 // with the frame pointer, the stack pointer, and the value register in local
 // variables, and returns to the VM where the VM would raise an exception.
 //
-// The primitive variables that the analysis would keep in registers are local
-// variables of the C++ function too, which the compiler keeps in registers. They
-// are stored to the frame where the VM, the engine, or the application may see it,
-// and loaded again where it may have been modified, at the same points as the JIT
-// compiler does, see CJITByteCode::GetDirtyMask. The code must be generated from
-// the analysis of CJITByteCode::AnalyseForAOT.
+// The primitive and pointer variables that the analysis would keep in registers are
+// local variables of the C++ function too, which the compiler keeps in registers.
+// They are stored to the frame where the VM, the engine, or the application may see
+// it, and loaded again where it may have been modified, at the same points as the
+// JIT compiler does, see CJITByteCode::GetDirtyMask. The code must be generated
+// from the analysis of CJITByteCode::AnalyseForAOT.
 //
 // The operands that differ between modules and engines, i.e. pointers, function
 // ids, and type ids, are read from the bytecode at run time, so the same code
@@ -115,7 +115,7 @@ protected:
 	struct SLocal
 	{
 		int         offset;
-		int         kind;  // JIT_SLOT_I32, I64, F32, or F64
+		int         kind;  // JIT_SLOT_I32, I64, F32, F64, or PTR
 		int         bit;   // bit in the masks of the analysis, or -1 if it isn't kept
 		std::string name;
 		bool        used;  // whether the function declares it

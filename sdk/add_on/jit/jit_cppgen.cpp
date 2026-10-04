@@ -706,6 +706,7 @@ const char *CJITCppGen::LocalType(int kind)
 	case JIT_SLOT_I32: return "asDWORD";
 	case JIT_SLOT_I64: return "asQWORD";
 	case JIT_SLOT_F32: return "float";
+	case JIT_SLOT_PTR: return "asPWORD";
 	default:           return "double";
 	}
 }
@@ -718,6 +719,7 @@ static const char *FrameType(int kind)
 	case JIT_SLOT_I32: return "u32";
 	case JIT_SLOT_I64: return "u64";
 	case JIT_SLOT_F32: return "f32";
+	case JIT_SLOT_PTR: return "pw";
 	default:           return "f64";
 	}
 }
@@ -773,6 +775,16 @@ std::string CJITCppGen::Var(const char *type, int offset)
 		if( strcmp(type, "u64") == 0 ) return Format("aot_bits64(%s)", name);
 		if( strcmp(type, "i64") == 0 ) return Format("((asINT64)aot_bits64(%s))", name);
 		break;
+	case JIT_SLOT_PTR:
+		if( strcmp(type, "pw") == 0 ) return name;
+#if AS_PTR_SIZE == 1
+		if( strcmp(type, "u32") == 0 ) return name;
+		if( strcmp(type, "i32") == 0 ) return Format("((int)%s)", name);
+#else
+		if( strcmp(type, "u64") == 0 ) return name;
+		if( strcmp(type, "i64") == 0 ) return Format("((asINT64)%s)", name);
+#endif
+		break;
 	}
 	m_failed = true;
 	return name;
@@ -807,6 +819,15 @@ std::string CJITCppGen::SetVar(const char *type, int offset, const std::string &
 		if( strcmp(type, "f64") == 0 ) return Format("%s = %s;", name, value.c_str());
 		if( is64 ) return Format("%s = aot_f64bits((asQWORD)(%s));", name, value.c_str());
 		break;
+	case JIT_SLOT_PTR:
+		if( strcmp(type, "pw") == 0 || (AS_PTR_SIZE == 1 ? is32 : is64) )
+		{
+			// Keep the frame current for the implicit lifetime operations that access
+			// pointer variables through their addresses.
+			local->read = true;
+			return Format("%s = (asPWORD)(%s); AOT_V(pw, %d) = %s;", name, value.c_str(), offset, name);
+		}
+		break;
 	}
 	m_failed = true;
 	return "";
@@ -825,15 +846,22 @@ std::string CJITCppGen::SetVarLow(const char *type, int offset, const std::strin
 	local->used = true;
 	if( local->kind == JIT_SLOT_F32 )
 		return Format("%s = aot_f32bits(%s(%s));", local->name.c_str(), set, value.c_str());
+	if( local->kind == JIT_SLOT_PTR && AS_PTR_SIZE == 1 )
+	{
+		local->read = true;
+		return Format("%s = (asPWORD)%s(%s); AOT_V(pw, %d) = %s;", local->name.c_str(), set, value.c_str(), offset, local->name.c_str());
+	}
 	if( local->kind != JIT_SLOT_I32 )
 		m_failed = true;
 	return Format("%s = %s(%s);", local->name.c_str(), set, value.c_str());
 }
 
-// The address of a variable, which the analysis doesn't keep in a register then
+// The address of a variable. Primitive variables aren't cached when their address
+// is used; cached pointer variables keep their frame locations current.
 std::string CJITCppGen::VarAddr(int offset)
 {
-	if( FindLocal(offset) )
+	SLocal *local = FindLocal(offset);
+	if( local && local->kind != JIT_SLOT_PTR )
 		m_failed = true;
 	return Format("(fp - %d)", offset);
 }
@@ -1749,6 +1777,9 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 				// kept in local variables alone
 				EmitSync("\t");
 				Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
+				SLocal *local = FindLocal(SW0);
+				if( local )
+					Emit("\t%s", Loads(JITSlotMask(1) << local->bit).c_str());
 			}
 			Emit("}");
 		}
@@ -1824,6 +1855,12 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 			EmitSync("\t");
 			Emit("\tJIT_RefCpy(regs, (asCObjectType*)AOT_PW(%u), d_, s_);", pos + 1);
 			EmitReload("\t");
+		}
+		if( instr.op == asBC_RefCpyV )
+		{
+			SLocal *local = FindLocal(SW0);
+			if( local )
+				Emit("\t%s", Loads(JITSlotMask(1) << local->bit).c_str());
 		}
 		Emit("}");
 		break;
