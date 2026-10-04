@@ -1066,9 +1066,8 @@ EJITRefKind CJITByteCode::GetRefKind(asCScriptEngine *engine, asCTypeInfo *ti)
 // added nor released then. The frames of the inlined functions that are handed to
 // the VM get references of their own, see CJITCodeGen::EmitInlineExit and
 // JIT_OwnBorrowed, for which the call states of the materialized frames note the
-// borrowed parameters in the upper half of the stack index. Only 64bit hosts have
-// room there; 32bit hosts can still borrow for functions without sync points, whose
-// frames are either never materialized or get their own references in JIT_ExitInlined
+// borrowed parameters in the upper half of the stack index on 64bit hosts, and in
+// an otherwise unused word of the call state on 32bit hosts
 void CJITByteCode::AnalyseBorrows()
 {
 	ClearBorrows();
@@ -1395,21 +1394,6 @@ void CJITByteCode::FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlin
 				borrowed |= 1u << found[c].param;
 		if( !borrowed )
 			continue;
-
-#ifndef JIT_NATIVE_RETURN
-		// A materialized frame notes its borrowed parameters in the upper half of
-		// the stack index, which only has room on 64bit hosts. A function without
-		// sync points never materializes its frame; if it bails, JIT_ExitInlined
-		// gives the frame its own references directly.
-		if( !m_aot )
-		{
-			for( asUINT i = 0; i < inlinees.size(); i++ )
-				if( inlinees[i].code->HasSyncPoints(borrowed) )
-					borrowed = 0;
-			if( !borrowed )
-				continue;
-		}
-#endif
 
 		std::vector<int> checks;
 		for( asUINT c = 0; c < found.size(); c++ )

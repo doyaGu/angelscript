@@ -686,13 +686,22 @@ void CJITCodeGen::EmitMaterialize()
 		m_uc.store(PtrAt(state, 4), index);
 		if( callee.borrowed )
 		{
-			// The upper half of the stack index notes the borrowed parameters, see
-			// JIT_OwnBorrowed
+			// The upper half of the stack index, or the first word that ordinary call
+			// states leave unused on 32bit hosts, notes the borrowed parameters, see
+			// JIT_OwnBorrowed.
+#ifdef JIT_NATIVE_RETURN
 			Mem mask = PtrAt(state, 4);
 			mask.add_offset(4);
 			StoreImm32(mask, int(callee.borrowed));
+#else
+			StoreImm32(PtrAt(state, 5), int(callee.borrowed));
+#endif
 			borrowed = true;
 		}
+#ifndef JIT_NATIVE_RETURN
+		else
+			StoreImm32(PtrAt(state, 5), 0);
+#endif
 	}
 	m_uc.add(length, length, Imm(int(inlined.size() * layout.callStackFrameSize)));
 	m_uc.store_u32(ContextField(layout.callStackLength), length);
@@ -891,6 +900,12 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	(void)mark;
 #endif
 	m_uc.store(PtrAt(state, 4), t);
+#ifndef JIT_NATIVE_RETURN
+	// Words 5-8 are only used for nested-state markers by the engine. Clear the
+	// borrowed-parameter word so a call state that reuses a materialized slot can
+	// never inherit its note.
+	StoreImm32(PtrAt(state, 5), 0);
+#endif
 	Gp top = m_uc.new_gp_ptr();
 	m_uc.add(top, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), top);

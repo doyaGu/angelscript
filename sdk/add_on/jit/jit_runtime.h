@@ -157,7 +157,7 @@ int    JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg);
 // Catches the C++ exceptions like JIT_GuardedEntry, for the code generated ahead of
 // time, which catches them where it is entered, see CJITCppGen. Returns false if the
 // exception must be passed on
-bool   JIT_CatchException(asSVMRegisters *regs);
+bool   JIT_CatchException(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc);
 #endif
 
 // Script function calls. Performs the call and, if possible, executes the called
@@ -198,7 +198,8 @@ void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *f
 void   JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcept;
 
 // JIT_OwnParams for the frames of the inlined functions on the call stack, whose
-// call states note the borrowed parameters in the upper half of the stack index.
+// call states note the borrowed parameters in the upper half of the stack index on
+// 64bit hosts, or the first word unused by ordinary call states on 32bit hosts.
 // Goes from the innermost frame down to the frame of the function in rootFunc and
 // rootFrame, or to a nested call, and clears the notes
 void   JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc) noexcept;

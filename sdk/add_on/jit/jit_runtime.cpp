@@ -228,7 +228,8 @@ static inline bool SystemCallHasStackObject(const asSSystemFunctionInterface *sy
 // Turns the C++ exception being caught into a script exception like CallSystemFunction,
 // if it was thrown by a registered function that the generated code called directly.
 // Returns false otherwise
-static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
+static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx,
+                                     asDWORD *rootFrame, asCScriptFunction *rootFunc)
 {
 	asCScriptFunction *descr = ctx->m_callingSystemFunction;
 	if( descr == 0 )
@@ -236,7 +237,7 @@ static bool CatchDirectCallException(asSVMRegisters *regs, asCContext *ctx)
 	asCScriptEngine *engine = ctx->m_engine;
 
 	// The VM releases the parameters of the inlined functions on the call stack
-	JIT_OwnBorrowed(regs, 0, 0);
+	JIT_OwnBorrowed(regs, rootFrame, rootFunc);
 	ctx->HandleAppException();
 	ctx->m_callingSystemFunction = 0;
 
@@ -284,6 +285,8 @@ asUINT JIT_nativeCallDepth = 256;
 int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 {
 	asCContext *ctx = GetContext(regs);
+	asDWORD *rootFrame = regs->stackFramePointer;
+	asCScriptFunction *rootFunc = ctx->m_currentFunction;
 	// Call the generated code directly so an exception unwinds from it to this
 	// catch point without passing through the immutable dispatch wrapper.
 	JITFunction func = reinterpret_cast<JITFunction>(JIT_GetNativeTarget(ctx->m_currentFunction));
@@ -298,7 +301,7 @@ int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 	}
 	catch(...)
 	{
-		if( !CatchDirectCallException(regs, ctx) )
+		if( !CatchDirectCallException(regs, ctx, rootFrame, rootFunc) )
 			throw;
 		return 1;
 	}
@@ -306,9 +309,9 @@ int JIT_GuardedEntry(asSVMRegisters *regs, asPWORD jitArg)
 }
 
 #ifndef AS_NO_EXCEPTIONS
-bool JIT_CatchException(asSVMRegisters *regs)
+bool JIT_CatchException(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc)
 {
-	return CatchDirectCallException(regs, GetContext(regs));
+	return CatchDirectCallException(regs, GetContext(regs), rootFrame, rootFunc);
 }
 #endif
 
@@ -330,6 +333,11 @@ static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptF
 
 	if( ctx->PushCallState() < 0 )
 		return 1;
+#if AS_PTR_SIZE == 1
+	// Ordinary call states leave this word unused. Materialized inlined frames use
+	// it for their borrowed-parameter mask, so always initialize reused storage.
+	ctx->m_callStack[ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE + 5] = 0;
+#endif
 	ctx->m_currentFunction = func;
 	return jitFunc(regs, 0, callLimit, regs->stackPointer);
 }
@@ -548,6 +556,9 @@ void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *fra
 	regs->programPointer = callerPC;
 	regs->stackPointer   = frame;
 	ctx->PushCallState();
+#if AS_PTR_SIZE == 1
+	ctx->m_callStack[ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE + 5] = 0;
+#endif
 
 	regs->stackFramePointer = frame;
 	ctx->m_currentFunction  = func;
@@ -584,12 +595,22 @@ void JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction
 		asPWORD *s = ctx->m_callStack.AddressOf() + n - CALLSTACK_FRAME_SIZE;
 		if( s[0] == 0 )
 			break;
+		asUINT mask;
+#if AS_PTR_SIZE == 1
+		static_assert(CALLSTACK_FRAME_SIZE > 5, "borrowed parameter mask needs a spare call-state word");
+		mask = asUINT(s[5]);
+#else
 		asQWORD index = asQWORD(s[4]);
-		asUINT mask = asUINT(index >> 32) & 0x7FFFFFFF;
+		mask = asUINT(index >> 32) & 0x7FFFFFFF;
+#endif
 		if( mask )
 		{
 			JIT_OwnParams(func, frame, mask);
+#if AS_PTR_SIZE == 1
+			s[5] = 0;
+#else
 			s[4] = asPWORD(index & ~(asQWORD(0x7FFFFFFF) << 32));
+#endif
 		}
 		frame = (asDWORD*)s[0];
 		func  = (asCScriptFunction*)s[1];
@@ -1238,13 +1259,15 @@ static void EnterFromApplication(asSVMRegisters *regs, asCContext *ctx, JITFunct
 	UNUSED_VAR(ctx);
 	func(regs, 0, callLimit, regs->stackPointer);
 #else
+	asDWORD *rootFrame = regs->stackFramePointer;
+	asCScriptFunction *rootFunc = ctx->m_currentFunction;
 	try
 	{
 		func(regs, 0, callLimit, regs->stackPointer);
 	}
 	catch(...)
 	{
-		if( !CatchDirectCallException(regs, ctx) )
+		if( !CatchDirectCallException(regs, ctx, rootFrame, rootFunc) )
 			throw;
 	}
 #endif

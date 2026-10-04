@@ -601,7 +601,7 @@ bool CJITCppGen::Generate(const char *name, std::string &out, bool direct)
 			pos = end;
 		}
 		text += "\t}\n#ifndef AS_NO_EXCEPTIONS\n";
-		text += "\tcatch(...)\n\t{\n\t\tif( !JIT_CatchException(regs) )\n\t\t\tthrow;\n\t\treturn 1;\n\t}\n#endif\n";
+		text += "\tcatch(...)\n\t{\n\t\tif( !JIT_CatchException(regs, fp, self) )\n\t\t\tthrow;\n\t\treturn 1;\n\t}\n#endif\n";
 	}
 	else
 		text += m_out;
