@@ -20,9 +20,10 @@ BEGIN_AS_NAMESPACE
 // x86. The hidden pointer for a value returned in memory is passed like the first
 // argument, except after the object pointer of class methods with MSVC. The other
 // compilers for 32bit x86 let the called function pop it, which the calls can't
-// express, and AArch64 passes it in a register that isn't used for arguments. The
-// arguments of the calls are all passed in registers there too, as the ABIs of the
-// platforms lay out the ones on the stack differently
+// express, and AArch64 passes it in a register that isn't used for arguments. On
+// AArch64 the arguments are otherwise kept in registers, except for an HFA that
+// doesn't fit and the floating-point arguments after it. Its synthetic C++ type
+// lets the target compiler reproduce the platform-specific stack layout
 #if defined(AS_MAX_PORTABILITY) || defined(AS_BIG_ENDIAN)
 #elif defined(AS_X64_MSVC)
 #define JIT_AOT_ABI "defined(AS_X64_MSVC)"
@@ -374,6 +375,7 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 	call.args.clear();
 	call.argBytes.clear();
 	int size = 0, intArgs = 0, floatArgs = 0;
+	bool spilledHFA = false;
 	for( asUINT n = 0; n < descr->parameterTypes.GetLength(); n++ )
 	{
 		const asCDataType &pt = descr->parameterTypes[n];
@@ -396,7 +398,22 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 			call.args.push_back(valueSize > 0 ? InlineValueArgKind(valueSize, valueFloat, hfaPartSize) : SJITSystemCall::VALUE_PTR);
 			call.argBytes.push_back(valueSize > 0 ? valueSize : 0);
 			size += AS_PTR_SIZE;
-			if( valueFloat ) floatArgs += hfaPartSize ? valueSize / hfaPartSize : valueSize > 8 ? 2 : 1; else intArgs += valueSize > 8 ? 2 : 1;
+			if( valueFloat )
+			{
+				int parts = hfaPartSize ? valueSize / hfaPartSize : valueSize > 8 ? 2 : 1;
+#ifdef AS_ARM64
+				// The AAPCS64 puts the whole HFA on the stack if it doesn't fit in
+				// the remaining FP registers. The emitted scalar or aot_parts type
+				// has the same FP classification, so the C++ compiler performs that
+				// transition and places every later FP argument on the stack as well.
+				if( hfaPartSize && floatArgs <= JIT_AOT_REGISTER_ARGS &&
+				    floatArgs + parts > JIT_AOT_REGISTER_ARGS )
+					spilledHFA = true;
+#endif
+				floatArgs += parts;
+			}
+			else
+				intArgs += valueSize > 8 ? 2 : 1;
 		}
 		else if( pt.IsFloatType() )               { call.args.push_back(SJITSystemCall::VALUE_F32); call.argBytes.push_back(0); size += 1; floatArgs++; }
 		else if( pt.IsDoubleType() )              { call.args.push_back(SJITSystemCall::VALUE_F64); call.argBytes.push_back(0); size += 2; floatArgs++; }
@@ -408,11 +425,12 @@ bool CJITCppGen::GetSystemCall(asCScriptEngine *engine, int funcId, SJITSystemCa
 #ifdef JIT_AOT_REGISTER_ARGS
 	intArgs += (call.obj != SJITSystemCall::OBJ_NONE ? 1 : 0) +
 		(call.thisFromStack || call.auxiliaryThis ? 1 : 0) + (call.retInMemory ? 1 : 0);
-	if( intArgs > JIT_AOT_REGISTER_ARGS || floatArgs > JIT_AOT_REGISTER_ARGS )
+	if( intArgs > JIT_AOT_REGISTER_ARGS || (floatArgs > JIT_AOT_REGISTER_ARGS && !spilledHFA) )
 		return false;
 #else
 	UNUSED_VAR(intArgs);
 	UNUSED_VAR(floatArgs);
+	UNUSED_VAR(spilledHFA);
 #endif
 	call.popSize = size + (call.obj != SJITSystemCall::OBJ_NONE || call.thisFromStack ? AS_PTR_SIZE : 0) +
 		(call.retOnStack ? AS_PTR_SIZE : 0);
