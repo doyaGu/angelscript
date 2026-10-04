@@ -720,7 +720,7 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 	if( IsIndirectValueArg(func, param) )
 		return 0;
 
-#ifdef AS_X64_MSVC
+#if defined(AS_X64_MSVC) || defined(AS_X64_MINGW)
 	// The Microsoft x64 ABI passes POD aggregates of exactly 1, 2, 4, or 8 bytes
 	// in an integer slot. The engine's native backend copies those bytes out of the
 	// temporary script object before freeing it.
