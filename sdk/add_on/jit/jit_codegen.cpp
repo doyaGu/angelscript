@@ -33,6 +33,9 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	m_func       = 0;
 	m_guarded    = false;
 	m_vrInReg    = uc.is_64bit();
+#if defined(ASMJIT_UJIT_X86)
+	m_vrInReg    = true;
+#endif
 	m_spInArg    = uc.is_64bit();
 	m_staticStack = code.HasStaticStack();
 	m_spOffset   = 0;
@@ -1019,7 +1022,11 @@ void CJITCodeGen::EmitPrologue()
 	}
 
 	if( m_vrInReg )
-		m_vr = m_uc.new_gp64("vr");
+	{
+		m_vr = Is64Bit() ? m_uc.new_gp64("vr") : m_uc.new_gp32("vrLo");
+		if( !Is64Bit() )
+			m_vrHi = m_uc.new_gp32("vrHi");
+	}
 
 	m_bailPC = m_uc.new_gp_ptr("bailPC");
 
@@ -1481,6 +1488,18 @@ void CJITCodeGen::LoadVR64(const Gp &dst)
 		m_uc.load_u64(dst, VRMem());
 }
 
+void CJITCodeGen::LoadVRF64(const Vec &dst)
+{
+	assert( !Is64Bit() );
+	if( m_vrInReg )
+	{
+		m_uc.s_mov_u32(dst, m_vr);
+		m_uc.s_insert_u32(dst, m_vrHi, 1);
+	}
+	else
+		m_uc.v_loadu64_f64(dst, VRMem());
+}
+
 void CJITCodeGen::LoadVRPtr(const Gp &dst)
 {
 	if( m_vrInReg )
@@ -1508,6 +1527,35 @@ void CJITCodeGen::StoreVR64(const Gp &src)
 		m_uc.store_u64(VRMem(), src);
 }
 
+void CJITCodeGen::StoreVR64(const Gp &lo, const Gp &hi)
+{
+	assert( !Is64Bit() );
+	if( m_vrInReg )
+	{
+		m_uc.mov(m_vr, lo);
+		m_uc.mov(m_vrHi, hi);
+	}
+	else
+	{
+		m_uc.store_u32(VRMem(), lo);
+		Mem high = VRMem();
+		high.add_offset(4);
+		m_uc.store_u32(high, hi);
+	}
+}
+
+void CJITCodeGen::StoreVRF64(const Vec &src)
+{
+	assert( !Is64Bit() );
+	if( m_vrInReg )
+	{
+		m_uc.s_extract_u32(m_vr, src, 0);
+		m_uc.s_extract_u32(m_vrHi, src, 1);
+	}
+	else
+		m_uc.v_storeu64_f64(VRMem(), src);
+}
+
 void CJITCodeGen::StoreVRPtr(const Gp &src)
 {
 	if( m_vrInReg )
@@ -1531,13 +1579,33 @@ void CJITCodeGen::StoreVRImm32(int value)
 void CJITCodeGen::SyncVR()
 {
 	if( m_vrInReg )
-		m_uc.store_u64(VRMem(), m_vr);
+	{
+		if( Is64Bit() )
+			m_uc.store_u64(VRMem(), m_vr);
+		else
+		{
+			m_uc.store_u32(VRMem(), m_vr);
+			Mem hi = VRMem();
+			hi.add_offset(4);
+			m_uc.store_u32(hi, m_vrHi);
+		}
+	}
 }
 
 void CJITCodeGen::ReloadVR()
 {
 	if( m_vrInReg )
-		m_uc.load_u64(m_vr, VRMem());
+	{
+		if( Is64Bit() )
+			m_uc.load_u64(m_vr, VRMem());
+		else
+		{
+			m_uc.load_u32(m_vr, VRMem());
+			Mem hi = VRMem();
+			hi.add_offset(4);
+			m_uc.load_u32(m_vrHi, hi);
+		}
+	}
 }
 
 bool CJITCodeGen::CanFoldVRAddr(asUINT idx) const
@@ -2311,7 +2379,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		if( Is64Bit() )
 			StoreVR64(Load64(a0));
 		else
-			m_uc.v_storeu64_f64(VRMem(), LoadF64(a0));
+			StoreVRF64(LoadF64(a0));
 		break;
 
 	case asBC_CpyRtoV4:
@@ -2332,7 +2400,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		else
 		{
 			Vec v = m_uc.new_vec128_f64x1();
-			m_uc.v_loadu64_f64(v, VRMem());
+			LoadVRF64(v);
 			CommitF64(a0, v);
 		}
 		break;

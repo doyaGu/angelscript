@@ -269,9 +269,12 @@ protected:
 	// Value register access
 	void LoadVR32(const Gp &dst);
 	void LoadVR64(const Gp &dst);
+	void LoadVRF64(const Vec &dst);
 	void LoadVRPtr(const Gp &dst);
 	void StoreVR32(const Gp &src);
 	void StoreVR64(const Gp &src);
+	void StoreVR64(const Gp &lo, const Gp &hi);
+	void StoreVRF64(const Vec &src);
 	void StoreVRPtr(const Gp &src);
 	void StoreVRImm32(int value);
 	void SyncVR();
@@ -350,7 +353,8 @@ protected:
 	std::vector<Gp>  m_fieldGp;  // the fields of the object held in registers, see CJITByteCode::GetFields
 	std::vector<Vec> m_fieldVec; // those kept in vector registers
 	Gp  m_sp;       // stack pointer, unless the stack is static
-	Gp  m_vr;       // value register (64bit hosts only)
+	Gp  m_vr;       // value register, or its lower half on 32bit hosts
+	Gp  m_vrHi;     // upper half of the value register on 32bit hosts
 	Gp  m_bailPC;   // program pointer to set when bailing
 	bool m_vrInReg;
 	bool m_spInArg;     // native callers pass the stack pointer as argument (64bit hosts only)

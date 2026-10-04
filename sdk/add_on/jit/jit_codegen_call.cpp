@@ -2196,12 +2196,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		if( Is64Bit() )
 			StoreVR64(retGp);
 		else
-		{
-			m_uc.store_u32(VRMem(), retGp);
-			Mem hi = VRMem();
-			hi.add_offset(4);
-			m_uc.store_u32(hi, retGpHi);
-		}
+			StoreVR64(retGp, retGpHi);
 		break;
 	case RET_F32:
 		{
@@ -2218,7 +2213,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			StoreVR64(bits);
 		}
 		else
-			m_uc.v_storeu64_f64(VRMem(), retVec);
+			StoreVRF64(retVec);
 		break;
 	case RET_PTR:
 		StoreVRPtr(retGp);
