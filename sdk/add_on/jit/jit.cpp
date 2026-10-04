@@ -33,7 +33,7 @@
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
 //  - Borrow handle arguments of non-inlined dynamic calls that don't have checked
-//    virtual/interface implementations, such as bound and function-pointer calls
+//    implementations, such as function-pointer calls
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
@@ -106,6 +106,7 @@ struct CJITCompiler::SImpl
 		SJITProfile                        vmProfile; // classes seen while this function is interpreted
 		std::map<const asDWORD*, SJITSeenClasses*> vmCalls; // profile cells by the address after asBC_CALLINTF
 		std::atomic<bool>                   profilesVMCalls;
+		std::vector<asCScriptFunction*>     borrowedTargets; // kept alive while generated code compares their addresses
 	};
 	std::map<asJITFunction, SEntry*> entries; // by the immutable wrapper given to the engine
 	std::map<asCScriptFunction*, SEntry*> functionEntries;
@@ -150,6 +151,7 @@ struct CJITCompiler::SImpl
 	void Release(asJITFunction code);
 	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode = 0);
 	SEntry *FindEntry(asCScriptFunction *func);
+	void RetainBorrowedTargets(SEntry *entry, const CJITByteCode &code);
 	void PrepareVMProfile(SEntry *entry, const CJITByteCode &code);
 	void FinishVMProfile(SEntry *entry);
 	void NoteVMClass(asSVMRegisters *regs);
@@ -191,8 +193,17 @@ CJITCompiler::~CJITCompiler()
 	for( std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.begin(); it != m_impl->histories.end(); ++it )
 		for( size_t n = 0; n < it->second.profiles.size(); n++ )
 			delete it->second.profiles[n];
+	std::vector<asCScriptFunction*> borrowedTargets;
 	for( std::map<asJITFunction, SImpl::SEntry*>::iterator it = m_impl->entries.begin(); it != m_impl->entries.end(); ++it )
+	{
+		borrowedTargets.insert(borrowedTargets.end(), it->second->borrowedTargets.begin(), it->second->borrowedTargets.end());
+		it->second->borrowedTargets.clear();
 		delete it->second;
+	}
+	m_impl->entries.clear();
+	m_impl->functionEntries.clear();
+	for( size_t n = 0; n < borrowedTargets.size(); n++ )
+		borrowedTargets[n]->ReleaseInternal();
 	delete m_impl;
 }
 
@@ -463,6 +474,24 @@ CJITCompiler::SImpl::SEntry *CJITCompiler::SImpl::FindEntry(asCScriptFunction *f
 	return it != functionEntries.end() ? it->second : 0;
 }
 
+// Keeps bound functions whose addresses are embedded in an entry's current or
+// retired code alive. Recompilation may add targets after an import is rebound;
+// each distinct function is retained once until the immutable entry is released.
+// Must be called with the lock held.
+void CJITCompiler::SImpl::RetainBorrowedTargets(SEntry *entry, const CJITByteCode &code)
+{
+	if( entry == 0 )
+		return;
+	const std::vector<asCScriptFunction*> &targets = code.GetBorrowedDependencies();
+	for( size_t n = 0; n < targets.size(); n++ )
+	{
+		if( std::find(entry->borrowedTargets.begin(), entry->borrowedTargets.end(), targets[n]) != entry->borrowedTargets.end() )
+			continue;
+		targets[n]->AddRefInternal();
+		entry->borrowedTargets.push_back(targets[n]);
+	}
+}
+
 // Prepares cells for the classes seen by the virtual and interface calls while a
 // deferred function still runs in the VM. The return addresses of the calls are in
 // their call states when their script implementations enter ResolveEntry.
@@ -646,6 +675,8 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 			runtime.release(wrapper);
 		if( ok )
 		{
+			if( byteCode )
+				RetainBorrowedTargets(entry, *byteCode);
 			entry->wrapper = wrapper;
 			entries[wrapper] = entry;
 			functionEntries[func] = entry;
@@ -809,7 +840,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 				*output = reinterpret_cast<asJITFunction>(it->second);
 				return asSUCCESS;
 			}
-			int wrapped = m_impl->CreateEntry(func, reinterpret_cast<asJITFunction>(it->second), std::vector<asUINT>(), output);
+			int wrapped = m_impl->CreateEntry(func, reinterpret_cast<asJITFunction>(it->second), std::vector<asUINT>(), output, &code);
 			if( wrapped >= 0 )
 			{
 				std::lock_guard<std::mutex> lock(m_impl->mutex);
@@ -845,7 +876,7 @@ int CJITCompiler::CompileFunction(asIScriptFunction *function, asJITFunction *ou
 	int compiledResult = m_impl->Compile(func, code, log, &compiled);
 	if( compiledResult < 0 )
 		return compiledResult;
-	int wrapped = m_impl->CreateEntry(func, compiled, std::vector<asUINT>(), output);
+	int wrapped = m_impl->CreateEntry(func, compiled, std::vector<asUINT>(), output, &code);
 	if( wrapped < 0 )
 	{
 		std::lock_guard<std::mutex> lock(m_impl->mutex);
@@ -1085,6 +1116,7 @@ JITFunction CJITCompiler::SImpl::TierUp(SEntry *entry, bool exact)
 			entry->counts[n].store(0, std::memory_order_relaxed);
 		return 0;
 	}
+	RetainBorrowedTargets(entry, code);
 	entry->code.store(reinterpret_cast<JITFunction>(jitFunc), std::memory_order_release);
 	FinishVMProfile(entry);
 	return reinterpret_cast<JITFunction>(jitFunc);
@@ -1130,6 +1162,7 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 	impl->compiling.erase(func);
 	if( !ok )
 		return 0;
+	impl->RetainBorrowedTargets(impl->FindEntry(func), code);
 	impl->Replace(func, jitFunc);
 	return 1;
 }
@@ -1166,6 +1199,7 @@ JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
 	compiling.erase(func);
 	if( !ok )
 		return 0;
+	RetainBorrowedTargets(FindEntry(func), code);
 	Replace(func, jitFunc);
 	return reinterpret_cast<JITFunction>(jitFunc);
 }
@@ -1286,38 +1320,47 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 	if( func == 0 )
 		return;
 
-	std::lock_guard<std::mutex> lock(m_impl->mutex);
-	// AOT functions are returned directly on platforms where wrappers cannot be
-	// generated, and are part of the application rather than the JIT runtime.
-	if( m_impl->aotPointers.count(func) )
-		return;
-	std::map<asJITFunction, SImpl::SEntry*>::iterator found = m_impl->entries.find(func);
-	if( found == m_impl->entries.end() )
-		return;
-	SImpl::SEntry *entry = found->second;
-	m_impl->FinishVMProfile(entry);
-	asJITFunction code = reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire));
-	bool releasable = code && !m_impl->aotPointers.count(code);
-
-	// The code that the function had before goes with it, see Recompile
-	std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.find(code);
-	if( it != m_impl->histories.end() )
+	std::vector<asCScriptFunction*> borrowedTargets;
 	{
-		for( size_t n = 0; n < it->second.retired.size(); n++ )
-			if( !m_impl->aotPointers.count(it->second.retired[n]) )
-				m_impl->Release(it->second.retired[n]);
-		for( size_t n = 0; n < it->second.profiles.size(); n++ )
-			delete it->second.profiles[n];
-		m_impl->histories.erase(it);
+		std::lock_guard<std::mutex> lock(m_impl->mutex);
+		// AOT functions are returned directly on platforms where wrappers cannot be
+		// generated, and are part of the application rather than the JIT runtime.
+		if( m_impl->aotPointers.count(func) )
+			return;
+		std::map<asJITFunction, SImpl::SEntry*>::iterator found = m_impl->entries.find(func);
+		if( found == m_impl->entries.end() )
+			return;
+		SImpl::SEntry *entry = found->second;
+		m_impl->FinishVMProfile(entry);
+		asJITFunction code = reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire));
+		bool releasable = code && !m_impl->aotPointers.count(code);
+
+		// The code that the function had before goes with it, see Recompile
+		std::map<asJITFunction, SImpl::SHistory>::iterator it = m_impl->histories.find(code);
+		if( it != m_impl->histories.end() )
+		{
+			for( size_t n = 0; n < it->second.retired.size(); n++ )
+				if( !m_impl->aotPointers.count(it->second.retired[n]) )
+					m_impl->Release(it->second.retired[n]);
+			for( size_t n = 0; n < it->second.profiles.size(); n++ )
+				delete it->second.profiles[n];
+			m_impl->histories.erase(it);
+		}
+		if( releasable )
+			m_impl->Release(code);
+		m_impl->Release(func);
+		m_impl->functionEntries.erase(entry->func);
+		m_impl->entries.erase(found);
+		borrowedTargets.swap(entry->borrowedTargets);
+		delete entry;
+		if( releasable )
+			m_impl->stats.functionsReleased++;
 	}
-	if( releasable )
-		m_impl->Release(code);
-	m_impl->Release(func);
-	m_impl->functionEntries.erase(entry->func);
-	m_impl->entries.erase(found);
-	delete entry;
-	if( releasable )
-		m_impl->stats.functionsReleased++;
+
+	// Releasing a target may destroy it and call ReleaseJITFunction recursively.
+	// Do this only after the compiler lock and the caller's entry are gone.
+	for( size_t n = 0; n < borrowedTargets.size(); n++ )
+		borrowedTargets[n]->ReleaseInternal();
 }
 
 // Frees the code and its unwind information. Must be called with the lock held

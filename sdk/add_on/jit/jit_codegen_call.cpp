@@ -105,7 +105,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( imported < func->engine->importedFunctions.GetLength() && func->engine->importedFunctions[imported] )
 			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
 	}
-	const std::vector<asCScriptFunction*> *borrowTargets = kind == JIT_CALL_INTERFACE ? &m_code->GetBorrowedTargets(idx) : 0;
+	const std::vector<asCScriptFunction*> *borrowTargets = (kind == JIT_CALL_INTERFACE || kind == JIT_CALL_BOUND) ? &m_code->GetBorrowedTargets(idx) : 0;
 	asUINT borrowed = (kind == JIT_CALL_SCRIPT || (borrowTargets && !borrowTargets->empty())) ? m_code->GetBorrowedArgs(idx) : 0;
 
 	bool native = false;
@@ -195,6 +195,14 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			resolve->set_arg(1, Imm(funcId));
 			resolve->set_ret(0, method);
 			m_uc.j(slow, test_z(method));
+			if( borrowed )
+			{
+				Label accepted = m_uc.new_label();
+				for( asUINT n = 0; n + 1 < borrowTargets->size(); n++ )
+					m_uc.j(accepted, cmp_eq(method, PtrConst(asPWORD((*borrowTargets)[n]))));
+				m_uc.j(slow, cmp_ne(method, PtrConst(asPWORD(borrowTargets->back()))));
+				m_uc.bind(accepted);
+			}
 			target = m_uc.new_gp_ptr();
 			m_uc.load(target, Addr(method, layout.scriptData));
 			m_uc.load(target, Addr(target, layout.jitFunction));
