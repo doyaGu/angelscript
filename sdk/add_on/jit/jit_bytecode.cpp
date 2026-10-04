@@ -761,7 +761,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 				search.path.pop_back();
 				callee->FindIndexers(inlining.indexers);
-				callee->AnalyseBorrows();
+				callee->AnalyseBorrows(inlining.borrowCalls);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
 		}
@@ -890,7 +890,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
 	FindIndexers(inlining ? inlining->indexers : 0);
-	AnalyseBorrows();
+	AnalyseBorrows(inlining && inlining->borrowCalls);
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
@@ -1059,26 +1059,66 @@ EJITRefKind CJITByteCode::GetRefKind(asCScriptEngine *engine, asCTypeInfo *ti)
 }
 
 // The calls copy the handles that they pass, which adds a reference that the called
-// function releases when it returns. An inlined function that only reads a handle
-// parameter can borrow the reference of the variable that the caller copies it
-// from instead, if the variable holds its own reference and isn't modified until
+// function releases when it returns. A natively called function that only reads a
+// handle parameter can borrow the reference of the variable that the caller copies
+// it from instead, if the variable holds its own reference and isn't modified until
 // the call has returned, which keeps the object alive. Neither is the reference
-// added nor released then. The frames of the inlined functions that are handed to
-// the VM get references of their own, see CJITCodeGen::EmitInlineExit and
-// JIT_OwnBorrowed, for which the call states of the materialized frames note the
-// borrowed parameters in the upper half of the stack index on 64bit hosts, and in
-// an otherwise unused word of the call state on 32bit hosts
-void CJITByteCode::AnalyseBorrows()
+// added nor released then. Generated call states note the borrowed parameters so
+// callees entered separately can skip their releases, and so frames handed to the
+// VM get references of their own, see CJITCodeGen::EmitInlineExit,
+// CJITCodeGen::OwnDirectBorrowed, and JIT_OwnBorrowed
+void CJITByteCode::AnalyseBorrows(bool borrowCalls)
 {
 	ClearBorrows();
 	if( m_staticStack )
 	{
 		FindBorrowableParams();
 		FindBorrowedArgs(m_inlinees);
+		if( borrowCalls )
+			FindCalledBorrowedArgs();
 	}
 	FindMovedRefs();
 	FindInPlaceRefCounts();
 	FindListFrees();
+}
+
+// Finds the statically known script functions called without being inlined. Their
+// generated native entries receive the borrowed-parameter mask through the call
+// state. If a target is deferred, generated ahead of time, or left to the VM, its
+// immutable wrapper gives the arguments references of their own before entering it.
+void CJITByteCode::FindCalledBorrowedArgs()
+{
+	std::map<asUINT, std::vector<SJITInlinee> > callees;
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( instr.op != asBC_CALL || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INLINE)) )
+			continue;
+
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
+		                           ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
+			continue;
+
+		std::shared_ptr<CJITByteCode> callee = std::make_shared<CJITByteCode>();
+		if( callee->Decode(func) < 0 )
+			continue;
+		if( m_bail )
+			callee->SetBailInstructions(m_bail);
+		callee->MarkUnreachable(false);
+		callee->AnalyseStackDepth();
+		callee->ClearBorrows();
+		callee->FindBorrowableParams();
+		if( callee->GetBorrowableParams() == 0 )
+			continue;
+
+		SJITInlinee direct;
+		direct.code = callee;
+		callees[n].push_back(direct);
+	}
+	FindBorrowedArgs(callees);
 }
 
 void CJITByteCode::ClearBorrows()

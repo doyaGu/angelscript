@@ -333,11 +333,10 @@ static int EnterScriptFunction(asSVMRegisters *regs, asCContext *ctx, asCScriptF
 
 	if( ctx->PushCallState() < 0 )
 		return 1;
-#if AS_PTR_SIZE == 1
-	// Ordinary call states leave this word unused. Materialized inlined frames use
-	// it for their borrowed-parameter mask, so always initialize reused storage.
-	ctx->m_callStack[ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE + 5] = 0;
-#endif
+	// This is a native JIT call, but the helper path has already counted all
+	// arguments. Initialize the otherwise unused word so a reused call state can't
+	// inherit a borrowed-parameter note.
+	ctx->m_callStack[ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE + 5] = JIT_NATIVE_CALL_STATE;
 	ctx->m_currentFunction = func;
 	return jitFunc(regs, 0, callLimit, regs->stackPointer);
 }
@@ -556,9 +555,7 @@ void JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *fra
 	regs->programPointer = callerPC;
 	regs->stackPointer   = frame;
 	ctx->PushCallState();
-#if AS_PTR_SIZE == 1
 	ctx->m_callStack[ctx->m_callStack.GetLength() - CALLSTACK_FRAME_SIZE + 5] = 0;
-#endif
 
 	regs->stackFramePointer = frame;
 	ctx->m_currentFunction  = func;
@@ -585,6 +582,7 @@ void JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcep
 
 void JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc) noexcept
 {
+	static_assert(CALLSTACK_FRAME_SIZE > 5, "borrowed parameter mask needs a spare call-state word");
 	asCContext *ctx = GetContext(regs);
 	asCScriptFunction *func = ctx->m_currentFunction;
 	asDWORD *frame = regs->stackFramePointer;
@@ -595,25 +593,27 @@ void JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction
 		asPWORD *s = ctx->m_callStack.AddressOf() + n - CALLSTACK_FRAME_SIZE;
 		if( s[0] == 0 )
 			break;
+		asDWORD *callerFrame = reinterpret_cast<asDWORD*>(s[0]);
+		asCScriptFunction *callerFunc = reinterpret_cast<asCScriptFunction*>(s[1]);
+		asUINT note = asUINT(s[5]);
+		asUINT direct = (note & JIT_NATIVE_CALL_STATE) ? note & JIT_BORROWED_ARG_MASK : 0;
 		asUINT mask;
 #if AS_PTR_SIZE == 1
-		static_assert(CALLSTACK_FRAME_SIZE > 5, "borrowed parameter mask needs a spare call-state word");
-		mask = asUINT(s[5]);
+		mask = direct ? direct : note & JIT_BORROWED_ARG_MASK;
 #else
 		asQWORD index = asQWORD(s[4]);
-		mask = asUINT(index >> 32) & 0x7FFFFFFF;
+		mask = direct | (asUINT(index >> 32) & JIT_BORROWED_ARG_MASK);
 #endif
 		if( mask )
 		{
-			JIT_OwnParams(func, frame, mask);
-#if AS_PTR_SIZE == 1
-			s[5] = 0;
-#else
-			s[4] = asPWORD(index & ~(asQWORD(0x7FFFFFFF) << 32));
+#if AS_PTR_SIZE == 2
+			s[4] = asPWORD(index & ~(asQWORD(JIT_BORROWED_ARG_MASK) << 32));
 #endif
+			s[5] = direct ? JIT_NATIVE_CALL_STATE : 0;
+			JIT_OwnParams(func, frame, mask);
 		}
-		frame = (asDWORD*)s[0];
-		func  = (asCScriptFunction*)s[1];
+		frame = callerFrame;
+		func  = callerFunc;
 	}
 }
 

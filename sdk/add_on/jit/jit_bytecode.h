@@ -183,6 +183,7 @@ struct SJITInlineOptions
 	void  *filterParam;
 	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
 	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
+	bool   borrowCalls; // borrow handle arguments of non-inlined calls with static targets
 	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
 };
 
@@ -397,10 +398,11 @@ protected:
 	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
 	void FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers);
-	void AnalyseBorrows();
+	void AnalyseBorrows(bool borrowCalls = false);
 	void ClearBorrows();
 	void FindBorrowableParams();
 	void FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlinee> > &callees);
+	void FindCalledBorrowedArgs();
 	void FindAOTBorrowedArgs();
 	void FindMovedRefs();
 	void FindInPlaceRefCounts();

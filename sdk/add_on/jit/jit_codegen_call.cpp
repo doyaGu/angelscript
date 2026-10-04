@@ -105,6 +105,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( imported < func->engine->importedFunctions.GetLength() && func->engine->importedFunctions[imported] )
 			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
 	}
+	asUINT borrowed = kind == JIT_CALL_SCRIPT ? m_code->GetBorrowedArgs(idx) : 0;
 
 	bool native = false;
 	if( kind == JIT_CALL_SCRIPT || kind == JIT_CALL_ALLOC )
@@ -228,7 +229,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		// is known after any call
 		bool reload = !m_staticStack && (kind == JIT_CALL_PTR || callee->IsVariadic());
 		bool vrInReg = !callee || kind == JIT_CALL_PTR || CJITByteCode::ReturnsInVR(callee);
-		vrReturned = EmitNativeCall(idx, target, method, r, slow, !reload, vrInReg);
+		vrReturned = EmitNativeCall(idx, target, method, r, slow, !reload, vrInReg, borrowed);
 		if( delegate.is_valid() )
 			EmitDelegateCall(idx, int(extra), delegate, slow, r, !reload, vrInReg);
 		if( reload || m_staticStack )
@@ -248,6 +249,14 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		if( m_code->GetDirtyMask(idx) & JIT_FRAME_BIT )
 			StoreFrame();
 		SetPC(instr.pos);
+	}
+	if( borrowed )
+	{
+		Gp frame = StackPointer();
+		InvokeNode *own = Invoke((const void*)JIT_OwnParams, FuncSignature::build<void, asCScriptFunction*, asDWORD*, asUINT>());
+		own->set_arg(0, Imm(int64_t(asPWORD(callee))));
+		own->set_arg(1, frame);
+		own->set_arg(2, Imm(int(borrowed)));
 	}
 	// The function pointer is loaded again here, see above
 	Gp funcPtr;
@@ -323,7 +332,7 @@ void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegat
 	Gp sp = m_uc.new_gp_ptr();
 	m_uc.sub(sp, StackPointer(), Imm(PTR_BYTES));
 	m_uc.store(mem_ptr(sp), obj);
-	EmitNativeCall(idx, target, method, result, slow, mark, vrInReg, &sp);
+	EmitNativeCall(idx, target, method, result, slow, mark, vrInReg, 0, &sp);
 	EndCold(cold, done);
 	m_uc.bind(done);
 }
@@ -684,6 +693,9 @@ void CJITCodeGen::EmitMaterialize()
 		m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(caller.code->GetByteCode() + instr.pos + instr.size)));
 		m_uc.store(PtrAt(state, 3), FramePointer(callee.base));
 		m_uc.store(PtrAt(state, 4), index);
+#ifdef JIT_NATIVE_RETURN
+		m_uc.store_zero_reg(PtrAt(state, 5));
+#endif
 		if( callee.borrowed )
 		{
 			// The upper half of the stack index, or the first word that ordinary call
@@ -861,7 +873,7 @@ void CJITCodeGen::EmitRecompile(asUINT idx)
 // value register is live, and true is returned then. In interop mode the current
 // function of the context is set to callee, and the call state isn't marked, see
 // JITFunction
-bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, const Gp *stackPointer)
+bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, asUINT borrowed, const Gp *stackPointer)
 {
 	if( FailIfHidden() )
 		return false;
@@ -900,12 +912,11 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	(void)mark;
 #endif
 	m_uc.store(PtrAt(state, 4), t);
-#ifndef JIT_NATIVE_RETURN
-	// Words 5-8 are only used for nested-state markers by the engine. Clear the
-	// borrowed-parameter word so a call state that reuses a materialized slot can
-	// never inherit its note.
-	StoreImm32(PtrAt(state, 5), 0);
-#endif
+	// Engine call states leave words 5-8 unused. The mark distinguishes this state
+	// from one the VM created, and the mask is read by the callee's direct entry.
+	Gp note = m_uc.new_gp_ptr();
+	m_uc.mov(note, Imm(asPWORD(JIT_NATIVE_CALL_STATE | (borrowed & JIT_BORROWED_ARG_MASK))));
+	m_uc.store(PtrAt(state, 5), note);
 	Gp top = m_uc.new_gp_ptr();
 	m_uc.add(top, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), top);
@@ -959,6 +970,26 @@ void CJITCodeGen::CallStackLength(const Gp &dst)
 		m_uc.mov(dst, m_callStackLength);
 }
 
+// The direct entry may have borrowed handle parameters from a non-inlined caller.
+// Before anything can expose this frame to the VM, give the parameters references
+// of their own and clear the note so exception unwinding can't count them twice.
+void CJITCodeGen::OwnDirectBorrowed()
+{
+	if( !m_directBorrowed.is_valid() )
+		return;
+	Label done = m_uc.new_label();
+	m_uc.j(done, test_z(m_directBorrowed));
+	Gp note = m_uc.new_gp_ptr();
+	m_uc.mov(note, Imm(asPWORD(JIT_NATIVE_CALL_STATE)));
+	m_uc.store(mem_ptr(m_borrowState), note);
+	InvokeNode *call = Invoke((const void*)JIT_OwnParams, FuncSignature::build<void, asCScriptFunction*, asDWORD*, asUINT>());
+	call->set_arg(0, Imm(int64_t(asPWORD(m_frames[0].code->GetFunction()))));
+	call->set_arg(1, m_fp);
+	call->set_arg(2, m_directBorrowed);
+	m_uc.mov(m_directBorrowed, Imm(0));
+	m_uc.bind(done);
+}
+
 // Entry of native callers, which pass jitArg 0, see JITFunction. The frame is set
 // up like asCContext::PrepareScriptFunction does when the current stack block has
 // enough space and the VM has nothing to do, otherwise by JIT_PrepareFrame. It is
@@ -979,6 +1010,28 @@ void CJITCodeGen::EmitDirectEntry()
 		m_uc.mov(m_fp, m_callerSp);
 	else
 		m_uc.load(m_fp, RegsField(offsetof(asSVMRegisters, stackPointer)));
+	if( m_directBorrowed.is_valid() )
+	{
+		Label noBorrow = m_uc.new_label();
+		Gp length = m_uc.new_gp_ptr();
+		Gp array  = m_uc.new_gp_ptr();
+		Gp note   = m_uc.new_gp32();
+		m_uc.mov(m_directBorrowed, Imm(0));
+		m_uc.mov(m_borrowState, Imm(0));
+		m_uc.load_u32(length, ContextField(layout.callStackLength));
+		m_uc.j(noBorrow, ucmp_lt(length, Imm(layout.callStackFrameSize)));
+		m_uc.sub(length, length, Imm(layout.callStackFrameSize));
+		m_uc.load(array, ContextField(layout.callStackArray));
+		Mem state = PtrElement(array, length);
+		Gp caller = m_uc.new_gp_ptr();
+		m_uc.load(caller, PtrAt(state, 0));
+		m_uc.j(noBorrow, test_z(caller));
+		m_uc.load_u32(note, PtrAt(state, 5));
+		m_uc.j(noBorrow, test_z(note, Imm(JIT_NATIVE_CALL_STATE)));
+		m_uc.and_(m_directBorrowed, note, Imm(int(m_code->GetBorrowableParams())));
+		Lea(m_borrowState, PtrAt(state, 5));
+		m_uc.bind(noBorrow);
+	}
 	if( !m_staticStack )
 		m_uc.mov(m_sp, m_fp);
 	m_uc.load(blocks, ContextField(layout.stackBlocks));
@@ -1022,6 +1075,7 @@ void CJITCodeGen::EmitDirectEntry()
 		m_uc.store(RegsField(offsetof(asSVMRegisters, stackPointer)), m_fp);
 	m_uc.store(ContextField(layout.currentFunction), PtrConst(asPWORD(func)));
 	SetPC(0);
+	OwnDirectBorrowed();
 	InvokeNode *call = Invoke((const void*)JIT_PrepareFrame, FuncSignature::build<int, asSVMRegisters*>());
 	Gp r = m_uc.new_gp32();
 	SetRegsArg(call, 0);
@@ -2477,6 +2531,21 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_FREE:
+		// A separately generated direct entry gets its borrowed-parameter mask at
+		// run time. Clear a still-borrowed parameter so the ordinary release path
+		// below sees null. Once a sync point has taken ownership, the mask is zero
+		// and the release proceeds normally.
+		if( m_frame == 0 && m_directBorrowed.is_valid() )
+		{
+			int param = m_code->FindParam(a0);
+			if( param >= 0 && param < 31 && ((m_code->GetBorrowableParams() >> param) & 1) )
+			{
+				Label owned = m_uc.new_label();
+				m_uc.j(owned, test_z(m_directBorrowed, Imm(1u << param)));
+				ClearPtr(a0);
+				m_uc.bind(owned);
+			}
+		}
 		if( IsBorrowed(idx) || (instr.flags & JIT_INSTR_MOVED) )
 		{
 			// The caller releases the reference, or the copy before has taken it

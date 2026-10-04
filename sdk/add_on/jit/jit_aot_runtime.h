@@ -188,11 +188,10 @@ inline void AOT_PushCall(asCContext *ctx, asUINT length, asCScriptFunction *call
 	s[2] = (size_t)pc;
 	s[3] = (size_t)sp;
 	s[4] = (size_t)ctx->m_stackIndex;
-#if AS_PTR_SIZE == 1
-	// Runtime JIT materializations use this otherwise unused word for their
-	// borrowed-parameter mask. Never let a direct AOT call inherit an old mask.
-	s[5] = 0;
-#endif
+	// AOT direct entries receive their borrowed mask separately. Mark this as a
+	// native call with no mask so a runtime-generated target can recognize it and
+	// so reused storage never contributes an old note during exception unwinding.
+	s[5] = JIT_NATIVE_CALL_STATE;
 	ctx->m_callStack.SetLengthNoAllocate(length + CALLSTACK_FRAME_SIZE);
 }
 

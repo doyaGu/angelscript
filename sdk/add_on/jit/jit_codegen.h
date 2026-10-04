@@ -205,7 +205,7 @@ protected:
 	SJITSeenClasses *ProfileCell(asUINT idx);
 	Gp   EmitCountDown();
 	void EmitRecompile(asUINT idx);
-	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, const Gp *stackPointer = 0);
+	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, asUINT borrowed = 0, const Gp *stackPointer = 0);
 	void EmitAfterHelperCall(const Gp &result, asUINT idx);
 	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
 
@@ -315,6 +315,7 @@ protected:
 	void SyncAll(asUINT idx);        // writes back what the VM may observe at the instruction
 	void SyncForCall(asUINT idx);    // like SyncAll but without the value register, which calls clobber
 	void SyncAllSlots(asUINT pos);   // writes back everything, program pointer set to pos
+	void OwnDirectBorrowed();        // gives dynamically borrowed parameters references of their own
 	void ReloadAll(asUINT idx);      // loads what the VM may have changed when continuing after the instruction
 	void ReloadLiveSlots(asUINT idx); // loads the cached slots read after the instruction
 
@@ -349,6 +350,8 @@ protected:
 	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_callStackLength; // length of the call stack while the function executes, see EmitNativeCall, only with m_callLimit
+	Gp  m_directBorrowed; // handle parameters borrowed by a non-inlined native caller
+	Gp  m_borrowState; // address of that caller's JIT_NATIVE_CALL_STATE word
 	Gp  m_inlineRoom; // words of room on the call stack for the inlined functions, only if some are called in loops, see EmitInlineRoom
 	Gp  m_fp;       // stack frame pointer
 	Gp  m_this;     // object pointer of a method that doesn't modify it, see CJITByteCode::IsThisConstant

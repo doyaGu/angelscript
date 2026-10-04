@@ -41,6 +41,10 @@ class asCScriptFunction;
 // half the VM ignores. The function then returns without restoring the frame, the
 // program pointer, the stack pointer, and the length of the call stack of the
 // caller, which keeps them itself.
+// Native callers mark the otherwise unused sixth word of their call state with
+// JIT_NATIVE_CALL_STATE. Its low bits identify handle arguments whose references
+// the caller still owns, so a runtime-generated direct entry can skip releasing
+// them until it must expose its frame to the VM.
 // The VM entry clears the mark of the call state on top, as the function doesn't
 // return to a native caller once the VM has executed it. The functions generated
 // ahead of time restore everything whether the call state is marked or not, and
@@ -144,6 +148,13 @@ const asPWORD JIT_GUARDED_ENTRY = 0x40000000;
 const asPWORD JIT_ENTRY_INDEX_MASK  = 0xFFFF;
 const asUINT  JIT_ENTRY_MAX_COUNT   = 0x3FFF;
 
+// Native JIT callers mark the otherwise unused sixth word of their call state.
+// The low 31 bits identify handle parameters whose references are still owned by
+// the caller. Engine-created call states leave the word uninitialized, so the mark
+// must be checked before reading the mask.
+const asUINT JIT_NATIVE_CALL_STATE = 0x80000000u;
+const asUINT JIT_BORROWED_ARG_MASK = 0x7FFFFFFFu;
+
 // Catches the C++ exceptions thrown by registered functions that the generated
 // code calls directly, and turns them into script exceptions like CallSystemFunction
 // does. When entered by the VM without JIT_GUARDED_ENTRY in jitArg the generated
@@ -197,9 +208,10 @@ void   JIT_ExitInlined(asSVMRegisters *regs, asCScriptFunction *func, asDWORD *f
 // and CJITByteCode::AnalyseForAOT
 void   JIT_OwnParams(asCScriptFunction *func, asDWORD *frame, asUINT mask) noexcept;
 
-// JIT_OwnParams for the frames of the inlined functions on the call stack, whose
-// call states note the borrowed parameters in the upper half of the stack index on
-// 64bit hosts, or the first word unused by ordinary call states on 32bit hosts.
+// JIT_OwnParams for the generated frames on the call stack. Materialized inlined
+// frames note borrowed parameters in the upper half of the stack index on 64bit
+// hosts, or the first word unused by ordinary call states on 32bit hosts. Native
+// calls note them after JIT_NATIVE_CALL_STATE in that unused word on every host.
 // Goes from the innermost frame down to the frame of the function in rootFunc and
 // rootFrame, or to a nested call, and clears the notes
 void   JIT_OwnBorrowed(asSVMRegisters *regs, asDWORD *rootFrame, asCScriptFunction *rootFunc) noexcept;

@@ -111,6 +111,11 @@ bool CJITCodeGen::Generate()
 
 	Label direct = m_uc.new_label();
 	m_uc.j(direct, test_z(m_arg));
+	if( m_directBorrowed.is_valid() )
+	{
+		m_uc.mov(m_directBorrowed, Imm(0));
+		m_uc.mov(m_borrowState, Imm(0));
+	}
 
 	// While a line callback is set or a suspension is requested the function goes on
 	// in its code compiled with the checks at every statement, or in the VM after the
@@ -235,6 +240,7 @@ bool CJITCodeGen::Generate()
 		call->set_arg(2, Imm(int64_t(asPWORD(m_code->GetFunction()))));
 	}
 	m_uc.bind(m_leave);
+	OwnDirectBorrowed();
 	Gp one = m_uc.new_gp32();
 	m_uc.mov(one, Imm(1));
 	m_uc.ret(one);
@@ -963,6 +969,11 @@ void CJITCodeGen::EmitPrologue()
 
 	m_regs = m_uc.new_gp_ptr("regs");
 	m_arg  = m_uc.new_gp_ptr("jitArg");
+	if( m_code->GetBorrowableParams() )
+	{
+		m_directBorrowed = m_uc.new_gp32("borrowed");
+		m_borrowState    = m_uc.new_gp_ptr("borrowState");
+	}
 	m_regsBias = RegsBias();
 	if( m_regsBias )
 	{
@@ -1829,6 +1840,7 @@ void CJITCodeGen::ReloadSlots(JITSlotMask mask)
 void CJITCodeGen::SyncAll(asUINT idx)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	OwnDirectBorrowed();
 	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
 	if( m_code->IsVRLiveBefore(idx) )
@@ -1841,6 +1853,7 @@ void CJITCodeGen::SyncAll(asUINT idx)
 void CJITCodeGen::SyncForCall(asUINT idx)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	OwnDirectBorrowed();
 	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	SyncStack();
 	EmitMaterialize();
@@ -1849,6 +1862,7 @@ void CJITCodeGen::SyncForCall(asUINT idx)
 
 void CJITCodeGen::SyncAllSlots(asUINT pos)
 {
+	OwnDirectBorrowed();
 	StoreCachedSlots();
 	StoreFrame();
 	SyncStack();

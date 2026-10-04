@@ -32,8 +32,8 @@
 //    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
-//  - Borrow the references of the handle arguments for calls that aren't inlined,
-//    which would need entry points of the callees that don't release the parameters
+//  - Borrow handle arguments of non-inlined calls whose targets aren't statically
+//    known, such as virtual/interface, bound, and function-pointer calls
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
@@ -906,6 +906,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	}
 	inlining.classes     = profile ? &profile->compiledWith : seenBefore;
 	inlining.indexers    = &indexers;
+	inlining.borrowCalls = (flags & (JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) == 0;
 	code.SetBailInstructions(bailOps);
 	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
 
@@ -1232,6 +1233,27 @@ asPWORD CJITCompiler::SImpl::ResolveEntry(SEntry *entry, asSVMRegisters *regs, a
 		}
 		if( code == 0 )
 			code = entry->code.load(std::memory_order_acquire);
+	}
+
+	// Runtime-generated direct entries understand the borrowed-argument note in
+	// the native caller's state. A deferred target left to the VM, or code generated
+	// ahead of time with its own direct-entry contract, must receive references of
+	// its own before the wrapper enters it.
+	if( jitArg == 0 && (code == 0 || entry->impl->aotPointers.count(reinterpret_cast<asJITFunction>(code))) )
+	{
+		asCContext *ctx = static_cast<asCContext*>(regs->ctx);
+		asUINT length = ctx->m_callStack.GetLength();
+		if( length >= CALLSTACK_FRAME_SIZE )
+		{
+			asPWORD *state = ctx->m_callStack.AddressOf() + length - CALLSTACK_FRAME_SIZE;
+			asUINT note = state[0] ? asUINT(state[5]) : 0;
+			asUINT borrowed = (note & JIT_NATIVE_CALL_STATE) ? note & JIT_BORROWED_ARG_MASK : 0;
+			if( borrowed )
+			{
+				state[5] = JIT_NATIVE_CALL_STATE;
+				JIT_OwnParams(entry->func, reinterpret_cast<asDWORD*>(state[3]), borrowed);
+			}
+		}
 	}
 	return asPWORD(code);
 }
