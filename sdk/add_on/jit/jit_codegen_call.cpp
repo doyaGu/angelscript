@@ -1563,14 +1563,15 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		retAfterThis = true;
 	}
 #endif
-	// Keep two-slot aggregates wholly in registers or wholly on the stack as required
-	// by the System V ABI. AsmJit sees their slots as separate primitive arguments;
-	// force the first pair of each register class that would straddle its last register
-	// onto the stack below. The freed register is then available to the next scalar
-	// argument of that class. AsmJit also gives the
-	// floats passed on the stack 4 bytes each instead of 8, so reject those calls.
+	// Keep two-slot aggregates wholly in registers or wholly on the stack. AsmJit
+	// sees their slots as separate primitive arguments and may otherwise split a pair
+	// at the end of an argument register bank.
 	const Environment &env = m_uc.cc->environment();
-	int forceStackGpArg = -1, forceStackVecArg = -1;
+	int forceStackGpArg = -1, forceStackVecArg = -1, forceStackArmGpArg = -1;
+#if defined(AS_X64_GCC)
+	// The freed System V register is available to the next scalar argument of its
+	// class. AsmJit also gives floats passed on the stack 4 bytes each instead of 8,
+	// so reject those calls.
 	if( Is64Bit() && !env.is_platform_windows() && !env.is_msvc_abi() )
 	{
 		asUINT gpArgs = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
@@ -1612,6 +1613,35 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			}
 		}
 	}
+#elif defined(AS_ARM64)
+	// AAPCS64 stops allocating general-purpose argument registers after a composite
+	// does not fit. Reserve x7 with a dummy below when a two-slot value reaches it,
+	// and move the complete value and every later argument to the stack.
+	UNUSED_VAR(env);
+	{
+		asUINT gpArgs = (hasThis ? 1 : 0) + (objFirst ? 1 : 0);
+		for( asUINT n = 0; n < args.size(); n++ )
+		{
+			bool twoSlotValue = args[n].valueSize && !args[n].valueFree;
+			bool floating = args[n].kind == ARG_F32 || args[n].kind == ARG_F64;
+			if( twoSlotValue && !floating )
+			{
+				if( gpArgs <= 6 )
+					gpArgs += 2;
+				else if( gpArgs == 7 )
+				{
+					forceStackArmGpArg = int(n);
+					gpArgs = 8;
+				}
+				n++;
+			}
+			else if( !floating && gpArgs < 8 )
+				gpArgs++;
+		}
+	}
+#else
+	UNUSED_VAR(env);
+#endif
 	int popSize = stackPos;
 
 	FuncSignature sig(conv);
@@ -1633,6 +1663,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	{
 		forceStackVecDummy = int(sig.arg_count());
 		sig.add_arg(TypeId::kFloat64); // reserves one outgoing stack slot
+	}
+	int forceStackArmGpDummy = -1;
+	if( forceStackArmGpArg >= 0 )
+	{
+		forceStackArmGpDummy = int(sig.arg_count());
+		sig.add_arg(TypeId::kUInt64); // occupies x7 after the aggregate moves to the stack
 	}
 
 	// A null script object pointer is an exception raised by the VM. Auxiliary is
@@ -1904,6 +1940,25 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		forcePairToStack(forceStackGpArg, forceStackGpDummy, false);
 		forcePairToStack(forceStackVecArg, forceStackVecDummy, true);
 	}
+	if( forceStackArmGpArg >= 0 )
+	{
+		asUINT argBase = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
+		                 (retAfterThis ? 1 : 0) + (objFirst ? 1 : 0);
+		asUINT first = argBase + asUINT(forceStackArmGpArg);
+		FuncValue &firstValue = call->detail().arg(first);
+		FuncValue &secondValue = call->detail().arg(first + 1);
+		FuncValue &dummyValue = call->detail().arg(asUINT(forceStackArmGpDummy));
+		int32_t firstOffset = secondValue.stack_offset();
+		int32_t dummyOffset = dummyValue.stack_offset();
+		for( asUINT n = 0; n < call->detail().arg_count(); n++ )
+		{
+			FuncValue &value = call->detail().arg(n);
+			if( value.is_stack() && value.stack_offset() >= firstOffset && value.stack_offset() < dummyOffset )
+				value.set_stack_offset(value.stack_offset() + 8);
+		}
+		firstValue.init_stack(firstOffset, firstValue.type_id());
+		dummyValue.init_reg(RegType::kGp64, 7, TypeId::kUInt64);
+	}
 	asUINT argIdx = 0;
 	if( retFirst )
 		call->set_arg(argIdx++, retPtr);
@@ -1941,6 +1996,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		call->set_arg(argIdx++, Imm(0));
 	if( forceStackVecArg >= 0 )
 		call->set_arg(argIdx++, forceStackVecValue);
+	if( forceStackArmGpArg >= 0 )
+		call->set_arg(argIdx++, Imm(0));
 
 	Gp  retGp, retGpHi, retGps[4];
 	Vec retVec, retVecs[4];

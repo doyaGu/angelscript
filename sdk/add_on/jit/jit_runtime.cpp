@@ -759,6 +759,18 @@ int JIT_GetInlineValueArgSize(asCScriptFunction *func, asUINT param, bool *float
 		if( size >= 1 && size <= 16 )
 			return size;
 	}
+#elif defined(AS_ARM64)
+	// AArch64 passes non-HFA aggregates of up to 16 bytes in one or two general
+	// purpose argument slots. Leave homogeneous floating-point aggregates to the
+	// fallback until the direct callers can keep all of their members together.
+	asQWORD flags = dt.GetTypeInfo()->flags;
+	if( (flags & asOBJ_POD) &&
+	    (flags & (asOBJ_APP_CLASS_ALLINTS | asOBJ_APP_PRIMITIVE)) )
+	{
+		int size = dt.GetSizeInMemoryBytes();
+		if( size >= 1 && size <= 16 )
+			return size;
+	}
 #endif
 	return -1;
 }

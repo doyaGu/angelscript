@@ -25,8 +25,9 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Small, trivial objects passed by value to direct system calls on the hosts
-//    besides 64bit System V, Microsoft x64, and 32bit x86.
+//  - Small, trivial objects passed by value to direct system calls: floating-point
+//    values on AArch64, and all small values on the hosts besides
+//    64bit System V, Microsoft x64, 32bit x86, and AArch64.
 //    Complex and large value objects, which the native ABI passes indirectly, are
 //    supported everywhere
 //    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),

@@ -171,6 +171,9 @@ static int InlineValueArgKind(int size, bool floating)
 #ifdef AS_X86
 	if( size >= 1 && size <= 16 )
 		return SJITSystemCall::VALUE_OBJX1 + (size - 1) / 4;
+#elif defined(AS_ARM64)
+	if( !floating && size >= 1 && size <= 16 )
+		return SJITSystemCall::VALUE_OBJX1 + (size - 1) / 4;
 #endif
 	if( floating )
 		return size > 8 ? SJITSystemCall::VALUE_OBJF2 :
