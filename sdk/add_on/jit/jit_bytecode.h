@@ -112,11 +112,15 @@ struct SJITField
 // the register isn't saved across the calls. The other 31 bits are for the fields
 static const asUINT JIT_THIS_HELD = 0x80000000u;
 
+// One bit per register cached variable. The last bit is reserved for the frame,
+// leaving room for up to 63 cached variables.
+typedef asQWORD JITSlotMask;
+
 // The frame of the function, i.e. the stack frame pointer in the VM registers and
 // the current function of the context, is written back like the register cached
 // variables, and has this bit in the dirty masks. The native entry leaves it to
 // the first place where the VM or the engine may see it
-static const asUINT JIT_FRAME_BIT = 0x80000000u;
+static const JITSlotMask JIT_FRAME_BIT = JITSlotMask(1) << 63;
 
 // On 64bit hosts the script functions called natively return without restoring
 // the frame of the caller, see asBC_RET, so it is dirty after the calls. They mark
@@ -265,27 +269,27 @@ public:
 	// a newer value than the memory when the instruction is reached, and of the
 	// frame, see JIT_FRAME_BIT. Temporary variables that won't be read anymore are
 	// left out
-	asUINT GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
+	JITSlotMask GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
 
 	// Returns the mask of the register cached variables to store before or after
 	// the instruction, because a loop is entered in which they aren't modified
-	asUINT GetStoresBefore(asUINT instrIdx) const { return m_storeBefore[instrIdx]; }
-	asUINT GetStoresAfter(asUINT instrIdx) const  { return m_storeAfter[instrIdx]; }
+	JITSlotMask GetStoresBefore(asUINT instrIdx) const { return m_storeBefore[instrIdx]; }
+	JITSlotMask GetStoresAfter(asUINT instrIdx) const  { return m_storeAfter[instrIdx]; }
 
 	// Returns the mask of the register cached variables that may be read before
 	// being written when the block of the instruction is entered
-	asUINT GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
+	JITSlotMask GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
 
 	// Returns the mask of the register cached variables that may be read before
 	// being written after the instruction
-	asUINT GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
+	JITSlotMask GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
 
 	// Returns the mask of the register cached variables to load where the VM enters
 	// at the instruction, or after the instruction if the VM may have modified the
 	// variables, e.g. through a debugger. Those that may be stored later are loaded
 	// too, see the implementation
-	asUINT GetEntryMask(asUINT instrIdx) const;
-	asUINT GetReloadMask(asUINT instrIdx) const;
+	JITSlotMask GetEntryMask(asUINT instrIdx) const;
+	JITSlotMask GetReloadMask(asUINT instrIdx) const;
 
 	// Returns true if RET passes the return value in the value register
 	bool   RetReadsVR() const { return m_retReadsVR; }
@@ -408,7 +412,7 @@ protected:
 	bool LeavesFrameDirty(asUINT instrIdx) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;
 	void GetSuccessors(asUINT blockIdx, std::vector<asUINT> &succ) const;
-	void GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const;
+	void GetSlotMasks(const SJITInstr &instr, JITSlotMask &uses, JITSlotMask &defs) const;
 	void AddSlotUse(int offset, asUINT kind);
 	void CollectSlotUses(const SJITInstr &instr);
 	SJITSlot *FindSlot(int offset);
@@ -424,12 +428,12 @@ protected:
 	std::map<int, int>      m_slotIndex;   // offset -> index in m_slots
 	std::map<asUINT, std::vector<int> > m_switchTargets;
 	std::vector<int>        m_noTargets;
-	std::vector<asUINT>     m_dirty;       // per instruction mask of possibly dirty cached slots
-	std::vector<asUINT>     m_storeBefore; // per instruction mask of cached slots stored before it
-	std::vector<asUINT>     m_storeAfter;  // per instruction mask of cached slots stored after it
-	std::vector<asUINT>     m_liveIn;      // per block mask of cached slots live at the start
-	std::vector<asUINT>     m_liveAfter;   // per instruction mask of cached slots live after it
-	asUINT                  m_tempMask;    // mask of the cached slots that are temporary variables
+	std::vector<JITSlotMask> m_dirty;       // per instruction mask of possibly dirty cached slots
+	std::vector<JITSlotMask> m_storeBefore; // per instruction mask of cached slots stored before it
+	std::vector<JITSlotMask> m_storeAfter;  // per instruction mask of cached slots stored after it
+	std::vector<JITSlotMask> m_liveIn;      // per block mask of cached slots live at the start
+	std::vector<JITSlotMask> m_liveAfter;   // per instruction mask of cached slots live after it
+	JITSlotMask              m_tempMask;    // mask of the cached slots that are temporary variables
 	bool                    m_thisConstant; // see IsThisConstant
 	std::vector<SJITField>  m_fields;      // see GetFields
 	std::vector<int>        m_fieldAccess; // per instruction the field read or written, or -1

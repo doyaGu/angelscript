@@ -191,7 +191,7 @@ bool CJITCodeGen::Generate()
 	// Fib of test_performance is 8% faster with them (measured 2026-10-02 on an Apple
 	// M5), and the functions without calls don't get them
 	bool hasCalls = false;
-	asUINT liveAcrossCalls = 0;
+	JITSlotMask liveAcrossCalls = 0;
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
 		if( calls[n] )
@@ -585,7 +585,7 @@ bool CJITCodeGen::FailIfHidden()
 // home registers instead. The allocator assigns the arguments to the registers they
 // are passed in, so they are copied to the registers used by the function first.
 // The cached variables in the mask get the callee-saved registers left over
-void CJITCodeGen::AssignHomeRegs(asUINT slotMask)
+void CJITCodeGen::AssignHomeRegs(JITSlotMask slotMask)
 {
 	// With a bias the prologue has computed the registers pointer from the argument
 	BaseNode *cursor = m_uc.cc->set_cursor(m_func);
@@ -624,7 +624,7 @@ void CJITCodeGen::TakeHomeReg(const Gp &reg, const uint32_t *gpIds, asUINT &gpCo
 		}
 }
 
-void CJITCodeGen::SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount)
+void CJITCodeGen::SetSlotHomeHints(JITSlotMask slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount)
 {
 	const CallConv &conv = m_func->detail().call_conv();
 	const std::vector<SJITSlot> &slots = m_code->GetSlots();
@@ -633,12 +633,12 @@ void CJITCodeGen::SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUIN
 	{
 		int best = -1;
 		for( asUINT n = 0; n < slots.size(); n++ )
-			if( slots[n].cacheBit >= 0 && (slotMask & (asUINT(1) << slots[n].cacheBit)) &&
+			if( slots[n].cacheBit >= 0 && (slotMask & (JITSlotMask(1) << slots[n].cacheBit)) &&
 			    (best < 0 || slots[n].useCount > slots[best].useCount) )
 				best = int(n);
 		if( best < 0 )
 			break;
-		slotMask &= ~(asUINT(1) << slots[best].cacheBit);
+		slotMask &= ~(JITSlotMask(1) << slots[best].cacheBit);
 
 		const SCachedSlot &cached = m_cached[m_cachedIndex[slots[best].offset]];
 		if( cached.gp.is_valid() )
@@ -1733,25 +1733,25 @@ void CJITCodeGen::ReloadCachedSlot(int offset)
 
 // Stores the cached slots in the mask, and the frame if it has the bit, see
 // CJITByteCode::GetDirtyMask
-void CJITCodeGen::StoreDirtySlots(asUINT mask)
+void CJITCodeGen::StoreDirtySlots(JITSlotMask mask)
 {
 	if( mask & JIT_FRAME_BIT )
 		StoreFrame();
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
 		int bit = m_code->GetCacheBit(m_cached[n].offset);
-		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
+		if( bit >= 0 && (mask & (JITSlotMask(1) << bit)) )
 			StoreCachedSlot(m_cached[n].offset);
 	}
 }
 
 // Loads the cached slots in the mask from memory
-void CJITCodeGen::ReloadSlots(asUINT mask)
+void CJITCodeGen::ReloadSlots(JITSlotMask mask)
 {
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
 		int bit = m_code->GetCacheBit(m_cached[n].offset);
-		if( bit >= 0 && (mask & (asUINT(1) << bit)) )
+		if( bit >= 0 && (mask & (JITSlotMask(1) << bit)) )
 			ReloadCachedSlot(m_cached[n].offset);
 	}
 }

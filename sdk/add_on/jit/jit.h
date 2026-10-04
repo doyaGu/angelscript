@@ -150,6 +150,11 @@ public:
 	// calls. Default is 64, 0 disables inlining like JIT_NO_INLINE
 	void SetMaxInlineSize(asUINT sizeInDWords);
 
+	// Maximum number of variables kept in registers. More variables increase the
+	// register allocator's work and may be spilled to the native stack. The default
+	// is 24, the maximum is 63, and 0 disables the cache like JIT_NO_REGISTER_CACHE
+	void SetMaxCachedSlots(asUINT count);
+
 	// Tiered compilation. With a call threshold the functions aren't compiled when the
 	// module is built, but when they have been called that many times, or when one of
 	// their loops has run that many iterations, in which case the compiled code goes on

@@ -1663,17 +1663,17 @@ bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 // temporary variables, see AnalyseDirtySlots. Where the VM has entered their
 // register hasn't been loaded, and where the VM may have modified them it holds the
 // old value, so they are loaded like the live ones. The VM has them in memory there
-asUINT CJITByteCode::GetEntryMask(asUINT instrIdx) const
+JITSlotMask CJITByteCode::GetEntryMask(asUINT instrIdx) const
 {
 	return m_liveIn[m_instrs[instrIdx].block] | (m_dirty[instrIdx] & ~JIT_FRAME_BIT);
 }
 
 // The sync points store the dirty variables and leave none, but the inlined calls,
 // whose rare path stores them, and SUSPEND leave them dirty
-asUINT CJITByteCode::GetReloadMask(asUINT instrIdx) const
+JITSlotMask CJITByteCode::GetReloadMask(asUINT instrIdx) const
 {
 	const SJITInstr &instr = m_instrs[instrIdx];
-	asUINT mask = m_liveAfter[instrIdx];
+	JITSlotMask mask = m_liveAfter[instrIdx];
 	if( !IsSyncPointAt(instrIdx) || (instr.flags & JIT_INSTR_INLINE) )
 		mask |= m_dirty[instrIdx] & ~JIT_FRAME_BIT;
 	return mask;
@@ -1850,7 +1850,7 @@ void CJITByteCode::GetVarAccess(asEBCInstr op, bool &reads0, bool &writes0, bool
 }
 
 // Masks of the cached slots read and written by the instruction
-void CJITByteCode::GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &defs) const
+void CJITByteCode::GetSlotMasks(const SJITInstr &instr, JITSlotMask &uses, JITSlotMask &defs) const
 {
 	uses = defs = 0;
 	bool reads0, writes0, reads1, reads2;
@@ -1859,15 +1859,15 @@ void CJITByteCode::GetSlotMasks(const SJITInstr &instr, asUINT &uses, asUINT &de
 	int bit;
 	if( (reads0 || writes0) && (bit = GetCacheBit(asBC_SWORDARG0(instr.bc))) >= 0 )
 	{
-		if( reads0 )  uses |= asUINT(1) << bit;
-		if( writes0 ) defs |= asUINT(1) << bit;
+		if( reads0 )  uses |= JITSlotMask(1) << bit;
+		if( writes0 ) defs |= JITSlotMask(1) << bit;
 	}
 	if( reads1 && (bit = GetCacheBit(asBC_SWORDARG1(instr.bc))) >= 0 )
-		uses |= asUINT(1) << bit;
+		uses |= JITSlotMask(1) << bit;
 	if( reads2 && (bit = GetCacheBit(asBC_SWORDARG2(instr.bc))) >= 0 )
-		uses |= asUINT(1) << bit;
+		uses |= JITSlotMask(1) << bit;
 	if( instr.op == asBC_LoadThisR && m_func->objectType == 0 && (bit = GetCacheBit(0)) >= 0 )
-		uses |= asUINT(1) << bit;
+		uses |= JITSlotMask(1) << bit;
 }
 
 // Backward data flow to find which cached slots may be read before being
@@ -1878,19 +1878,19 @@ void CJITByteCode::AnalyseSlotLiveness()
 	m_liveIn.assign(m_blocks.size(), 0);
 	m_liveAfter.assign(m_instrs.size(), 0);
 
-	std::vector<asUINT> use(m_blocks.size(), 0), def(m_blocks.size(), 0);
+	std::vector<JITSlotMask> use(m_blocks.size(), 0), def(m_blocks.size(), 0);
 	for( asUINT b = 0; b < m_blocks.size(); b++ )
 	{
 		for( asUINT n = m_blocks[b].first; n <= m_blocks[b].last; n++ )
 		{
-			asUINT uses, defs;
+			JITSlotMask uses, defs;
 			GetSlotMasks(m_instrs[n], uses, defs);
 			use[b] |= uses & ~def[b];
 			def[b] |= defs;
 		}
 	}
 
-	std::vector<asUINT> liveOut(m_blocks.size(), 0);
+	std::vector<JITSlotMask> liveOut(m_blocks.size(), 0);
 	std::vector<asUINT> succ;
 	bool changed = true;
 	while( changed )
@@ -1903,7 +1903,7 @@ void CJITByteCode::AnalyseSlotLiveness()
 			for( asUINT k = 0; k < succ.size(); k++ )
 				liveOut[b] |= m_liveIn[succ[k]];
 
-			asUINT liveIn = use[b] | (liveOut[b] & ~def[b]);
+			JITSlotMask liveIn = use[b] | (liveOut[b] & ~def[b]);
 			if( liveIn != m_liveIn[b] )
 			{
 				m_liveIn[b] = liveIn;
@@ -1914,11 +1914,11 @@ void CJITByteCode::AnalyseSlotLiveness()
 
 	for( asUINT b = 0; b < m_blocks.size(); b++ )
 	{
-		asUINT live = liveOut[b];
+		JITSlotMask live = liveOut[b];
 		for( asUINT n = m_blocks[b].last + 1; n-- > m_blocks[b].first; )
 		{
 			m_liveAfter[n] = live;
-			asUINT uses, defs;
+			JITSlotMask uses, defs;
 			GetSlotMasks(m_instrs[n], uses, defs);
 			live = uses | (live & ~defs);
 		}
@@ -1976,10 +1976,10 @@ void CJITByteCode::AnalyseDirtySlots()
 	m_storeBefore.assign(m_instrs.size(), 0);
 	m_storeAfter.assign(m_instrs.size(), 0);
 
-	asUINT cachedMask = JIT_FRAME_BIT;
+	JITSlotMask cachedMask = JIT_FRAME_BIT;
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheBit >= 0 )
-			cachedMask |= 1u << m_slots[n].cacheBit;
+			cachedMask |= JITSlotMask(1) << m_slots[n].cacheBit;
 
 	// The calls in a loop store the dirty variables on every iteration, also those
 	// that are only modified before the loop, and so do the inlined functions that
@@ -1988,7 +1988,7 @@ void CJITByteCode::AnalyseDirtySlots()
 	// it, or the compare emitted together with the branch, or after the instruction
 	// that falls into it. Loops are the ranges from the target of a backward branch
 	// to the branch
-	std::vector<asUINT> keepBefore(m_instrs.size(), 0), keepAfter(m_instrs.size(), 0);
+	std::vector<JITSlotMask> keepBefore(m_instrs.size(), 0), keepAfter(m_instrs.size(), 0);
 	std::vector<asUINT> succ;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
@@ -1996,11 +1996,11 @@ void CJITByteCode::AnalyseDirtySlots()
 		if( !IsBranch(m_instrs[n].op) || top < 0 || asUINT(top) > n )
 			continue;
 
-		asUINT written = 0;
+		JITSlotMask written = 0;
 		bool calls = false;
 		for( asUINT k = asUINT(top); k <= n; k++ )
 		{
-			asUINT uses, defs;
+			JITSlotMask uses, defs;
 			GetSlotMasks(m_instrs[k], uses, defs);
 			written |= defs;
 			if( LeavesFrameDirty(k) )
@@ -2010,7 +2010,7 @@ void CJITByteCode::AnalyseDirtySlots()
 			else
 				calls = calls || IsSyncPointAt(k);
 		}
-		asUINT keep = cachedMask & ~written;
+		JITSlotMask keep = cachedMask & ~written;
 		if( !calls || keep == 0 )
 			continue;
 
@@ -2039,7 +2039,7 @@ void CJITByteCode::AnalyseDirtySlots()
 		}
 	}
 
-	std::vector<asUINT> in(m_blocks.size(), 0);
+	std::vector<JITSlotMask> in(m_blocks.size(), 0);
 	if( !m_instrs.empty() )
 		in[m_instrs[0].block] = JIT_FRAME_BIT;
 	bool changed = true;
@@ -2049,13 +2049,13 @@ void CJITByteCode::AnalyseDirtySlots()
 		for( asUINT b = 0; b < m_blocks.size(); b++ )
 		{
 			const SJITBlock &block = m_blocks[b];
-			asUINT mask = in[b];
+			JITSlotMask mask = in[b];
 			for( asUINT n = block.first; n <= block.last; n++ )
 			{
 				// Temporary variables that won't be read anymore don't need to be
 				// stored, nothing else can see them
 				const SJITInstr &instr = m_instrs[n];
-				asUINT uses, defs;
+				JITSlotMask uses, defs;
 				GetSlotMasks(instr, uses, defs);
 				mask &= ~m_tempMask | uses | (m_liveAfter[n] & ~defs);
 
@@ -2692,7 +2692,7 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 		for( asUINT v = 0; v < vars.GetLength() && !named; v++ )
 			named = vars[v]->stackOffset == m_slots[n].offset && vars[v]->name.GetLength() > 0;
 		if( !named )
-			m_tempMask |= asUINT(1) << m_slots[n].cacheBit;
+			m_tempMask |= JITSlotMask(1) << m_slots[n].cacheBit;
 	}
 }
 

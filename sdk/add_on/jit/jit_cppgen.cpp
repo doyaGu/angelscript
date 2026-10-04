@@ -841,13 +841,13 @@ std::string CJITCppGen::VarAddr(int offset)
 // The statements that store the local variables in the mask to the frame, or load
 // them from it, and store the frame for JIT_FRAME_BIT. The masks are those of the
 // analysis, see CJITByteCode::GetDirtyMask
-std::string CJITCppGen::Stores(asUINT mask)
+std::string CJITCppGen::Stores(JITSlotMask mask)
 {
 	std::string text;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 	{
 		SLocal &local = m_locals[n];
-		if( !(mask & (asUINT(1) << local.bit)) )
+		if( !(mask & (JITSlotMask(1) << local.bit)) )
 			continue;
 		local.used = local.read = true;
 		if( !text.empty() )
@@ -859,13 +859,13 @@ std::string CJITCppGen::Stores(asUINT mask)
 	return text;
 }
 
-std::string CJITCppGen::Loads(asUINT mask)
+std::string CJITCppGen::Loads(JITSlotMask mask)
 {
 	std::string text;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 	{
 		SLocal &local = m_locals[n];
-		if( !(mask & (asUINT(1) << local.bit)) )
+		if( !(mask & (JITSlotMask(1) << local.bit)) )
 			continue;
 		local.used = true;
 		if( !text.empty() )

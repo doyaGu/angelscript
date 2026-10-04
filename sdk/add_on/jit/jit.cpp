@@ -37,7 +37,7 @@
 //    for the calls that aren't inlined, which would need entry points of the callees
 //    that don't release the parameters
 //    (jit_bytecode.cpp, AnalyseBorrows).
-//  - Register cache for local pointer variables and for more than 32 variables
+//  - Register cache for local pointer variables and for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
 //  - 32bit x86: keep the value register in a register pair, and inline 64bit
 //    division and modulo instead of calling runtime helpers.
@@ -256,6 +256,11 @@ void CJITCompiler::SetMaxInlineSize(asUINT sizeInDWords)
 	m_impl->maxInlineSize = sizeInDWords;
 }
 
+void CJITCompiler::SetMaxCachedSlots(asUINT count)
+{
+	m_impl->maxCachedSlots = count < 63 ? count : 63;
+}
+
 int CJITCompiler::SetCompileThresholds(asUINT calls, asUINT iterations)
 {
 	// The generated calls resolve the current code through immutable entries.
@@ -425,7 +430,7 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )
-			fprintf(file, "   ; dirty 0x%X", code.GetDirtyMask(n));
+			fprintf(file, "   ; dirty 0x%llX", static_cast<unsigned long long>(code.GetDirtyMask(n)));
 		fprintf(file, "\n");
 	}
 
@@ -874,7 +879,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	exact = exact || purpose == COMPILE_EXACT || (source && source->exact);
 
 	// The dirty masks hold one bit per cached slot, and the bit of the frame
-	asUINT cachedSlots = maxCachedSlots < 31 ? maxCachedSlots : 31;
+	asUINT cachedSlots = maxCachedSlots < 63 ? maxCachedSlots : 63;
 	// The functions left to the compile filter are left to their calls too
 	SJITInlineOptions inlining;
 	inlining.maxSize     = (flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : maxInlineSize;

@@ -18,7 +18,7 @@ using namespace asmjit::ujit;
 // isn't available, e.g. EBP|RBP as frame pointer, the allocator picks another one.
 // The cached variables in the mask get the rest, including the ones of the stack
 // pointer and the call limit if the function doesn't need them
-void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
+void CJITCodeGen::SetHomeRegHints(JITSlotMask slotMask)
 {
 	x86::Compiler *cc = m_uc.cc;
 	uint32_t gpIds[5];
@@ -320,7 +320,7 @@ bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDoub
 // Callee-saved home registers, see the x86 version. The allocator's scratch
 // registers are X27 and X28. Only the lower halves of V8-V15 are preserved, which
 // doesn't suffice for the 128bit registers of cached float variables
-void CJITCodeGen::SetHomeRegHints(asUINT slotMask)
+void CJITCodeGen::SetHomeRegHints(JITSlotMask slotMask)
 {
 	a64::Compiler *cc = m_uc.cc;
 	uint32_t gpIds[6] = { 23, 24, 25, 26 };
@@ -653,7 +653,7 @@ void CJITCodeGen::EmitRefCountInc(const Gp &obj)
 
 #else
 
-void CJITCodeGen::SetHomeRegHints(asUINT)
+void CJITCodeGen::SetHomeRegHints(JITSlotMask)
 {
 }
 

@@ -144,8 +144,8 @@ protected:
 	void EmitEntryStubs();
 	void EmitBailStubs();
 	void EmitDirectEntry();
-	void AssignHomeRegs(asUINT slotMask);
-	void SetSlotHomeHints(asUINT slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount);
+	void AssignHomeRegs(JITSlotMask slotMask);
+	void SetSlotHomeHints(JITSlotMask slotMask, const uint32_t *gpIds, asUINT gpCount, const uint32_t *vecIds, asUINT vecCount);
 	void TakeHomeReg(const Gp &reg, const uint32_t *gpIds, asUINT &gpCount);
 	void CallStackLength(const Gp &dst);
 	void CopyLiveArgs();
@@ -210,7 +210,7 @@ protected:
 	void EmitReloadAfterCall(asUINT idx, bool reloadVR = true);
 
 	// Architecture specific code (jit_codegen_arch.cpp)
-	void SetHomeRegHints(asUINT slotMask);
+	void SetHomeRegHints(JITSlotMask slotMask);
 	int  RegsBias() const;
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
@@ -300,9 +300,9 @@ protected:
 
 	void StoreFrame();
 	void StoreCachedSlots();
-	void StoreDirtySlots(asUINT mask);
+	void StoreDirtySlots(JITSlotMask mask);
 	void ReloadCachedSlots();
-	void ReloadSlots(asUINT mask);
+	void ReloadSlots(JITSlotMask mask);
 	void StoreCachedSlot(int offset);
 	void ReloadCachedSlot(int offset);
 	void SyncAll(asUINT idx);        // writes back what the VM may observe at the instruction
