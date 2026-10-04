@@ -289,13 +289,6 @@ asUINT  JIT_dTOu(double d) noexcept;
 float   JIT_uTOf(asUINT v) noexcept;
 double  JIT_uTOd(asUINT v) noexcept;
 
-// 64bit integer division helpers for hosts without 64bit registers. The generated
-// code verifies that the divisor is valid before calling them
-asINT64 JIT_DIVi64(asINT64 a, asINT64 b) noexcept;
-asINT64 JIT_MODi64(asINT64 a, asINT64 b) noexcept;
-asQWORD JIT_DIVu64(asQWORD a, asQWORD b) noexcept;
-asQWORD JIT_MODu64(asQWORD a, asQWORD b) noexcept;
-
 // CJITCompiler::Prepare and Execute, which aren't called from the generated code.
 // JIT_Execute only enters the functions compiled by the compiler, which the engine
 // must use, with maxNativeCallDepth as its maximum depth of nested native calls

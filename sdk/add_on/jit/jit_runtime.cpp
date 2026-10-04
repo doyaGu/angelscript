@@ -1113,26 +1113,6 @@ double JIT_uTOd(asUINT v) noexcept
 	return double(v);
 }
 
-asINT64 JIT_DIVi64(asINT64 a, asINT64 b) noexcept
-{
-	return a / b;
-}
-
-asINT64 JIT_MODi64(asINT64 a, asINT64 b) noexcept
-{
-	return a % b;
-}
-
-asQWORD JIT_DIVu64(asQWORD a, asQWORD b) noexcept
-{
-	return a / b;
-}
-
-asQWORD JIT_MODu64(asQWORD a, asQWORD b) noexcept
-{
-	return a % b;
-}
-
 //------------------------------------------------------------------------
 // Calls from the application
 

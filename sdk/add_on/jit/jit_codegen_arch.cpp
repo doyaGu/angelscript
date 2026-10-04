@@ -83,6 +83,62 @@ void CJITCodeGen::EmitUnsignedDivRem32(const Gp &quotient, const Gp &remainder,
 	cc->div(remainder, quotient, divisor);
 }
 
+// Divides a 64bit unsigned dividend by a divisor of at least 2^32. Shifting both
+// operands right until the divisor fits in 32 bits gives an estimate that is at
+// most one too large. Multiplication detects and corrects that case, and also
+// leaves the product needed to form the remainder.
+void CJITCodeGen::EmitUnsignedWideDiv32(const Gp &quotient, const Gp &remainderLo, const Gp &remainderHi,
+                                        const Gp &dividendLo, const Gp &dividendHi, const Gp &divisorLo, const Gp &divisorHi)
+{
+	x86::Compiler *cc = m_uc.cc;
+	Gp scaledDividendLo = m_uc.new_gp32();
+	Gp scaledDividendHi = m_uc.new_gp32();
+	Gp scaledDivisorLo = m_uc.new_gp32();
+	Gp scaledDivisorHi = m_uc.new_gp32();
+	Gp estimateRem = m_uc.new_gp32();
+	Gp productLo = m_uc.new_gp32();
+	Gp productHi = m_uc.new_gp32();
+	Gp crossLo = m_uc.new_gp32();
+	Gp crossHi = m_uc.new_gp32();
+	Gp borrow = m_uc.new_gp32();
+	Label normalize = m_uc.new_label();
+	Label tooLarge = m_uc.new_label();
+	Label productReady = m_uc.new_label();
+
+	m_uc.mov(scaledDividendLo, dividendLo);
+	m_uc.mov(scaledDividendHi, dividendHi);
+	m_uc.mov(scaledDivisorLo, divisorLo);
+	m_uc.mov(scaledDivisorHi, divisorHi);
+	m_uc.bind(normalize);
+	cc->shr(scaledDivisorHi.as<x86::Gp>(), Imm(1));
+	cc->rcr(scaledDivisorLo.as<x86::Gp>(), Imm(1));
+	cc->shr(scaledDividendHi.as<x86::Gp>(), Imm(1));
+	cc->rcr(scaledDividendLo.as<x86::Gp>(), Imm(1));
+	m_uc.j(normalize, test_nz(scaledDivisorHi));
+
+	EmitUnsignedDivRem32(quotient, estimateRem, scaledDividendHi, scaledDividendLo, scaledDivisorLo);
+	cc->mov(productLo.as<x86::Gp>(), quotient.as<x86::Gp>());
+	cc->mul(productHi.as<x86::Gp>(), productLo.as<x86::Gp>(), divisorLo.as<x86::Gp>());
+	cc->mov(crossLo.as<x86::Gp>(), quotient.as<x86::Gp>());
+	cc->mul(crossHi.as<x86::Gp>(), crossLo.as<x86::Gp>(), divisorHi.as<x86::Gp>());
+	m_uc.j(tooLarge, add_c(productHi, crossLo));
+	m_uc.j(tooLarge, ucmp_gt(productHi, dividendHi));
+	m_uc.j(productReady, ucmp_lt(productHi, dividendHi));
+	m_uc.j(productReady, ucmp_le(productLo, dividendLo));
+
+	m_uc.bind(tooLarge);
+	m_uc.sub(quotient, quotient, Imm(1));
+	m_uc.select(borrow, Imm(1), Imm(0), ucmp_lt(productLo, divisorLo));
+	m_uc.sub(productLo, productLo, divisorLo);
+	m_uc.sub(productHi, productHi, divisorHi);
+	m_uc.sub(productHi, productHi, borrow);
+	m_uc.bind(productReady);
+	m_uc.select(borrow, Imm(1), Imm(0), ucmp_lt(dividendLo, productLo));
+	m_uc.sub(remainderLo, dividendLo, productLo);
+	m_uc.sub(remainderHi, dividendHi, productHi);
+	m_uc.sub(remainderHi, remainderHi, borrow);
+}
+
 // Loads the signed offset of a switch target from the table and jumps to it.
 // The annotation tells the register allocator about the indirect successors
 void CJITCodeGen::EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets)
@@ -363,6 +419,11 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 }
 
 void CJITCodeGen::EmitUnsignedDivRem32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitUnsignedWideDiv32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
 {
 	m_failed = true;
 }
@@ -679,6 +740,11 @@ void CJITCodeGen::EmitSignedDiv(const Gp &, const Gp &, const Gp &, bool)
 }
 
 void CJITCodeGen::EmitUnsignedDivRem32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitUnsignedWideDiv32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
 {
 	m_failed = true;
 }

@@ -215,6 +215,8 @@ protected:
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
 	void EmitUnsignedDivRem32(const Gp &quotient, const Gp &remainder,
 	                          const Gp &high, const Gp &low, const Gp &divisor);
+	void EmitUnsignedWideDiv32(const Gp &quotient, const Gp &remainderLo, const Gp &remainderHi,
+	                           const Gp &dividendLo, const Gp &dividendHi, const Gp &divisorLo, const Gp &divisorHi);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 	void EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets);
 	Mem  PtrElement(const Gp &array, const Gp &index);
