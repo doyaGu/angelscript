@@ -1572,6 +1572,9 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	// Keep multi-slot aggregates wholly in registers or wholly on the stack. AsmJit
 	// sees their slots as separate primitive arguments and may otherwise split them
 	// at the end of an argument register bank.
+	struct SArmStackHFA { int arg; int registerParts; int parts; int partSize; };
+	std::vector<SArmStackHFA> forceStackArmHFAs;
+	std::vector<TypeId> forceStackArmVecDummies;
 	const Environment &env = m_uc.cc->environment();
 	int forceStackGpArg = -1, forceStackVecArg = -1, forceStackArmGpArg = -1;
 #if defined(AS_X64_GCC)
@@ -1633,11 +1636,24 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			bool floating = args[n].kind == ARG_F32 || args[n].kind == ARG_F64;
 			if( args[n].valueParts && floating )
 			{
-				// AAPCS64 never splits an HFA between registers and the stack. Leave
-				// such a call to the engine until the packed stack form is supported.
+				// AAPCS64 never splits an HFA between registers and the stack. Note
+				// how many members AsmJit put in registers so they can all be moved to
+				// packed stack slots below. Later floating arguments stay on the stack.
 				if( vecArgs + asUINT(args[n].valueParts) > 8 )
-					return false;
-				vecArgs += asUINT(args[n].valueParts);
+				{
+					int registerParts = vecArgs < 8 ? 8 - int(vecArgs) : 0;
+					SArmStackHFA hfa = { int(n), registerParts, args[n].valueParts, args[n].valueSize };
+					forceStackArmHFAs.push_back(hfa);
+					int stackParts = hfa.parts - hfa.registerParts;
+					int stackPartSize = env.is_platform_apple() ? hfa.partSize : 8;
+					int packedSize = env.is_platform_apple() ? hfa.parts * hfa.partSize :
+					                 (hfa.parts * hfa.partSize + 7) & ~7;
+					for( int bytes = stackParts * stackPartSize; bytes < packedSize; bytes += stackPartSize )
+						forceStackArmVecDummies.push_back(stackPartSize == 4 ? TypeId::kFloat32 : TypeId::kFloat64);
+					vecArgs = 8;
+				}
+				else
+					vecArgs += asUINT(args[n].valueParts);
 				n += asUINT(args[n].valueParts - 1);
 			}
 			else if( floating )
@@ -1674,6 +1690,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	for( asUINT n = 0; n < args.size(); n++ ) sig.add_arg(args[n].type);
 	if( objLast ) sig.add_arg(TypeId::kUIntPtr);
 	if( retInX8 ) sig.add_arg(TypeId::kUIntPtr); // moved to x8 below
+	asUINT realArgCount = asUINT(sig.arg_count());
 	int forceStackGpDummy = -1, forceStackVecDummy = -1;
 	if( forceStackGpArg >= 0 )
 	{
@@ -1691,6 +1708,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		forceStackArmGpDummy = int(sig.arg_count());
 		sig.add_arg(TypeId::kUInt64); // occupies x7 after the aggregate moves to the stack
 	}
+	for( asUINT n = 0; n < forceStackArmVecDummies.size(); n++ )
+		sig.add_arg(forceStackArmVecDummies[n]); // reserves space used to pack a complete HFA
 
 	// A null script object pointer is an exception raised by the VM. Auxiliary is
 	// required to be non-null when the function is registered.
@@ -1979,6 +1998,35 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 		firstValue.init_stack(firstOffset, firstValue.type_id());
 		dummyValue.init_reg(RegType::kGp64, 7, TypeId::kUInt64);
+	}
+	if( !forceStackArmHFAs.empty() )
+	{
+		asUINT argBase = (retFirst ? 1 : 0) + (hasThis ? 1 : 0) +
+		                 (retAfterThis ? 1 : 0) + (objFirst ? 1 : 0);
+		for( asUINT n = 0; n < forceStackArmHFAs.size(); n++ )
+		{
+			const SArmStackHFA &hfa = forceStackArmHFAs[n];
+			asUINT first = argBase + asUINT(hfa.arg);
+			asUINT firstStack = first + asUINT(hfa.registerParts);
+			int stackParts = hfa.parts - hfa.registerParts;
+			int stackPartSize = env.is_platform_apple() ? hfa.partSize : 8;
+			int packedSize = env.is_platform_apple() ? hfa.parts * hfa.partSize :
+			                 (hfa.parts * hfa.partSize + 7) & ~7;
+			int32_t firstOffset = call->detail().arg(firstStack).stack_offset();
+			int32_t oldEnd = firstOffset + stackParts * stackPartSize;
+			int32_t shift = packedSize - stackParts * stackPartSize;
+			for( asUINT arg = 0; arg < realArgCount; arg++ )
+			{
+				FuncValue &value = call->detail().arg(arg);
+				if( value.is_stack() && value.stack_offset() >= oldEnd )
+					value.set_stack_offset(value.stack_offset() + shift);
+			}
+			for( int part = 0; part < hfa.parts; part++ )
+			{
+				FuncValue &value = call->detail().arg(first + asUINT(part));
+				value.init_stack(firstOffset + part * hfa.partSize, value.type_id());
+			}
+		}
 	}
 	asUINT argIdx = 0;
 	if( retFirst )
