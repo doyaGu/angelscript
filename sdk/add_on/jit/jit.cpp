@@ -39,8 +39,8 @@
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).
-//  - 32bit x86: keep the value register in a register pair, and inline 64bit
-//    division and modulo instead of calling runtime helpers.
+//  - 32bit x86: keep the value register in a register pair. Division and modulo
+//    still use runtime helpers when the divisor's magnitude exceeds 32 bits.
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE

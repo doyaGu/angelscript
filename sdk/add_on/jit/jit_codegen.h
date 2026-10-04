@@ -213,6 +213,8 @@ protected:
 	void SetHomeRegHints(JITSlotMask slotMask);
 	int  RegsBias() const;
 	void EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool isMod);
+	void EmitUnsignedDivRem32(const Gp &quotient, const Gp &remainder,
+	                          const Gp &high, const Gp &low, const Gp &divisor);
 	bool EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target);
 	void EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets);
 	Mem  PtrElement(const Gp &array, const Gp &index);

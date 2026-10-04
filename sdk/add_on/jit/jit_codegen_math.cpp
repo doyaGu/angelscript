@@ -535,19 +535,95 @@ bool CJITCodeGen::EmitIntMath(asUINT idx)
 				m_uc.bind(valid);
 			}
 
+			Label slow = m_uc.new_label();
+			Label done = m_uc.new_label();
+			Gp aMagLo = alo;
+			Gp aMagHi = ahi;
+			Gp bMag = blo;
+			Gp resultSign;
+
+			if( isSigned )
+			{
+				Gp aSign = m_uc.new_gp32();
+				Gp bSign = m_uc.new_gp32();
+				Gp supported = m_uc.new_gp32();
+				m_uc.sar(aSign, ahi, Imm(31));
+				m_uc.sar(bSign, bhi, Imm(31));
+				m_uc.j(slow, cmp_ne(bhi, bSign));
+				// -2^32 is the only sign-extended divisor whose magnitude
+				// doesn't fit in 32 bits. Larger divisors use the helper.
+				m_uc.not_(supported, bhi);
+				m_uc.or_(supported, supported, blo);
+				m_uc.j(slow, test_z(supported));
+
+				Gp aXorLo = m_uc.new_gp32();
+				Gp carry = m_uc.new_gp32();
+				aMagLo = m_uc.new_gp32();
+				aMagHi = m_uc.new_gp32();
+				bMag = m_uc.new_gp32();
+				m_uc.xor_(aXorLo, alo, aSign);
+				m_uc.sub(aMagLo, aXorLo, aSign);
+				m_uc.select(carry, Imm(1), Imm(0), ucmp_lt(aMagLo, aXorLo));
+				m_uc.xor_(aMagHi, ahi, aSign);
+				m_uc.add(aMagHi, aMagHi, carry);
+				m_uc.xor_(bMag, blo, bSign);
+				m_uc.sub(bMag, bMag, bSign);
+				resultSign = m_uc.new_gp32();
+				if( instr.op == asBC_MODi64 )
+					m_uc.mov(resultSign, aSign);
+				else
+					m_uc.xor_(resultSign, aSign, bSign);
+			}
+			else
+				m_uc.j(slow, test_nz(bhi));
+
+			Gp zero = m_uc.new_gp32();
+			Gp qHi = m_uc.new_gp32();
+			Gp remHi = m_uc.new_gp32();
+			Gp qLo = m_uc.new_gp32();
+			Gp remLo = m_uc.new_gp32();
+			Gp lo = m_uc.new_gp32();
+			Gp hi = m_uc.new_gp32();
+			m_uc.mov(zero, Imm(0));
+			EmitUnsignedDivRem32(qHi, remHi, zero, aMagHi, bMag);
+			EmitUnsignedDivRem32(qLo, remLo, remHi, aMagLo, bMag);
+			if( instr.op == asBC_MODi64 || instr.op == asBC_MODu64 )
+			{
+				m_uc.mov(lo, remLo);
+				m_uc.mov(hi, Imm(0));
+			}
+			else
+			{
+				m_uc.mov(lo, qLo);
+				m_uc.mov(hi, qHi);
+			}
+
+			if( isSigned )
+			{
+				Gp xorLo = m_uc.new_gp32();
+				Gp carry = m_uc.new_gp32();
+				m_uc.xor_(xorLo, lo, resultSign);
+				m_uc.sub(lo, xorLo, resultSign);
+				m_uc.select(carry, Imm(1), Imm(0), ucmp_lt(lo, xorLo));
+				m_uc.xor_(hi, hi, resultSign);
+				m_uc.add(hi, hi, carry);
+			}
+
+			BaseNode *cold = BeginCold(slow);
 			const void *helper = instr.op == asBC_DIVi64 ? (const void*)JIT_DIVi64 :
 			                     instr.op == asBC_MODi64 ? (const void*)JIT_MODi64 :
 			                     instr.op == asBC_DIVu64 ? (const void*)JIT_DIVu64 : (const void*)JIT_MODu64;
 			InvokeNode *call = Invoke(helper, isSigned ? FuncSignature::build<asINT64, asINT64, asINT64>() :
 			                                           FuncSignature::build<asQWORD, asQWORD, asQWORD>());
-			Gp lo = m_uc.new_gp32();
-			Gp hi = m_uc.new_gp32();
 			call->set_arg(0, 0, alo);
 			call->set_arg(0, 1, ahi);
 			call->set_arg(1, 0, blo);
 			call->set_arg(1, 1, bhi);
 			call->set_ret(0, lo);
 			call->set_ret(1, hi);
+			EndCold(cold, done);
+
+			m_uc.bind(done);
 			m_uc.store_u32(Var(a0), lo);
 			m_uc.store_u32(Var(a0, 4), hi);
 			ReloadCachedSlot(a0);

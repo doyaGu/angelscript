@@ -72,6 +72,17 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 	cc->mov(dst, isMod ? hi : lo);
 }
 
+// Divides the unsigned 64bit integer high:low by the 32bit divisor. The
+// quotient must fit in 32 bits; the caller guarantees high < divisor.
+void CJITCodeGen::EmitUnsignedDivRem32(const Gp &quotient, const Gp &remainder,
+                                       const Gp &high, const Gp &low, const Gp &divisor)
+{
+	x86::Compiler *cc = m_uc.cc;
+	cc->mov(quotient, low);
+	cc->mov(remainder, high);
+	cc->div(remainder, quotient, divisor);
+}
+
 // Loads the signed offset of a switch target from the table and jumps to it.
 // The annotation tells the register allocator about the indirect successors
 void CJITCodeGen::EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets)
@@ -349,6 +360,11 @@ void CJITCodeGen::EmitSignedDiv(const Gp &dst, const Gp &a, const Gp &b, bool is
 		cc->msub(dst, q, b, a);
 	else
 		cc->mov(dst, q);
+}
+
+void CJITCodeGen::EmitUnsignedDivRem32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
+{
+	m_failed = true;
 }
 
 void CJITCodeGen::EmitJumpTable(const Gp &index, const Label &table, const std::vector<Label> &targets)
@@ -658,6 +674,11 @@ void CJITCodeGen::SetHomeRegHints(JITSlotMask)
 }
 
 void CJITCodeGen::EmitSignedDiv(const Gp &, const Gp &, const Gp &, bool)
+{
+	m_failed = true;
+}
+
+void CJITCodeGen::EmitUnsignedDivRem32(const Gp &, const Gp &, const Gp &, const Gp &, const Gp &)
 {
 	m_failed = true;
 }
