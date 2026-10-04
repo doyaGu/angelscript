@@ -32,9 +32,8 @@
 //    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
-//  - Borrow handle arguments of non-inlined calls that can't be reduced to one
-//    checked implementation, such as polymorphic virtual/interface, bound, and
-//    function-pointer calls
+//  - Borrow handle arguments of non-inlined dynamic calls that don't have checked
+//    virtual/interface implementations, such as bound and function-pointer calls
 //    (jit_bytecode.cpp, AnalyseBorrows).
 //  - Register cache for more than 63 variables
 //    (jit_bytecode.cpp, AnalyseSlots).

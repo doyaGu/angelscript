@@ -368,9 +368,9 @@ public:
 	// that borrow the references of the caller, see AnalyseBorrows and AnalyseForAOT
 	asUINT GetBorrowedArgs(asUINT instrIdx) const;
 
-	// Returns the implementation a non-inlined virtual/interface call may lend its
-	// arguments to, which the generated code checks against the resolved method
-	asCScriptFunction *GetBorrowedTarget(asUINT instrIdx) const;
+	// Returns the implementations a non-inlined virtual/interface call may lend its
+	// arguments to. The generated code checks the resolved method against every one
+	const std::vector<asCScriptFunction*> &GetBorrowedTargets(asUINT instrIdx) const;
 
 	// Returns the variables that must be null for the copies of the references lent
 	// to a native script call not to release anything, which the first of the copies
@@ -451,7 +451,7 @@ protected:
 	asUINT                  m_borrowableParams; // see GetBorrowableParams
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
 	std::map<asUINT, asUINT> m_borrowedArgs;    // by call instruction
-	std::map<asUINT, asCScriptFunction*> m_borrowedTargets; // checked targets of virtual/interface calls
+	std::map<asUINT, std::vector<asCScriptFunction*> > m_borrowedTargets; // checked targets of virtual/interface calls
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
