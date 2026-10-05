@@ -108,7 +108,11 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			callee = func->engine->importedFunctions[imported]->importedFunctionSignature;
 	}
 	const std::vector<asCScriptFunction*> *borrowTargets = (kind == JIT_CALL_INTERFACE || kind == JIT_CALL_BOUND || kind == JIT_CALL_PTR) ? &m_code->GetBorrowedTargets(idx) : 0;
-	asUINT borrowed = (kind == JIT_CALL_SCRIPT || (borrowTargets && !borrowTargets->empty())) ? m_code->GetBorrowedArgs(idx) : 0;
+	// EmitInlineCall gives borrowed arguments references of their own before its
+	// fallback reaches this path, so only separately generated calls pass the mask.
+	asUINT borrowed = !(instr.flags & JIT_INSTR_INLINE) &&
+	                  (kind == JIT_CALL_SCRIPT || (borrowTargets && !borrowTargets->empty()))
+	                  ? m_code->GetBorrowedArgs(idx) : 0;
 
 	bool native = false;
 	if( kind == JIT_CALL_SCRIPT || kind == JIT_CALL_ALLOC )
