@@ -25,8 +25,6 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Unwind information on 32bit MinGW configurations without DWARF
-//    (jit_unwind.h).
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE

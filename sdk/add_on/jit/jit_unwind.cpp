@@ -10,6 +10,12 @@
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
 #elif defined(__MINGW32__) && defined(__i386__) && \
+      (defined(__USING_SJLJ_EXCEPTIONS__) || defined(__SEH__))
+	// SJLJ and 32bit SEH find exception handlers through runtime-maintained
+	// chains. The generated code has no handlers of its own, so it needs no
+	// unwind table while an exception passes through it to JIT_GuardedEntry.
+	#define JIT_UNWIND_HANDLER_CHAIN
+#elif defined(__MINGW32__) && defined(__i386__) && \
       (defined(__GCC_HAVE_DWARF2_CFI_ASM) || defined(__clang__)) && \
       !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__SEH__)
 	// GCC advertises DWARF CFI directly. Clang doesn't, but identifies its

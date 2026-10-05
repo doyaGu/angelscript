@@ -22,11 +22,8 @@ BEGIN_AS_NAMESPACE
 //    __register_frame.
 //  - 32bit GCC or Clang MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE
 //    registered with libgcc.
-//  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
-//    through the handlers registered on the stack.
-//
-// TODO: 32bit MinGW configurations without DWARF could be supported too, but
-//       haven't been tested.
+//  - 32bit x86 with MSVC, or MinGW using SJLJ or SEH: nothing is needed, as the
+//    exceptions are dispatched through runtime-maintained handler chains.
 class CJITUnwindInfo
 {
 public:
