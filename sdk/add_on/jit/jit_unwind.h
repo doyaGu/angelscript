@@ -19,8 +19,8 @@ BEGIN_AS_NAMESPACE
 //    RtlAddFunctionTable.
 //  - 64bit x86 on Linux, and AArch64 on Linux and macOS: a DWARF CIE and FDE
 //    registered with __register_frame.
-//  - 32bit MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE registered
-//    with libgcc.
+//  - 32bit GCC or Clang MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE
+//    registered with libgcc.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //

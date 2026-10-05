@@ -6,8 +6,11 @@
 	#define JIT_UNWIND_WIN64
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
-#elif defined(__MINGW32__) && defined(__i386__) && defined(__GCC_HAVE_DWARF2_CFI_ASM) && \
-      !defined(__USING_SJLJ_EXCEPTIONS__)
+#elif defined(__MINGW32__) && defined(__i386__) && \
+      (defined(__GCC_HAVE_DWARF2_CFI_ASM) || defined(__clang__)) && \
+      !defined(__USING_SJLJ_EXCEPTIONS__) && !defined(__SEH__)
+	// GCC advertises DWARF CFI directly. Clang doesn't, but identifies its
+	// alternative 32bit MinGW exception models with the two excluded macros.
 	// The 32bit MinGW DWARF unwinder needs call frame information for C++
 	// exceptions. Register an FDE for the generated code with libgcc.
 	#define JIT_UNWIND_DWARF
