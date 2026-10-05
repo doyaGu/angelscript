@@ -31,11 +31,17 @@ if(NOT TARGET asmjit::asmjit)
     endif()
 endif()
 
-# The engine library must already be part of the build (see the CMake project
-# in sdk/angelscript/projects/cmake). The JIT compiler needs the internal
-# headers of the engine, so it must be compiled with the same options.
+# Reuse the engine library of an embedding project. When the JIT is configured
+# directly, also add the bundled engine so that CMake-aware IDEs can open this
+# directory as a complete project. Both targets then use the same configuration.
 if(NOT ANGELSCRIPT_LIBRARY_NAME)
     set(ANGELSCRIPT_LIBRARY_NAME angelscript)
+endif()
+if(PROJECT_IS_TOP_LEVEL AND NOT TARGET ${ANGELSCRIPT_LIBRARY_NAME})
+    add_subdirectory(../../angelscript/projects/cmake angelscript)
+    if(NOT TARGET ${ANGELSCRIPT_LIBRARY_NAME} AND TARGET Angelscript)
+        set(ANGELSCRIPT_LIBRARY_NAME Angelscript)
+    endif()
 endif()
 
 add_library(angelscript_jit STATIC

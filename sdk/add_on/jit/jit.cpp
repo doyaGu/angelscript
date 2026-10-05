@@ -22,11 +22,6 @@
 #include <string>
 #include <string.h>
 
-// Future work, in rough order of expected benefit. See the TODO comments at the
-// respective places in the code for the details.
-//
-//  - Project files for the add-on for the IDEs besides CMake.
-
 BEGIN_AS_NAMESPACE
 
 // Records errors reported by AsmJit while emitting code
