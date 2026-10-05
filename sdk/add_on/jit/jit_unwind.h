@@ -17,15 +17,16 @@ BEGIN_AS_NAMESPACE
 //
 //  - 64bit x86 and ARM64 Windows: unwind data appended to the code and registered
 //    with RtlAddFunctionTable.
-//  - 64bit x86 on Linux and FreeBSD, AArch64 on Linux and FreeBSD, and
-//    AArch64/arm64e on macOS: a DWARF CIE and FDE registered with __register_frame.
+//  - 64bit x86 on Linux and the BSDs, AArch64 on Linux, FreeBSD, NetBSD, and
+//    OpenBSD, and AArch64/arm64e on macOS: a DWARF CIE and FDE registered with
+//    __register_frame.
 //  - 32bit GCC or Clang MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE
 //    registered with libgcc.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: NetBSD, OpenBSD, DragonFly BSD, and 32bit MinGW configurations without
-//       DWARF could be supported too, but haven't been tested.
+// TODO: 32bit MinGW configurations without DWARF could be supported too, but
+//       haven't been tested.
 class CJITUnwindInfo
 {
 public:
