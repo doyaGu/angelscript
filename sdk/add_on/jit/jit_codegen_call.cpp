@@ -1376,12 +1376,6 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // caught by JIT_GuardedEntry. Where the code has no unwind information for that
 // (see CJITUnwindInfo) this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 //
-// TODO: runtime optimize: More small, trivial objects passed by value could be
-//                         supported on the other ABI paths by setting up the argument
-//                         copies the way CallSystemFunction and as_callfunc_*.cpp do.
-//                         asCALL_GENERIC could be called with an asCGeneric set up inline.
-//                         Each should be measured against CallSystemFunction before adding
-//                         the code.
 // The indexers are compiled in place as the loads of the address of the element, see
 // CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
 // left to the VM, which calls the method to raise the exception. Nothing else can

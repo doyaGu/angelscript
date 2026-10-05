@@ -24,8 +24,8 @@ BEGIN_AS_NAMESPACE
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: The BSDs, other 32bit MinGW unwinders, arm64e, and Windows ARM64 could
-//       be supported the same way, but haven't been tested.
+// TODO: The BSDs, 32bit MinGW configurations without DWARF, arm64e, and Windows
+//       ARM64 could be supported too, but haven't been tested.
 class CJITUnwindInfo
 {
 public:

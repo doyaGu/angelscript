@@ -25,14 +25,8 @@
 // Future work, in rough order of expected benefit. See the TODO comments at the
 // respective places in the code for the details.
 //
-//  - Small, trivial objects passed by value to direct system calls on the hosts
-//    besides 64bit System V, Microsoft x64, 32bit x86, and AArch64.
-//    Complex and large value objects, which the native ABI passes indirectly, are
-//    supported everywhere
-//    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
-//    and unwind information on the platforms besides 64bit Windows, 32bit x86 on
-//    Windows with MSVC or MinGW's DWARF unwinder, 64bit x86 on Linux, and AArch64
-//    on Linux and macOS (jit_unwind.h).
+//  - Unwind information on the BSDs, 32bit MinGW configurations without DWARF,
+//    arm64e, and Windows ARM64 (jit_unwind.h).
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE
