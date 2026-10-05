@@ -33,7 +33,7 @@ enum EJITInstrFlags
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
 	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
-	JIT_INSTR_PROFILE     = 0x1000, // asBC_CALLINTF whose classes are noted in the profile, or, if inlined for the class seen before, the others, see SJITProfile
+	JIT_INSTR_PROFILE     = 0x1000, // call whose receiver class or function-pointer target is noted in the profile, see SJITProfile
 	JIT_INSTR_INDEXER     = 0x2000  // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
 };
 
@@ -153,25 +153,46 @@ struct SJITSeenClasses
 	}
 };
 
-// The classes of the objects that the virtual and interface calls marked with
-// JIT_INSTR_PROFILE have seen, by the function and the index of the call, for the
-// calls whose method several classes implement. The calls inlined for the classes seen
-// before note the others. The compiled code counts down the calls, and compiles the
-// function again with the classes seen when the count runs out, if a call has seen a
-// new one, see SJITCodeGenOptions. The code may note the classes in several threads
-// at once, which only loses counts or classes, as the classes are only compared with
-// those of the module of the call. The count runs out when it isn't positive, so a
-// count that a thread takes below 0 while another starts it again runs out at the
-// next call
+// The script functions that a function-pointer call has seen, in the order seen,
+// null after the last. The calls that see more functions than there is room for
+// don't note them
+static const asUINT JIT_PROFILE_FUNCTIONS = 3;
+struct SJITSeenFunctions
+{
+	asCScriptFunction *functions[JIT_PROFILE_FUNCTIONS];
+
+	bool Has(const asCScriptFunction *func) const
+	{
+		for( asUINT n = 0; n < JIT_PROFILE_FUNCTIONS; n++ )
+			if( functions[n] == func )
+				return true;
+		return false;
+	}
+};
+
+// The receiver classes of virtual and interface calls, and the targets of
+// function-pointer calls, marked with JIT_INSTR_PROFILE. They are kept by the
+// function and the index of the call. The compiled code counts down the calls, and
+// compiles the function again with the targets seen when the count runs out, if a
+// call has seen a new one, see SJITCodeGenOptions. Several threads may write the
+// cells at once, which only loses counts or targets. The pointers are only compared
+// with live classes or functions of the module of the call before they are used.
+// The count runs out when it isn't positive, so a count that a thread takes below 0
+// while another starts it again runs out at the next call
 struct SJITProfile
 {
 	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses> classes;
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenFunctions> functions;
 	int countdown;
 
 	// Returns the classes noted for the call, or null
 	const SJITSeenClasses *Find(asCScriptFunction *func, asUINT instrIdx) const;
-	// Returns true if a call has seen a class of the module of its function that it
-	// hadn't in the profile that the code was compiled with
+	// Returns the functions noted for the call, or null
+	const SJITSeenFunctions *FindFunctions(asCScriptFunction *func, asUINT instrIdx) const;
+	// Returns true if a call has seen a class or function of the module of its
+	// function that it hadn't in the profile that the code was compiled with
+	bool HasNewTarget(const SJITProfile &compiledWith) const;
+	// Returns true if a call has seen a new receiver class in its function's module
 	bool HasNewClass(const SJITProfile &compiledWith) const;
 };
 
@@ -181,8 +202,8 @@ struct SJITInlineOptions
 	asUINT maxSize;  // largest bytecode in dwords, 0 inlines nothing
 	bool (*filter)(asIScriptFunction *func, void *param); // must accept the function unless null
 	void  *filterParam;
-	const SJITProfile *classes; // the classes seen by the calls of the code compiled before, or null
-	bool   profile;  // mark the calls whose classes are worth noting with JIT_INSTR_PROFILE
+	const SJITProfile *classes; // the call targets seen by the code compiled before, or null
+	bool   profile;  // mark the calls whose targets are worth noting with JIT_INSTR_PROFILE
 	bool   borrowCalls; // borrow handle arguments of non-inlined calls with checked targets
 	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
 };
@@ -407,10 +428,11 @@ protected:
 	bool CanBeInlined() const;
 	void FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers);
 	void AnalyseBorrows(bool borrowCalls = false);
+	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
 	void ClearBorrows();
 	void FindBorrowableParams();
 	void FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlinee> > &callees);
-	void FindCalledBorrowedArgs();
+	void FindCalledBorrowedArgs(const SJITProfile *profile, bool profileCalls);
 	void FindAOTBorrowedArgs();
 	void FindMovedRefs();
 	void FindInPlaceRefCounts();

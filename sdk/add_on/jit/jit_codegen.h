@@ -25,7 +25,7 @@ struct SJITCodeGenOptions
 	bool guardedEntry;      // enter through JIT_GuardedEntry when called by the VM
 	asUINT maxNativeCallDepth; // nested native calls allowed when entered by the VM
 	bool interop;           // set the current function for the native calls and don't mark their call states, for the functions generated ahead of time, see JITFunction
-	SJITProfile *profile;    // where the calls marked with JIT_INSTR_PROFILE note their classes, or null
+	SJITProfile *profile;    // where the calls marked with JIT_INSTR_PROFILE note their targets, or null
 	const void *recompile;   // int (*)(SJITProfile*), called when the profile has counted down the calls, returns non-zero if the function has new code, which the VM goes on in after the call
 	const void *exactEntry;  // int (*)(void *exactParam, asSVMRegisters*, asPWORD jitArg), called in place of the code when the VM enters it while a line callback is set or a suspension is requested, if elideSuspend is set, see CJITCodeGen::Generate
 	void       *exactParam;
@@ -66,7 +66,7 @@ public:
 	asUINT GetInstructionCount() const { return m_instrCount; }
 	asUINT GetBailCount() const        { return m_bailCount; }
 	asUINT GetInlinedCallCount() const { return m_callsInlined; }
-	asUINT GetProfiledCallCount() const { return m_callsProfiled; } // the calls that note their classes in the profile
+	asUINT GetProfiledCallCount() const { return m_callsProfiled; } // the calls that note targets in the profile
 
 	// The name of the first instruction that no code could be generated for, or null
 	const char *GetFailedInstruction() const { return m_failedOp < 0 ? 0 : asBCInfo[m_failedOp].name; }
@@ -203,6 +203,8 @@ protected:
 	Gp   EmitFindMethod(asCScriptFunction *method, const Label &slow, SJITSeenClasses *seen);
 	void EmitNoteClass(SJITSeenClasses *seen, const Gp &type);
 	SJITSeenClasses *ProfileCell(asUINT idx);
+	void EmitNoteFunction(SJITSeenFunctions *seen, const Gp &func);
+	SJITSeenFunctions *FunctionProfileCell(asUINT idx);
 	Gp   EmitCountDown();
 	void EmitRecompile(asUINT idx);
 	bool EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee, const Gp &result, const Label &slow, bool mark, bool vrInReg, asUINT borrowed = 0, const Gp *stackPointer = 0);

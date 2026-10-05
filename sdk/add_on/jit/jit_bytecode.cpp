@@ -669,6 +669,20 @@ static bool IsModuleClass(asCScriptFunction *func, asCObjectType *seen)
 	return false;
 }
 
+// Returns true if the function that a profile has seen is still one of the
+// functions of the caller's module. The others may have been destroyed, and are
+// only compared with the live pointers here before they are dereferenced
+static bool IsModuleFunction(asCScriptFunction *caller, asCScriptFunction *seen)
+{
+	if( caller->module == 0 )
+		return false;
+	const asCArray<asCScriptFunction*> &functions = caller->module->m_scriptFunctions;
+	for( asUINT n = 0; n < functions.GetLength(); n++ )
+		if( functions[n] == seen )
+			return true;
+	return false;
+}
+
 // Returns the implementation of a virtual or interface method in the class that the
 // profile has seen at the call, which is returned in objType, if it is a class of the
 // module of the caller that objects calling the method can be of
@@ -705,8 +719,13 @@ const SJITSeenClasses *SJITProfile::Find(asCScriptFunction *func, asUINT instrId
 	return it == classes.end() ? 0 : &it->second;
 }
 
-// The calls that have seen only the classes they were compiled with, or those of
-// other modules, or none, gain nothing from compiling the function again
+const SJITSeenFunctions *SJITProfile::FindFunctions(asCScriptFunction *func, asUINT instrIdx) const
+{
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenFunctions>::const_iterator it = functions.find(std::make_pair(func, instrIdx));
+	return it == functions.end() ? 0 : &it->second;
+}
+
+// Returns true if a call has seen a new receiver class in the caller's module
 bool SJITProfile::HasNewClass(const SJITProfile &compiledWith) const
 {
 	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses>::const_iterator it;
@@ -717,6 +736,26 @@ bool SJITProfile::HasNewClass(const SJITProfile &compiledWith) const
 		{
 			asCObjectType *seen = it->second.types[n];
 			if( seen && !(before && before->Has(seen)) && IsModuleClass(it->first.first, seen) )
+				return true;
+		}
+	}
+	return false;
+}
+
+// The calls that have seen only the targets they were compiled with, or those of
+// other modules, or none, gain nothing from compiling the function again
+bool SJITProfile::HasNewTarget(const SJITProfile &compiledWith) const
+{
+	if( HasNewClass(compiledWith) )
+		return true;
+	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenFunctions>::const_iterator fit;
+	for( fit = functions.begin(); fit != functions.end(); ++fit )
+	{
+		const SJITSeenFunctions *before = compiledWith.FindFunctions(fit->first.first, fit->first.second);
+		for( asUINT n = 0; n < JIT_PROFILE_FUNCTIONS; n++ )
+		{
+			asCScriptFunction *seen = fit->second.functions[n];
+			if( seen && !(before && before->Has(seen)) && IsModuleFunction(fit->first.first, seen) )
 				return true;
 		}
 	}
@@ -768,7 +807,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 				search.path.pop_back();
 				callee->FindIndexers(inlining.indexers);
-				callee->AnalyseBorrows(inlining.borrowCalls);
+				callee->AnalyseBorrows(inlining.borrowCalls, inlining.classes, inlining.profile);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
 		}
@@ -897,7 +936,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
 	FindIndexers(inlining ? inlining->indexers : 0);
-	AnalyseBorrows(inlining && inlining->borrowCalls);
+	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
@@ -1023,6 +1062,16 @@ static bool IsCountedRef(asCTypeInfo *type)
 	return ot && (ot->flags & asOBJ_REF) && !(ot->flags & asOBJ_NOCOUNT) && ot->beh.addref && ot->beh.release;
 }
 
+// Returns true if a call with this signature has a handle argument that generated
+// code could lend to a script implementation
+static bool HasBorrowableArgument(asCScriptFunction *func)
+{
+	for( asUINT p = 0; p < func->parameterTypes.GetLength() && p < 31; p++ )
+		if( func->parameterTypes[p].IsObjectHandle() && IsCountedRef(func->parameterTypes[p].GetTypeInfo()) )
+			return true;
+	return false;
+}
+
 // The initialization lists whose elements are primitives, enums, or value types
 // without a destructor have nothing to destroy
 static bool IsPlainList(asCScriptEngine *engine, asCObjectType *listType)
@@ -1076,13 +1125,18 @@ EJITRefKind CJITByteCode::GetRefKind(asCScriptEngine *engine, asCTypeInfo *ti)
 // CJITCodeGen::OwnDirectBorrowed, and JIT_OwnBorrowed
 void CJITByteCode::AnalyseBorrows(bool borrowCalls)
 {
+	AnalyseBorrows(borrowCalls, 0, false);
+}
+
+void CJITByteCode::AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls)
+{
 	ClearBorrows();
 	if( m_staticStack )
 	{
 		FindBorrowableParams();
 		FindBorrowedArgs(m_inlinees);
 		if( borrowCalls )
-			FindCalledBorrowedArgs();
+			FindCalledBorrowedArgs(profile, profileCalls);
 	}
 	FindMovedRefs();
 	FindInPlaceRefCounts();
@@ -1090,20 +1144,22 @@ void CJITByteCode::AnalyseBorrows(bool borrowCalls)
 }
 
 // Finds script functions, checked implementations of virtual and interface methods,
-// the current script target of a bound import, or script functions named by local
-// function-pointer literals, called without being inlined. Their generated native
-// entries receive the borrowed-parameter mask through the call state. The
-// implementations may lend the arguments only if all of them can; a dynamic call
-// checks its resolved target against this set. If a target is unknown, rebound,
-// deferred, generated ahead of time, or left to the VM, the fallback gives the
-// arguments references of their own first.
-void CJITByteCode::FindCalledBorrowedArgs()
+// the current script target of a bound import, script functions named by local
+// function-pointer literals, or live module functions seen in a profile, called
+// without being inlined. Their generated native entries receive the
+// borrowed-parameter mask through the call state. The implementations may lend the
+// arguments only if all of them can; a dynamic call checks its resolved target
+// against this set. If a target is unknown, rebound, deferred, generated ahead of
+// time, or left to the VM, the fallback gives the arguments references of their own
+// first. Function-pointer calls with potentially borrowable arguments keep noting
+// their targets while the current code has a profile.
+void CJITByteCode::FindCalledBorrowedArgs(const SJITProfile *profile, bool profileCalls)
 {
 	std::map<asUINT, std::vector<SJITInlinee> > callees;
 	asCScriptEngine *engine = m_func->engine;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
-		const SJITInstr &instr = m_instrs[n];
+		SJITInstr &instr = m_instrs[n];
 		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF && instr.op != asBC_CALLBND && instr.op != asBC_CallPtr) ||
 		    (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INLINE)) )
 			continue;
@@ -1126,12 +1182,23 @@ void CJITByteCode::FindCalledBorrowedArgs()
 		if( instr.op == asBC_CallPtr )
 		{
 			func = FindFuncdef(m_func, asBC_SWORDARG1(instr.bc));
+			if( func && profileCalls && HasBorrowableArgument(func) )
+				instr.flags |= JIT_INSTR_PROFILE;
 			for( asUINT i = 0; func && i < m_instrs.size(); i++ )
 			{
 				if( m_instrs[i].op != asBC_FuncPtr )
 					continue;
 				asCScriptFunction *target = reinterpret_cast<asCScriptFunction*>(asBC_PTRARG(m_instrs[i].bc));
 				if( target && target->funcType == asFUNC_SCRIPT && target->scriptData &&
+				    func->IsSignatureExceptNameEqual(target) &&
+				    std::find(targets.begin(), targets.end(), target) == targets.end() )
+					targets.push_back(target);
+			}
+			const SJITSeenFunctions *seen = func && profile ? profile->FindFunctions(m_func, n) : 0;
+			for( asUINT i = 0; seen && i < JIT_PROFILE_FUNCTIONS && seen->functions[i]; i++ )
+			{
+				asCScriptFunction *target = seen->functions[i];
+				if( IsModuleFunction(m_func, target) && target->funcType == asFUNC_SCRIPT && target->scriptData &&
 				    func->IsSignatureExceptNameEqual(target) &&
 				    std::find(targets.begin(), targets.end(), target) == targets.end() )
 					targets.push_back(target);

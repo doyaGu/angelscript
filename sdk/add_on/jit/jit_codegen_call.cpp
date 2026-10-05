@@ -219,6 +219,9 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			Gp func = LoadPtr(int(extra));
 			Gp type = m_uc.new_gp32();
 			m_uc.j(slow, test_z(func));
+			SJITSeenFunctions *seen = FunctionProfileCell(idx);
+			if( seen )
+				EmitNoteFunction(seen, func);
 			if( borrowed )
 			{
 				Label accepted = m_uc.new_label();
@@ -855,6 +858,27 @@ void CJITCodeGen::EmitNoteClass(SJITSeenClasses *seen, const Gp &type)
 	m_uc.bind(done);
 }
 
+// Notes the function pointer seen by a call in the first place that is free,
+// unless it is noted already or there is no place left. Another thread may note a
+// function in the same place at the same time, which loses one of them
+void CJITCodeGen::EmitNoteFunction(SJITSeenFunctions *seen, const Gp &func)
+{
+	Gp cell  = PtrConst(asPWORD(seen));
+	Gp noted = m_uc.new_gp_ptr();
+	Label done = m_uc.new_label();
+	for( asUINT n = 0; n < JIT_PROFILE_FUNCTIONS; n++ )
+	{
+		Label next = m_uc.new_label();
+		m_uc.load(noted, Addr(cell, int(n * PTR_BYTES)));
+		m_uc.j(done, cmp_eq(noted, func));
+		m_uc.j(next, test_nz(noted));
+		m_uc.store(Addr(cell, int(n * PTR_BYTES)), func);
+		m_uc.j(done);
+		m_uc.bind(next);
+	}
+	m_uc.bind(done);
+}
+
 // Returns where the call notes the classes that it sees, if it is marked with
 // JIT_INSTR_PROFILE and the code has a profile, else null
 SJITSeenClasses *CJITCodeGen::ProfileCell(asUINT idx)
@@ -862,6 +886,15 @@ SJITSeenClasses *CJITCodeGen::ProfileCell(asUINT idx)
 	if( m_options.profile == 0 || !(m_code->GetInstructions()[idx].flags & JIT_INSTR_PROFILE) )
 		return 0;
 	return &m_options.profile->classes[std::make_pair(m_code->GetFunction(), idx)];
+}
+
+// Returns where the call notes the functions that it sees, if it is marked with
+// JIT_INSTR_PROFILE and the code has a profile, else null
+SJITSeenFunctions *CJITCodeGen::FunctionProfileCell(asUINT idx)
+{
+	if( m_options.profile == 0 || !(m_code->GetInstructions()[idx].flags & JIT_INSTR_PROFILE) )
+		return 0;
+	return &m_options.profile->functions[std::make_pair(m_code->GetFunction(), idx)];
 }
 
 // Counts down the calls for the profile. Returns the count left, which has run out
@@ -1188,7 +1221,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			EmitInlineCall(idx);
 		else
 		{
-			// The calls that note their classes count down the calls for the profile
+			// The calls that note their receiver classes count down the calls for the profile
 			if( ProfileCell(idx) )
 			{
 				Label recompile = m_uc.new_label();
@@ -1216,6 +1249,17 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			Bail(idx);
 		else
 		{
+			if( FunctionProfileCell(idx) )
+			{
+				Label recompile = m_uc.new_label();
+				Label cont = m_uc.new_label();
+				m_uc.j(recompile, scmp_le(EmitCountDown(), Imm(0)));
+				BaseNode *cold = BeginCold(recompile);
+				EmitRecompile(idx);
+				EndCold(cold, cont);
+				m_uc.bind(cont);
+				m_callsProfiled++;
+			}
 			EmitScriptCall(idx, JIT_CALL_PTR, 0, asBC_SWORDARG1(bc));
 		}
 		break;

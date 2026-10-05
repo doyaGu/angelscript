@@ -25,7 +25,7 @@ struct SJITStatistics
 	size_t codeSize;             // total size of the native code currently held
 	asUINT functionsAOT;         // script functions that use the code generated ahead of time, see AddAOTFunctions
 	asUINT functionsDeferred;    // script functions whose compilation was deferred, see SetCompileThresholds
-	asUINT functionsRecompiled;  // compiled functions compiled again with the classes seen by their calls, see SetProfileThreshold
+	asUINT functionsRecompiled;  // compiled functions compiled again with the call targets seen, see SetProfileThreshold
 	asUINT functionsForLineCallbacks; // compiled functions compiled again with the checks at every statement, see JIT_CHECK_EVERY_STATEMENT
 };
 
@@ -176,18 +176,17 @@ public:
 	// a negative value if the module is null
 	int CompileDeferred(asIScriptModule *module);
 
-	// Profiles. The virtual and interface calls whose method several classes of the
-	// module implement note the classes of their objects, up to three, and when the
-	// calls of a function have been made that many times, the function is compiled
-	// again if a call has seen a class since the function was compiled, with the
-	// methods compiled in place for the objects of the classes seen, each checked for.
-	// Functions whose compilation is deferred note the classes while the VM executes
-	// them too, so their first generated code can already compile the methods in place.
-	// The calls are counted again otherwise. The objects of other classes call the
-	// method, and are noted too, and the calls not made yet go on noting their classes,
-	// so a function is compiled at most 3 times. The call that has counted down goes on
-	// in the new code, and so do the next calls of the function, and the old code is
-	// released with the function. Default is 10000, 0 doesn't note the classes
+	// Profiles. Virtual and interface calls note up to three receiver classes, and
+	// function-pointer calls with borrowable handle arguments note up to three targets.
+	// When the calls of a function have been made that many times, the function is
+	// compiled again if a call has seen a new module target. Methods are compiled in
+	// place for the receiver classes seen, and profiled script functions may borrow
+	// handle arguments after their identity is checked. Deferred functions note targets
+	// while the VM executes them too, so their first generated code can use them. The
+	// calls not made yet go on profiling, so a function is compiled at most 3 times.
+	// The call that has counted down goes on in the new code, and so do the next calls
+	// of the function, and the old code is released with the function. Default is
+	// 10000, 0 disables profiling
 	void SetProfileThreshold(asUINT calls);
 
 	// Ahead-of-time compilation. With an output directory the compiler generates C++
