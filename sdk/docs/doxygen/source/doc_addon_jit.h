@@ -142,10 +142,13 @@ primitives, enums, or value types without a destructor are freed without going
 through their elements. A C++ exception thrown by a function called this way is
 still caught and turned into a script exception like with the VM. For that the
 exception must be able to pass through the generated code, which needs unwind
-information for it. The add-on registers the unwind information on 64bit Windows,
-and for x86-64 on Linux and AArch64 on Linux and macOS (except arm64e), and 32bit Windows
-with MSVC doesn't need any. On other platforms the direct calls are only made
-when the library is compiled with AS_NO_EXCEPTIONS, or when the
+information for it. The add-on registers the unwind information on x86-64 and
+ARM64 Windows; x86-64 Linux, FreeBSD, NetBSD, OpenBSD, and DragonFly; AArch64
+Linux, FreeBSD, NetBSD, OpenBSD, and macOS, including arm64e; and 32bit MinGW
+with the DWARF unwinder. The runtime handler chains used by 32bit MSVC and by
+32bit MinGW with SJLJ or SEH need no unwind table for the generated frames.
+On other platforms, notably x86-64 macOS, the direct calls are only made when
+the library is compiled with AS_NO_EXCEPTIONS, or when the
 \ref CJITCompiler::JIT_DIRECT_SYSTEM_CALLS flag is set, in which case a C++
 exception thrown by a registered function that was called directly terminates the
 application.
@@ -596,37 +599,50 @@ RetObj.3       0.039    0.004      0.004    0.004     0.011
    VM, so these calls are not faster than with the interpreter. The delegates of
    the other script methods are called natively by the JIT compiled functions, but
    not by the code generated ahead of time.
- - Unwind information for the generated code is only registered on 64bit Windows,
-   and for x86-64 on Linux and AArch64 on Linux and macOS, but not for x86-64 on macOS,
-   arm64e, the BSDs, or 64bit ARM Windows. On the other platforms besides 32bit Windows with MSVC, a C++
-   exception that passes through the generated code terminates the application,
-   which is why direct system calls are opt-in there unless the library is built
-   with AS_NO_EXCEPTIONS.
- - The code generated ahead of time compiles no calls in place and borrows no
-   references, which makes the calls of short script functions slower than with
-   the JIT compiler. It creates the objects of the registered types through a
-   helper function, keeps the variables in memory on big endian CPUs, checks
-   for suspension and line callbacks at every statement, and on AArch64 calls the
-   functions that return a value type in memory through the engine, as the
-   generated C++ can't pass the hidden pointer in x8.
+ - The generated frames have no unwind information on x86-64 macOS and on
+   platforms outside the matrix above. A C++ exception that passes through them
+   terminates the application, which is why direct system calls are opt-in there
+   unless the library is built with AS_NO_EXCEPTIONS.
+ - The code generated ahead of time does not compile callees in place, which can
+   make calls of short script functions slower than with the JIT compiler. It
+   creates the objects of registered types through a helper function, keeps the
+   variables in memory on big endian CPUs, checks for suspension and line
+   callbacks at every statement, and on AArch64 calls functions that return a
+   value type in memory through the engine, as the generated C++ can't pass the
+   hidden pointer in x8.
  - Direct system calls are only made for functions with primitive, reference,
    and handle parameters, and primitive, reference, handle, and value type return
    values. Everything else, including asCALL_GENERIC, goes through the same code
    as the VM.
  - The \ref doc_addon_jit_tiered "deferred functions" are compiled by the thread
-   that executes them, which waits for the compilation, and not in the background.
-   The same goes for the functions compiled again with the
-   \ref doc_addon_jit_profiles "profiles". The VM doesn't note the classes of the
-   objects whose methods the functions call while it executes them, so the first
-   code of the deferred functions compiles none of those methods in place.
+   that executes them when they reach a threshold, which waits for the compilation.
+   The application can call \c CJITCompiler::CompileDeferred from another thread
+   before then; recompilation with the
+   \ref doc_addon_jit_profiles "profiles" is still synchronous.
  - The profiles note up to three classes at a call. The objects of further classes
    call the methods.
  - Only x86-64, AArch64, and 32bit x86 are supported, as those are the
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
 
-The comment at the top of jit.cpp lists the future work, which addresses most of
-these, and the TODO comments in the source files describe the details.
+\subsection doc_addon_jit_remaining Remaining work
+
+There are no TODO or FIXME markers left in the add-on source. The remaining
+engineering work is:
+
+ - Add native automated exception-unwinding coverage for Windows ARM64, macOS
+   arm64e, the BSDs, and the DWARF, SJLJ, and SEH variants of 32bit MinGW. The
+   implementations need runtime validation against their native unwinders.
+ - Find an unwind-registration scheme that works with the system unwinder on
+   x86-64 macOS, so that direct system calls can be enabled there by default.
+ - Extend direct system calls to more native ABI layouts. Complex value types
+   and asCALL_GENERIC deliberately continue through the engine today.
+ - Avoid synchronous compilation pauses at tier and profile thresholds. The
+   application can already compile not-yet-triggered deferred functions in a
+   worker thread with \c CJITCompiler::CompileDeferred, but the add-on has no
+   scheduler of its own.
+ - Add runtime JIT backends for further architectures when AsmJit's UniCompiler
+   provides the required support. AOT remains the portable fallback.
 
 \section doc_addon_jit_3 Debugging aids
 
