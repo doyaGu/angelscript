@@ -4,6 +4,9 @@
 
 #if defined(_WIN64) && (defined(_M_X64) || defined(__x86_64__))
 	#define JIT_UNWIND_WIN64
+#elif defined(_WIN64) && (defined(_M_ARM64) || defined(__aarch64__))
+	#define JIT_UNWIND_WINARM64
+	#define JIT_UNWIND_A64
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
 #elif defined(__MINGW32__) && defined(__i386__) && \
@@ -35,7 +38,7 @@
 #include <asmjit/a64.h>
 #endif
 
-#ifdef JIT_UNWIND_WIN64
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_WINARM64)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -54,6 +57,10 @@ extern "C" void __deregister_frame(void *fde);
 
 BEGIN_AS_NAMESPACE
 
+#ifdef JIT_UNWIND_WINARM64
+static_assert(sizeof(RUNTIME_FUNCTION) == 8, "unexpected Windows ARM64 function table entry");
+#endif
+
 CJITUnwindInfo::CJITUnwindInfo()
 {
 	m_start       = 0;
@@ -63,7 +70,7 @@ CJITUnwindInfo::CJITUnwindInfo()
 
 bool CJITUnwindInfo::IsSupported()
 {
-#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_DWARF) || defined(JIT_UNWIND_HANDLER_CHAIN)
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_WINARM64) || defined(JIT_UNWIND_DWARF) || defined(JIT_UNWIND_HANDLER_CHAIN)
 	return true;
 #else
 	return false;
@@ -168,7 +175,7 @@ static void EndEntry(std::vector<asBYTE> &out, size_t start)
 }
 #endif
 
-#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_DWARF)
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_WINARM64) || defined(JIT_UNWIND_DWARF)
 // Adds what the instruction of the prologue that ends at the offset does
 bool CJITUnwindInfo::AddOps(const asmjit::InstNode *inst, asUINT end)
 {
@@ -185,10 +192,22 @@ bool CJITUnwindInfo::AddOps(const asmjit::InstNode *inst, asUINT end)
 	InstId id = inst->inst_id();
 #ifdef JIT_UNWIND_A64
 	if( id == a64::Inst::kIdBti )
+	{
+#ifdef JIT_UNWIND_WINARM64
+		op.kind = OP_NOP;
+		m_ops.push_back(op);
+#endif
 		return true;
+	}
 	if( id == a64::Inst::kIdMov && inst->op_count() == 2 && a.is_gp() && a.as<Reg>().id() == a64::Gp::kIdFp &&
 	    c.is_gp() && c.as<Reg>().id() == a64::Gp::kIdSp )
-		return true; // the frame pointer, which the call frame isn't relative to
+	{
+#ifdef JIT_UNWIND_WINARM64
+		op.kind = OP_SET_FP;
+		m_ops.push_back(op);
+#endif
+		return true;
+	}
 	if( id == a64::Inst::kIdSub && inst->op_count() == 3 && a.is_gp() && a.as<Reg>().id() == a64::Gp::kIdSp &&
 	    c.is_gp() && c.as<Reg>().id() == a64::Gp::kIdSp && inst->op(2).is_imm() )
 	{
@@ -271,7 +290,7 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 	(void)cc;
 	(void)func;
 	return true;
-#elif !defined(JIT_UNWIND_WIN64) && !defined(JIT_UNWIND_DWARF)
+#elif !defined(JIT_UNWIND_WIN64) && !defined(JIT_UNWIND_WINARM64) && !defined(JIT_UNWIND_DWARF)
 	(void)cc;
 	(void)func;
 	return false;
@@ -405,6 +424,183 @@ bool CJITUnwindInfo::Prepare(asmjit::BaseCompiler &cc, const asmjit::FuncNode *f
 	asDWORD table[3] = { m_start, m_end, infoOffset };
 	if( a.embed(table, sizeof(table)) != Error::kOk )
 		return false;
+#elif defined(JIT_UNWIND_WINARM64)
+	// The Windows ARM64 unwinder needs an entry for the single epilogue too. AsmJit
+	// emits it at the exit node shared by all returns; reproduce it to find its start.
+	CodeHolder epilogueHolder;
+	if( epilogueHolder.init(holder.environment(), holder.cpu_features()) != Error::kOk )
+		return false;
+	a64::Builder epilogueBuilder(&epilogueHolder);
+	epilogueBuilder.add_encoding_options(cc.encoding_options());
+	if( epilogueBuilder.emit_epilog(frame) != Error::kOk || epilogueBuilder.finalize() != Error::kOk )
+		return false;
+	const CodeBuffer &epilogue = epilogueHolder.text_section()->buffer();
+	if( epilogue.size() > m_end - m_start ||
+	    memcmp(text.data() + m_end - epilogue.size(), epilogue.data(), epilogue.size()) != 0 )
+		return false;
+
+	// Encode one prologue instruction. Stores with a pre-indexed address also
+	// allocate the save area, so their OP_ALLOC and saves share an offset and must
+	// become a single Windows unwind code.
+	auto encode = [this](std::vector<asBYTE> &out, size_t first, size_t last) -> bool
+	{
+		const SOp *alloc = 0;
+		const SOp *saved[2] = { 0, 0 };
+		asUINT saves = 0;
+		for( size_t n = first; n < last; n++ )
+		{
+			const SOp &op = m_ops[n];
+			if( op.kind == OP_ALLOC )
+			{
+				if( alloc )
+					return false;
+				alloc = &op;
+			}
+			else if( op.kind == OP_SAVE_GP || op.kind == OP_SAVE_VEC )
+			{
+				if( saves == 2 )
+					return false;
+				saved[saves++] = &op;
+			}
+			else if( last - first != 1 )
+				return false;
+		}
+
+		if( last - first == 1 && m_ops[first].kind == OP_SET_FP )
+		{
+			out.push_back(0xE1); // set_fp
+			return true;
+		}
+		if( last - first == 1 && m_ops[first].kind == OP_NOP )
+		{
+			out.push_back(0xE3); // nop
+			return true;
+		}
+		if( saves == 0 )
+		{
+			if( alloc == 0 || alloc->value == 0 || alloc->value % 16 )
+				return false;
+			asUINT words = alloc->value / 16;
+			if( words < 32 )
+				out.push_back(asBYTE(words)); // alloc_s
+			else if( words < 2048 )
+			{
+				out.push_back(asBYTE(0xC0 | (words >> 8))); // alloc_m
+				out.push_back(asBYTE(words));
+			}
+			else if( words < 0x1000000 )
+			{
+				out.push_back(0xE0); // alloc_l
+				out.push_back(asBYTE(words >> 16));
+				out.push_back(asBYTE(words >> 8));
+				out.push_back(asBYTE(words));
+			}
+			else
+				return false;
+			return true;
+		}
+
+		if( alloc && (alloc->value == 0 || alloc->value % 8 || saved[0]->value != 0) )
+			return false;
+		if( saves == 2 && (saved[0]->kind != saved[1]->kind || saved[1]->value != saved[0]->value + 8) )
+			return false;
+
+		asUINT z = alloc ? alloc->value / 8 - 1 : saved[0]->value / 8;
+		if( saved[0]->value % 8 )
+			return false;
+		if( saves == 2 && saved[0]->kind == OP_SAVE_GP && saved[0]->reg == a64::Gp::kIdFp && saved[1]->reg == a64::Gp::kIdLr )
+		{
+			if( z >= 64 )
+				return false;
+			out.push_back(asBYTE((alloc ? 0x80 : 0x40) | z)); // save_fplr[_x]
+			return true;
+		}
+
+		asUINT base = saved[0]->kind == OP_SAVE_GP ? 19 : 8;
+		asUINT limit = saved[0]->kind == OP_SAVE_GP ? 28 : 15;
+		if( saved[0]->reg < base || saved[0]->reg > limit )
+			return false;
+		asUINT reg = saved[0]->reg - base;
+		if( saves == 2 )
+		{
+			if( saved[1]->reg != saved[0]->reg + 1 || z >= 64 )
+				return false;
+			asBYTE prefix = saved[0]->kind == OP_SAVE_GP ? asBYTE(alloc ? 0xCC : 0xC8) : asBYTE(alloc ? 0xDA : 0xD8);
+			out.push_back(asBYTE(prefix | (reg >> 2))); // save_[f]regp[_x]
+			out.push_back(asBYTE((reg << 6) | z));
+		}
+		else
+		{
+			if( alloc )
+			{
+				if( z >= 32 )
+					return false;
+				asBYTE prefix = saved[0]->kind == OP_SAVE_GP ? asBYTE(0xD4 | (reg >> 3)) : asBYTE(0xDE);
+				out.push_back(prefix); // save_[f]reg_x
+				out.push_back(asBYTE((reg << 5) | z));
+			}
+			else
+			{
+				if( z >= 64 )
+					return false;
+				asBYTE prefix = saved[0]->kind == OP_SAVE_GP ? asBYTE(0xD0) : asBYTE(0xDC);
+				out.push_back(asBYTE(prefix | (reg >> 2))); // save_[f]reg
+				out.push_back(asBYTE((reg << 6) | z));
+			}
+		}
+		return true;
+	};
+
+	std::vector<asBYTE> prologueCodes;
+	std::vector<asBYTE> epilogueCodes;
+	for( size_t last = m_ops.size(); last > 0; )
+	{
+		size_t first = last - 1;
+		while( first > 0 && m_ops[first - 1].end == m_ops[last - 1].end )
+			first--;
+		if( !encode(prologueCodes, first, last) )
+			return false;
+		// BTI and the frame-pointer setup have no corresponding epilogue instruction.
+		if( m_ops[first].kind != OP_NOP && m_ops[first].kind != OP_SET_FP && !encode(epilogueCodes, first, last) )
+			return false;
+		last = first;
+	}
+	prologueCodes.push_back(0xE4); // end
+	for( size_t n = 0; n < epilogueCodes.size(); n++ )
+		prologueCodes.push_back(epilogueCodes[n]);
+	prologueCodes.push_back(0xE4); // end
+
+	asUINT functionSize = m_end - m_start;
+	asUINT epilogueStart = functionSize - asUINT(epilogue.size());
+	asUINT epilogueIndex = asUINT(prologueCodes.size() - epilogueCodes.size() - 1);
+	while( prologueCodes.size() % 4 )
+		prologueCodes.push_back(0xE3); // nop padding
+	asUINT codeWords = asUINT(prologueCodes.size() / 4);
+	if( functionSize % 4 || functionSize / 4 > 0x3FFFF || epilogueStart % 4 ||
+	    epilogueIndex > 0x3FF || codeWords == 0 || codeWords > 31 )
+		return false;
+
+	// Full-form .xdata with one explicit epilogue scope. The code byte order is
+	// already the big-endian order required for multi-byte ARM64 unwind codes.
+	asDWORD header = functionSize / 4 | (1u << 22) | (codeWords << 27);
+	asDWORD scope  = epilogueStart / 4 | (epilogueIndex << 22);
+	std::vector<asBYTE> info(8);
+	memcpy(info.data(), &header, 4);
+	memcpy(info.data() + 4, &scope, 4);
+	info.insert(info.end(), prologueCodes.begin(), prologueCodes.end());
+
+	// Both the xdata and the two-word ARM64 RUNTIME_FUNCTION are image-relative
+	// and must live in the same allocation as the generated code.
+	a64::Assembler a(&holder);
+	if( a.align(AlignMode::kZero, 4) != Error::kOk )
+		return false;
+	asUINT infoOffset = asUINT(a.offset());
+	if( a.embed(info.data(), info.size()) != Error::kOk || a.align(AlignMode::kZero, 4) != Error::kOk )
+		return false;
+	m_tableOffset = asUINT(a.offset());
+	asDWORD table[2] = { m_start, infoOffset };
+	if( a.embed(table, sizeof(table)) != Error::kOk )
+		return false;
 #elif defined(JIT_UNWIND_X86)
 	// No vector registers are callee saved in the System V ABI
 	for( size_t n = 0; n < m_ops.size(); n++ )
@@ -425,7 +621,7 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 {
 	*handle = 0;
 
-#if defined(JIT_UNWIND_WIN64)
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_WINARM64)
 	RUNTIME_FUNCTION *table = reinterpret_cast<RUNTIME_FUNCTION*>(static_cast<char*>(code) + m_tableOffset);
 	if( !RtlAddFunctionTable(table, 1, DWORD64(code)) )
 		return false;
@@ -498,6 +694,8 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 		else if( delta > 0 )
 			PutU8(data, DW_CFA_advance_loc | delta);
 		loc = op.end;
+		if( op.kind == OP_SET_FP || op.kind == OP_NOP )
+			continue;
 
 		if( op.kind == OP_PUSH || op.kind == OP_ALLOC )
 		{
@@ -545,7 +743,7 @@ void CJITUnwindInfo::Unregister(void *handle)
 	if( handle == 0 )
 		return;
 
-#if defined(JIT_UNWIND_WIN64)
+#if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_WINARM64)
 	RtlDeleteFunctionTable(static_cast<RUNTIME_FUNCTION*>(handle));
 #elif defined(JIT_UNWIND_DWARF)
 	// The FDE follows the CIE, whose length doesn't include the length field

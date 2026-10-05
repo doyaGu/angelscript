@@ -26,7 +26,7 @@
 // respective places in the code for the details.
 //
 //  - Unwind information on the BSDs, 32bit MinGW configurations without DWARF,
-//    arm64e, and Windows ARM64 (jit_unwind.h).
+//    and arm64e (jit_unwind.h).
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE

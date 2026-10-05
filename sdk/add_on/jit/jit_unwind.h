@@ -15,8 +15,8 @@ BEGIN_AS_NAMESPACE
 // way to JIT_GuardedEntry. AsmJit doesn't produce it, so it is derived from the
 // prologue of the function frame:
 //
-//  - 64bit Windows: an UNWIND_INFO appended to the code and registered with
-//    RtlAddFunctionTable.
+//  - 64bit x86 and ARM64 Windows: unwind data appended to the code and registered
+//    with RtlAddFunctionTable.
 //  - 64bit x86 on Linux, and AArch64 on Linux and macOS: a DWARF CIE and FDE
 //    registered with __register_frame.
 //  - 32bit GCC or Clang MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE
@@ -24,8 +24,8 @@ BEGIN_AS_NAMESPACE
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: The BSDs, 32bit MinGW configurations without DWARF, arm64e, and Windows
-//       ARM64 could be supported too, but haven't been tested.
+// TODO: The BSDs, 32bit MinGW configurations without DWARF, and arm64e could be
+//       supported too, but haven't been tested.
 class CJITUnwindInfo
 {
 public:
@@ -53,7 +53,9 @@ protected:
 		OP_PUSH,     // push of a callee saved register
 		OP_ALLOC,    // allocation of the stack frame
 		OP_SAVE_GP,  // store of a callee saved general purpose register in the frame
-		OP_SAVE_VEC  // store of a callee saved vector register in the frame
+		OP_SAVE_VEC, // store of a callee saved vector register in the frame
+		OP_SET_FP,   // AArch64 copy of the stack pointer to x29
+		OP_NOP       // AArch64 prologue instruction with no unwind operation
 	};
 
 	struct SOp
@@ -69,7 +71,7 @@ protected:
 	std::vector<SOp> m_ops;
 	asUINT           m_start;       // offset of the function in the code
 	asUINT           m_end;         // end of the function in the code
-	asUINT           m_tableOffset; // 64bit Windows: offset of the RUNTIME_FUNCTION in the code
+	asUINT           m_tableOffset; // Windows: offset of the RUNTIME_FUNCTION in the code
 };
 
 END_AS_NAMESPACE
