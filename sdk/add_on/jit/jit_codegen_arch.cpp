@@ -575,7 +575,7 @@ void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
 	memcpy(&d, &bits, sizeof(d));
 	if( bits == 0 )
 		m_uc.cc->movi(v.b16(), Imm(0));
-	else if( isDouble ? a64::Utils::is_fp64_imm8(uint64_t(bits)) : a64::Utils::is_fp32_imm8(bits32) )
+	else if( isDouble ? a64::Utils::is_fp64_imm8(uint64_t(bits)) : a64::Utils::is_fp32_imm8(uint32_t(bits32)) )
 		m_uc.cc->fmov(isDouble ? v.d() : v.s(), Imm(isDouble ? d : double(f)));
 	else if( isDouble )
 	{
