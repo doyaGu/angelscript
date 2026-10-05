@@ -19,12 +19,12 @@
 	#define JIT_UNWIND_DWARF
 	#define JIT_UNWIND_X86
 	#define JIT_UNWIND_X86_32
-#elif defined(__x86_64__) && defined(__linux__)
+#elif defined(__x86_64__) && (defined(__linux__) || defined(__FreeBSD__))
 	// The libunwind of macOS doesn't find the FDE registered for the generated code on
 	// x86-64, the exceptions terminate the application in the JIT job of the automated test
 	#define JIT_UNWIND_DWARF
 	#define JIT_UNWIND_X86
-#elif defined(__aarch64__) && (defined(__linux__) || defined(__APPLE__)) && !defined(__arm64e__)
+#elif defined(__aarch64__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)) && !defined(__arm64e__)
 	// The return addresses that the prologue signs on arm64e would need the
 	// pointer authentication in the call frame instructions too
 	#define JIT_UNWIND_DWARF
