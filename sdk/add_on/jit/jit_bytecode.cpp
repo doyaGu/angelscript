@@ -1072,6 +1072,16 @@ static bool HasBorrowableArgument(asCScriptFunction *func)
 	return false;
 }
 
+// A handle passed by reference can alias the owner of a borrowed handle argument.
+// The callee may replace it while the borrowed argument still needs the object.
+static bool HasHandleReferenceArgument(asCScriptFunction *func)
+{
+	for( asUINT p = 0; p < func->parameterTypes.GetLength(); p++ )
+		if( func->parameterTypes[p].IsObjectHandle() && func->parameterTypes[p].IsReference() )
+			return true;
+	return false;
+}
+
 // The initialization lists whose elements are primitives, enums, or value types
 // without a destructor have nothing to destroy
 static bool IsPlainList(asCScriptEngine *engine, asCObjectType *listType)
@@ -1440,9 +1450,13 @@ void CJITByteCode::FindBorrowedArgs(const std::map<asUINT, std::vector<SJITInlin
 		// The implementations of a method have the same parameters, and an argument is
 		// borrowed if all of them can
 		asCScriptFunction *func = inlinees[0].code->GetFunction();
+		if( HasHandleReferenceArgument(func) )
+			continue;
 		asUINT params = ~asUINT(0);
 		for( asUINT i = 0; i < inlinees.size(); i++ )
 			params &= inlinees[i].code->GetBorrowableParams();
+		if( params == 0 )
+			continue;
 		found.clear();
 
 		// The argument for the parameter at k dwords above the frame of the function
@@ -1656,7 +1670,7 @@ void CJITByteCode::FindAOTBorrowedArgs()
 		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
 		                           ? engine->scriptFunctions[id] : 0;
 		func = FindAOTCallee(func, instr.op == asBC_CALLINTF);
-		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 )
+		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 || HasHandleReferenceArgument(func) )
 			continue;
 
 		std::shared_ptr<CJITByteCode> callee = std::make_shared<CJITByteCode>();
