@@ -2336,12 +2336,12 @@ namespace Inlining
 
 	// The calls that are inlined in all the compiled functions. The methods are those
 	// that only one class of the module can implement, and the virtual methods that
-	// all the classes that can implement them inherit. The call of an overridden
-	// method calls the method of the base class even through the handle of the derived
-	// class, and a method called through a global variable has a reference held for the
-	// call, which the function releases. The functions calling others are inlined with
-	// those, up to 4 levels deep, below which the functions are called, and so are the
-	// recursive calls
+	// all the classes that can implement them inherit, or that can be resolved from the
+	// static type of a directly pushed handle. The call of an overridden method calls
+	// the method of the base class even through the handle of the derived class, and a
+	// method called through a global variable has a reference held for the call, which
+	// the function releases. The functions calling others are inlined with those, up to
+	// 4 levels deep, below which the functions are called, and so are the recursive calls
 	static bool TestInlinedCalls(asDWORD flags, bool inlines)
 	{
 		bool fail = false;
@@ -2353,14 +2353,14 @@ namespace Inlining
 			  "int t(I@ i) { return i.f(); }", 0 },
 			{ "shared interface I { int f(); } class A : I { int f() { return 1; } } int t(I@ i) { return i.f(); }", 1 },
 			{ "class B { int f() { return 1; } } class D : B { int f() override { return 2; } int f(int a) { return a; } } "
-			  "int t(B@ b, D@ d) { return b.f() + d.f() + d.f(3); }", 1 },
+			  "int t(B@ b, D@ d) { return b.f() + d.f() + d.f(3); }", 2 },
 			{ "abstract class B { int f() { return 1; } } class D : B {} int t(B@ b) { return b.f(); }", 1 },
 			{ "interface I { int f(); } abstract class B : I { int f() { return 1; } } class D : B {} "
 			  "int t(I@ i, B@ b) { return i.f() + b.f(); }", 2 },
 			{ "class B { int f() { return 1; } } class D : B {} class E : D {} "
 			  "int t(B@ b, D@ d) { return b.f() + d.f(); }", 2 },
 			{ "class B { int f() { return 1; } } class D : B { int f() override { return 2; } } class E : D {} "
-			  "int t(B@ b, E@ e) { return b.f() + e.f(); }", 0 },
+			  "int t(B@ b, E@ e) { return b.f() + e.f(); }", 1 },
 			{ "interface I { int f(); } class A : I { int f() { return 1; } } class B : A {} "
 			  "int t(I@ i) { return i.f(); }", 0 },
 			{ "int f2(int a) { return a + 1; } int f1(int a) { return f2(a) * 2; } "
@@ -4575,8 +4575,10 @@ namespace Profiles
 
 	// The number of functions that each step compiles again in each configuration,
 	// or -1 where it depends on when the functions compiled in place are compiled.
-	// After one call the calls of poly have only seen one class, and the function is
-	// compiled again for the others after another
+	// Deferred functions use the targets seen by the VM in their first generated code,
+	// so that code only needs recompilation for targets first seen afterwards. After one
+	// call the calls of poly have only seen one class, and an immediately compiled
+	// function is compiled again for the others after another
 	struct SStep
 	{
 		const char *decl;
@@ -4586,18 +4588,18 @@ namespace Profiles
 	};
 	static const SStep steps[] =
 	{
-		{ "int mono(int)",      100, LINES, { 1, 1, 0, 1 } },
+		{ "int mono(int)",      100, LINES, { 1, 0, 0, 1 } },
 		{ "int mono(int)",      100, CTX,   { 0, 0, 0, 0 } },
-		{ "int poly(int)",      100, CTX,   { 1, 1, 0, 2 } },
-		{ "int turn(int)",      100, CTX,   { 2, 2, 0, 2 } },
+		{ "int poly(int)",      100, CTX,   { 1, 0, 0, 2 } },
+		{ "int turn(int)",      100, CTX,   { 2, 1, 0, 2 } },
 		{ "int turn(int)",      100, LINES, { 0, 0, 0, 0 } },
-		{ "int late(int)",      100, CTX,   { 2, 2, 0, 2 } },
+		{ "int late(int)",      100, CTX,   { 2, 1, 0, 2 } },
 		{ "int late(int)",      100, CTX,   { 0, 0, 0, 0 } },
-		{ "int virt(int)",      100, CTX,   { 1, 1, 0, 1 } },
+		{ "int virt(int)",      100, CTX,   { 1, 0, 0, 1 } },
 		{ "int foreign(int)",   100, CTX,   { 0, 0, 0, 0 } },
-		{ "int nullCall(int)",  100, CTX,   { 1, 1, 0, 1 } },
+		{ "int nullCall(int)",  100, CTX,   { 1, 0, 0, 1 } },
 		{ "int nested(int)",    100, CTX,   { 1, -1, 0, 1 } },
-		{ "int suspended(int)", 100, CTX,   { 1, 1, 0, 1 } },
+		{ "int suspended(int)", 100, CTX,   { 1, 0, 0, 1 } },
 	};
 
 	static const int THREADS    = 4;
@@ -4734,7 +4736,8 @@ namespace Profiles
 		if( jit )
 		{
 			recompiled = jit->GetStatistics().functionsRecompiled - recompiled;
-			asUINT expected = inlining && configs[config].inlineSize > 0 ? 1 : 0;
+			asUINT expected = inlining && configs[config].inlineSize > 0 &&
+			                  configs[config].calls == 0 && configs[config].iterations == 0 ? 1 : 0;
 			if( recompiled != expected )
 			{
 				PRINTF("profiles %s: the threads compiled %u functions again instead of %u\n", name, recompiled, expected);
@@ -5014,7 +5017,8 @@ static bool TestSuspendChecks()
 			PRINTF("suspend checks %s: %u functions compiled, %u failed\n", configs[c].name, stats.functionsCompiled, stats.functionsFailed);
 			TEST_FAILED;
 		}
-		asUINT recompiled = inlining && calls && configs[c].inlineSize > 0 ? 1 : 0;
+		asUINT recompiled = inlining && calls && configs[c].inlineSize > 0 &&
+		                      configs[c].calls == 0 && configs[c].iterations == 0 ? 1 : 0;
 		if( stats.functionsRecompiled != recompiled )
 		{
 			PRINTF("suspend checks %s: %u functions compiled again instead of %u\n", configs[c].name, stats.functionsRecompiled, recompiled);
