@@ -19,11 +19,13 @@ BEGIN_AS_NAMESPACE
 //    RtlAddFunctionTable.
 //  - 64bit x86 on Linux, and AArch64 on Linux and macOS: a DWARF CIE and FDE
 //    registered with __register_frame.
+//  - 32bit MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE registered
+//    with libgcc.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: The other platforms (the BSDs, MinGW on 32bit, arm64e, 64bit ARM Windows)
-//       could be supported the same way, but haven't been tested.
+// TODO: The BSDs, other 32bit MinGW unwinders, arm64e, and Windows ARM64 could
+//       be supported the same way, but haven't been tested.
 class CJITUnwindInfo
 {
 public:

@@ -6,6 +6,13 @@
 	#define JIT_UNWIND_WIN64
 #elif defined(_MSC_VER) && defined(_M_IX86)
 	#define JIT_UNWIND_HANDLER_CHAIN
+#elif defined(__MINGW32__) && defined(__i386__) && defined(__GCC_HAVE_DWARF2_CFI_ASM) && \
+      !defined(__USING_SJLJ_EXCEPTIONS__)
+	// The 32bit MinGW DWARF unwinder needs call frame information for C++
+	// exceptions. Register an FDE for the generated code with libgcc.
+	#define JIT_UNWIND_DWARF
+	#define JIT_UNWIND_X86
+	#define JIT_UNWIND_X86_32
 #elif defined(__x86_64__) && defined(__linux__)
 	// The libunwind of macOS doesn't find the FDE registered for the generated code on
 	// x86-64, the exceptions terminate the application in the JIT job of the automated test
@@ -92,18 +99,27 @@ enum
 	DW_CFA_offset          = 0x80
 };
 
-#ifdef JIT_UNWIND_X86
+#ifdef JIT_UNWIND_X86_32
+// DWARF numbers of the 32bit x86 general purpose registers match their physical ids.
+static const asBYTE g_dwarfGpRegs[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+static const asBYTE DWARF_REG_SP = 4;
+static const asBYTE DWARF_REG_RA = 8;
+static const asUINT DWARF_CFA_AT_ENTRY = 4; // the return address has been pushed
+static const asUINT DWARF_STACK_SLOT = 4;
+#elif defined(JIT_UNWIND_X86)
 // DWARF numbers of the x86-64 general purpose registers, by physical id
 static const asBYTE g_dwarfGpRegs[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
 static const asBYTE DWARF_REG_SP = 7;
 static const asBYTE DWARF_REG_RA = 16;
 static const asUINT DWARF_CFA_AT_ENTRY = 8; // the return address has been pushed
+static const asUINT DWARF_STACK_SLOT = 8;
 #else
 // DWARF numbers of the AArch64 registers: x0-x30 are 0-30, and v0-v31 are 64-95
 static const asBYTE DWARF_REG_SP  = 31;
 static const asBYTE DWARF_REG_RA  = 30;
 static const asBYTE DWARF_REG_VEC = 64;
 static const asUINT DWARF_CFA_AT_ENTRY = 0; // the return address is in x30
+static const asUINT DWARF_STACK_SLOT = 8;
 #endif
 
 static void PutU8(std::vector<asBYTE> &out, asUINT v)
@@ -425,7 +441,11 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 	PutU8(data, 'R');
 	PutU8(data, 0);
 	PutULEB(data, 1);  // code alignment
+#ifdef JIT_UNWIND_X86_32
+	PutU8(data, 0x7c); // data alignment -4
+#else
 	PutU8(data, 0x78); // data alignment -8
+#endif
 	PutU8(data, DWARF_REG_RA);
 	PutULEB(data, 1);  // augmentation data length
 	PutU8(data, 0);    // DW_EH_PE_absptr for the addresses in the FDE
@@ -442,8 +462,13 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 	size_t fde = data.size();
 	PutU32(data, 0);                                // length
 	PutU32(data, asUINT(fde + 4));                  // offset back to the CIE
+#ifdef JIT_UNWIND_X86_32
+	PutU32(data, asUINT(asPWORD(code)) + m_start); // start address
+	PutU32(data, m_end - m_start);                 // size
+#else
 	PutU64(data, asQWORD(asPWORD(code)) + m_start); // start address
 	PutU64(data, m_end - m_start);                  // size
+#endif
 	PutULEB(data, 0);                               // augmentation data length
 	asUINT loc = 0, cfa = DWARF_CFA_AT_ENTRY;
 	for( size_t n = 0; n < m_ops.size(); n++ )
@@ -473,7 +498,7 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 
 		if( op.kind == OP_PUSH || op.kind == OP_ALLOC )
 		{
-			cfa += op.kind == OP_PUSH ? 8 : op.value;
+			cfa += op.kind == OP_PUSH ? DWARF_STACK_SLOT : op.value;
 			PutU8(data, DW_CFA_def_cfa_offset);
 			PutULEB(data, cfa);
 			if( op.kind == OP_ALLOC )
@@ -496,7 +521,7 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 			PutU8(data, DW_CFA_offset_extended);
 			PutULEB(data, reg);
 		}
-		PutULEB(data, saved / 8);
+		PutULEB(data, saved / DWARF_STACK_SLOT);
 	}
 	EndEntry(data, fde);
 	PutU32(data, 0); // terminator
