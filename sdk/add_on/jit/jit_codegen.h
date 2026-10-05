@@ -309,9 +309,9 @@ protected:
 
 	void StoreFrame();
 	void StoreCachedSlots();
-	void StoreDirtySlots(JITSlotMask mask);
+	void StoreDirtySlots(const JITSlotMask &mask);
 	void ReloadCachedSlots();
-	void ReloadSlots(JITSlotMask mask);
+	void ReloadSlots(const JITSlotMask &mask);
 	void StoreCachedSlot(int offset);
 	void ReloadCachedSlot(int offset);
 	void SyncAll(asUINT idx);        // writes back what the VM may observe at the instruction

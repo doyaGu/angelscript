@@ -141,8 +141,8 @@ protected:
 	std::string SetVar(const char *type, int offset, const std::string &value);
 	std::string SetVarLow(const char *type, int offset, const std::string &value);
 	std::string VarAddr(int offset);
-	std::string Stores(JITSlotMask mask);
-	std::string Loads(JITSlotMask mask);
+	std::string Stores(const JITSlotMask &mask);
+	std::string Loads(const JITSlotMask &mask);
 	std::string Field(int f, const char *type);
 	std::string SetField(int f, const char *type, const std::string &value);
 	std::string FieldLoads(asUINT mask);

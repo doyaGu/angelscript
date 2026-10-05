@@ -149,7 +149,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 	// Arguments passed on the stack cost a store too though. The frames of the
 	// inlined calls are pushed for both
 	if( !synced )
-		StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+		StoreDirtySlots(m_code->GetDirtyMask(idx).AndNot(JIT_FRAME_BIT));
 	int spOffset = m_spOffset;
 	if( !m_spInArg )
 		SyncStack();
@@ -276,7 +276,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 		SyncStack();
 	if( !synced )
 	{
-		if( m_code->GetDirtyMask(idx) & JIT_FRAME_BIT )
+		if( m_code->GetDirtyMask(idx).Test(JIT_FRAME_SLOT) )
 			StoreFrame();
 		SetPC(instr.pos);
 	}
@@ -655,7 +655,7 @@ void CJITCodeGen::EmitInlineExit(int frame)
 	for( int f = frame; f != 0; f = m_frames[f].caller )
 	{
 		SwitchFrame(m_frames[f].caller);
-		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx) & ~JIT_FRAME_BIT);
+		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx).AndNot(JIT_FRAME_BIT));
 		inlined.insert(inlined.begin(), f);
 	}
 	StoreFrame();
@@ -696,7 +696,7 @@ void CJITCodeGen::EmitMaterialize()
 	for( int f = frame; f != 0; f = m_frames[f].caller )
 	{
 		SwitchFrame(m_frames[f].caller);
-		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx) & ~JIT_FRAME_BIT);
+		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx).AndNot(JIT_FRAME_BIT));
 		inlined.insert(inlined.begin(), f);
 	}
 	SwitchFrame(frame);
@@ -1344,7 +1344,7 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			if( vr )
 				SyncVR();
 			m_uc.bind(finished);
-			if( m_code->GetDirtyMask(idx) & JIT_FRAME_BIT )
+			if( m_code->GetDirtyMask(idx).Test(JIT_FRAME_SLOT) )
 				StoreFrame();
 			SyncStack();
 			Gp status = m_uc.new_gp32();

@@ -32,8 +32,6 @@
 //    (jit_codegen_call.cpp, EmitDirectSystemCall, and jit_cppgen.cpp, GetSystemCall),
 //    and unwind information on the platforms besides 64bit Windows, 64bit x86 on Linux,
 //    and AArch64 on Linux and macOS (jit_unwind.h).
-//  - Register cache for more than 63 variables
-//    (jit_bytecode.cpp, AnalyseSlots).
 //  - Project files for the add-on for the IDEs besides CMake.
 
 BEGIN_AS_NAMESPACE
@@ -54,6 +52,19 @@ public:
 	asmjit::Error error;
 	std::string   message;
 };
+
+static std::string FormatSlotMask(const JITSlotMask &mask)
+{
+	std::string text;
+	char word[17];
+	for( asUINT n = mask.WordCount(); n > 0; n-- )
+	{
+		snprintf(word, sizeof(word), n == mask.WordCount() ? "%llX" : "%016llX",
+		         static_cast<unsigned long long>(mask.Word(n - 1)));
+		text += word;
+	}
+	return text;
+}
 
 struct CJITCompiler::SImpl
 {
@@ -263,7 +274,7 @@ void CJITCompiler::SetMaxInlineSize(asUINT sizeInDWords)
 
 void CJITCompiler::SetMaxCachedSlots(asUINT count)
 {
-	m_impl->maxCachedSlots = count < 63 ? count : 63;
+	m_impl->maxCachedSlots = count;
 }
 
 int CJITCompiler::SetCompileThresholds(asUINT calls, asUINT iterations)
@@ -436,7 +447,7 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		if( instr.flags & JIT_INSTR_VR_LIVE )
 			fprintf(file, "   ; vr live");
 		if( code.GetDirtyMask(n) )
-			fprintf(file, "   ; dirty 0x%llX", static_cast<unsigned long long>(code.GetDirtyMask(n)));
+			fprintf(file, "   ; dirty 0x%s", FormatSlotMask(code.GetDirtyMask(n)).c_str());
 		fprintf(file, "\n");
 	}
 
@@ -936,8 +947,7 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 
 	exact = exact || purpose == COMPILE_EXACT || (source && source->exact);
 
-	// The dirty masks hold one bit per cached slot, and the bit of the frame
-	asUINT cachedSlots = maxCachedSlots < 63 ? maxCachedSlots : 63;
+	asUINT cachedSlots = maxCachedSlots;
 	// The functions left to the compile filter are left to their calls too
 	SJITInlineOptions inlining;
 	inlining.maxSize     = (flags & (JIT_NO_INLINE | JIT_NO_SCRIPT_CALLS | JIT_SYNC_EVERY_INSTR)) ? 0 : maxInlineSize;

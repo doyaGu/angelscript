@@ -112,15 +112,180 @@ struct SJITField
 // the register isn't saved across the calls. The other 31 bits are for the fields
 static const asUINT JIT_THIS_HELD = 0x80000000u;
 
-// One bit per register cached variable. The last bit is reserved for the frame,
-// leaving room for up to 63 cached variables.
-typedef asQWORD JITSlotMask;
+// A small dynamic bit set used by the register-cache data flow. The first word is
+// kept in the object, so the usual case (the default is 24 cached variables) does
+// not allocate. Functions configured to cache more than 63 variables grow it.
+class JITSlotMask
+{
+public:
+	JITSlotMask(asQWORD low = 0) : m_low(low), m_high(0) {}
+	JITSlotMask(const JITSlotMask &other) : m_low(other.m_low), m_high(other.m_high ? new std::vector<asQWORD>(*other.m_high) : 0) {}
+	JITSlotMask(JITSlotMask &&other) noexcept : m_low(other.m_low), m_high(other.m_high)
+	{
+		other.m_low = 0;
+		other.m_high = 0;
+	}
+	~JITSlotMask() { delete m_high; }
+
+	JITSlotMask &operator=(const JITSlotMask &other)
+	{
+		if( this != &other )
+		{
+			JITSlotMask copy(other);
+			Swap(copy);
+		}
+		return *this;
+	}
+	JITSlotMask &operator=(JITSlotMask &&other) noexcept
+	{
+		if( this != &other )
+		{
+			delete m_high;
+			m_low = other.m_low;
+			m_high = other.m_high;
+			other.m_low = 0;
+			other.m_high = 0;
+		}
+		return *this;
+	}
+
+	static JITSlotMask Bit(asUINT bit)
+	{
+		JITSlotMask mask;
+		mask.Set(bit);
+		return mask;
+	}
+
+	void Set(asUINT bit)
+	{
+		asUINT word = bit / 64;
+		asQWORD value = asQWORD(1) << (bit % 64);
+		if( word == 0 )
+			m_low |= value;
+		else
+		{
+			EnsureWord(word);
+			(*m_high)[word - 1] |= value;
+		}
+	}
+	void Clear(asUINT bit)
+	{
+		asUINT word = bit / 64;
+		asQWORD value = asQWORD(1) << (bit % 64);
+		if( word == 0 )
+			m_low &= ~value;
+		else if( m_high && word <= m_high->size() )
+		{
+			(*m_high)[word - 1] &= ~value;
+			Normalize();
+		}
+	}
+	bool Test(asUINT bit) const
+	{
+		return (Word(bit / 64) & (asQWORD(1) << (bit % 64))) != 0;
+	}
+
+	explicit operator bool() const { return m_low != 0 || m_high != 0; }
+	bool operator!() const { return !static_cast<bool>(*this); }
+	asUINT WordCount() const { return m_high ? asUINT(m_high->size() + 1) : (m_low ? 1u : 0u); }
+	asQWORD Word(asUINT word) const
+	{
+		return word == 0 ? m_low : m_high && word <= m_high->size() ? (*m_high)[word - 1] : 0;
+	}
+
+	JITSlotMask &operator|=(const JITSlotMask &other)
+	{
+		m_low |= other.m_low;
+		if( other.m_high )
+		{
+			EnsureWord(asUINT(other.m_high->size()));
+			for( asUINT n = 0; n < other.m_high->size(); n++ )
+				(*m_high)[n] |= (*other.m_high)[n];
+		}
+		return *this;
+	}
+	JITSlotMask &operator&=(const JITSlotMask &other)
+	{
+		m_low &= other.m_low;
+		if( m_high )
+		{
+			for( asUINT n = 0; n < m_high->size(); n++ )
+				(*m_high)[n] &= other.Word(n + 1);
+			Normalize();
+		}
+		return *this;
+	}
+	JITSlotMask &AndNotAssign(const JITSlotMask &other)
+	{
+		m_low &= ~other.m_low;
+		if( m_high )
+		{
+			for( asUINT n = 0; n < m_high->size(); n++ )
+				(*m_high)[n] &= ~other.Word(n + 1);
+			Normalize();
+		}
+		return *this;
+	}
+	JITSlotMask AndNot(const JITSlotMask &other) const
+	{
+		JITSlotMask result(*this);
+		return result.AndNotAssign(other);
+	}
+
+	friend JITSlotMask operator|(JITSlotMask left, const JITSlotMask &right) { return left |= right; }
+	friend JITSlotMask operator&(JITSlotMask left, const JITSlotMask &right) { return left &= right; }
+	friend bool operator==(const JITSlotMask &left, const JITSlotMask &right)
+	{
+		if( left.m_low != right.m_low || left.WordCount() != right.WordCount() )
+			return false;
+		for( asUINT n = 1; n < left.WordCount(); n++ )
+			if( left.Word(n) != right.Word(n) )
+				return false;
+		return true;
+	}
+	friend bool operator!=(const JITSlotMask &left, const JITSlotMask &right) { return !(left == right); }
+
+private:
+	void EnsureWord(asUINT word)
+	{
+		if( m_high == 0 )
+			m_high = new std::vector<asQWORD>;
+		if( m_high->size() < word )
+			m_high->resize(word, 0);
+	}
+	void Normalize()
+	{
+		if( m_high == 0 )
+			return;
+		while( !m_high->empty() && m_high->back() == 0 )
+			m_high->pop_back();
+		if( m_high->empty() )
+		{
+			delete m_high;
+			m_high = 0;
+		}
+	}
+	void Swap(JITSlotMask &other) noexcept
+	{
+		asQWORD low = m_low;
+		m_low = other.m_low;
+		other.m_low = low;
+		std::vector<asQWORD> *high = m_high;
+		m_high = other.m_high;
+		other.m_high = high;
+	}
+
+	asQWORD m_low;
+	std::vector<asQWORD> *m_high;
+};
 
 // The frame of the function, i.e. the stack frame pointer in the VM registers and
 // the current function of the context, is written back like the register cached
-// variables, and has this bit in the dirty masks. The native entry leaves it to
+// variables, and has this bit in the dirty masks. Bit zero is reserved for it;
+// cached variables start at bit one. The native entry leaves it to
 // the first place where the VM or the engine may see it
-static const JITSlotMask JIT_FRAME_BIT = JITSlotMask(1) << 63;
+static const asUINT JIT_FRAME_SLOT = 0;
+static const JITSlotMask JIT_FRAME_BIT = JITSlotMask::Bit(JIT_FRAME_SLOT);
 
 // On 64bit hosts the script functions called natively return without restoring
 // the frame of the caller, see asBC_RET, so it is dirty after the calls. They mark
@@ -291,20 +456,20 @@ public:
 	// a newer value than the memory when the instruction is reached, and of the
 	// frame, see JIT_FRAME_BIT. Temporary variables that won't be read anymore are
 	// left out
-	JITSlotMask GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
+	const JITSlotMask &GetDirtyMask(asUINT instrIdx) const { return m_dirty[instrIdx]; }
 
 	// Returns the mask of the register cached variables to store before or after
 	// the instruction, because a loop is entered in which they aren't modified
-	JITSlotMask GetStoresBefore(asUINT instrIdx) const { return m_storeBefore[instrIdx]; }
-	JITSlotMask GetStoresAfter(asUINT instrIdx) const  { return m_storeAfter[instrIdx]; }
+	const JITSlotMask &GetStoresBefore(asUINT instrIdx) const { return m_storeBefore[instrIdx]; }
+	const JITSlotMask &GetStoresAfter(asUINT instrIdx) const  { return m_storeAfter[instrIdx]; }
 
 	// Returns the mask of the register cached variables that may be read before
 	// being written when the block of the instruction is entered
-	JITSlotMask GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
+	const JITSlotMask &GetLiveInMask(asUINT instrIdx) const { return m_liveIn[m_instrs[instrIdx].block]; }
 
 	// Returns the mask of the register cached variables that may be read before
 	// being written after the instruction
-	JITSlotMask GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
+	const JITSlotMask &GetLiveAfterMask(asUINT instrIdx) const { return m_liveAfter[instrIdx]; }
 
 	// Returns the mask of the register cached variables to load where the VM enters
 	// at the instruction, or after the instruction if the VM may have modified the

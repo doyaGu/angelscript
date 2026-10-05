@@ -1851,7 +1851,7 @@ bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 // old value, so they are loaded like the live ones. The VM has them in memory there
 JITSlotMask CJITByteCode::GetEntryMask(asUINT instrIdx) const
 {
-	return m_liveIn[m_instrs[instrIdx].block] | (m_dirty[instrIdx] & ~JIT_FRAME_BIT);
+	return m_liveIn[m_instrs[instrIdx].block] | m_dirty[instrIdx].AndNot(JIT_FRAME_BIT);
 }
 
 // The sync points store the dirty variables and leave none, but the inlined calls,
@@ -1861,7 +1861,7 @@ JITSlotMask CJITByteCode::GetReloadMask(asUINT instrIdx) const
 	const SJITInstr &instr = m_instrs[instrIdx];
 	JITSlotMask mask = m_liveAfter[instrIdx];
 	if( !IsSyncPointAt(instrIdx) || (instr.flags & JIT_INSTR_INLINE) )
-		mask |= m_dirty[instrIdx] & ~JIT_FRAME_BIT;
+		mask |= m_dirty[instrIdx].AndNot(JIT_FRAME_BIT);
 	return mask;
 }
 
@@ -2045,15 +2045,15 @@ void CJITByteCode::GetSlotMasks(const SJITInstr &instr, JITSlotMask &uses, JITSl
 	int bit;
 	if( (reads0 || writes0) && (bit = GetCacheBit(asBC_SWORDARG0(instr.bc))) >= 0 )
 	{
-		if( reads0 )  uses |= JITSlotMask(1) << bit;
-		if( writes0 ) defs |= JITSlotMask(1) << bit;
+		if( reads0 )  uses.Set(bit);
+		if( writes0 ) defs.Set(bit);
 	}
 	if( reads1 && (bit = GetCacheBit(asBC_SWORDARG1(instr.bc))) >= 0 )
-		uses |= JITSlotMask(1) << bit;
+		uses.Set(bit);
 	if( reads2 && (bit = GetCacheBit(asBC_SWORDARG2(instr.bc))) >= 0 )
-		uses |= JITSlotMask(1) << bit;
+		uses.Set(bit);
 	if( instr.op == asBC_LoadThisR && m_func->objectType == 0 && (bit = GetCacheBit(0)) >= 0 )
-		uses |= JITSlotMask(1) << bit;
+		uses.Set(bit);
 }
 
 // Backward data flow to find which cached slots may be read before being
@@ -2071,7 +2071,7 @@ void CJITByteCode::AnalyseSlotLiveness()
 		{
 			JITSlotMask uses, defs;
 			GetSlotMasks(m_instrs[n], uses, defs);
-			use[b] |= uses & ~def[b];
+			use[b] |= uses.AndNot(def[b]);
 			def[b] |= defs;
 		}
 	}
@@ -2089,7 +2089,7 @@ void CJITByteCode::AnalyseSlotLiveness()
 			for( asUINT k = 0; k < succ.size(); k++ )
 				liveOut[b] |= m_liveIn[succ[k]];
 
-			JITSlotMask liveIn = use[b] | (liveOut[b] & ~def[b]);
+			JITSlotMask liveIn = use[b] | liveOut[b].AndNot(def[b]);
 			if( liveIn != m_liveIn[b] )
 			{
 				m_liveIn[b] = liveIn;
@@ -2106,7 +2106,7 @@ void CJITByteCode::AnalyseSlotLiveness()
 			m_liveAfter[n] = live;
 			JITSlotMask uses, defs;
 			GetSlotMasks(m_instrs[n], uses, defs);
-			live = uses | (live & ~defs);
+			live = uses | live.AndNot(defs);
 		}
 	}
 }
@@ -2165,7 +2165,7 @@ void CJITByteCode::AnalyseDirtySlots()
 	JITSlotMask cachedMask = JIT_FRAME_BIT;
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheBit >= 0 )
-			cachedMask |= JITSlotMask(1) << m_slots[n].cacheBit;
+			cachedMask.Set(m_slots[n].cacheBit);
 
 	// The calls in a loop store the dirty variables on every iteration, also those
 	// that are only modified before the loop, and so do the inlined functions that
@@ -2196,7 +2196,7 @@ void CJITByteCode::AnalyseDirtySlots()
 			else
 				calls = calls || IsSyncPointAt(k);
 		}
-		JITSlotMask keep = cachedMask & ~written;
+		JITSlotMask keep = cachedMask.AndNot(written);
 		if( !calls || keep == 0 )
 			continue;
 
@@ -2243,10 +2243,11 @@ void CJITByteCode::AnalyseDirtySlots()
 				const SJITInstr &instr = m_instrs[n];
 				JITSlotMask uses, defs;
 				GetSlotMasks(instr, uses, defs);
-				mask &= ~m_tempMask | uses | (m_liveAfter[n] & ~defs);
+				JITSlotMask keep = uses | m_liveAfter[n].AndNot(defs);
+				mask.AndNotAssign(m_tempMask.AndNot(keep));
 
 				m_storeBefore[n] = mask & keepBefore[n];
-				mask &= ~keepBefore[n];
+				mask.AndNotAssign(keepBefore[n]);
 				m_dirty[n] = mask;
 
 				// The inlined calls only store the variables on the rare path that
@@ -2258,11 +2259,12 @@ void CJITByteCode::AnalyseDirtySlots()
 				{
 					if( LeavesFrameDirty(n) )
 						defs |= JIT_FRAME_BIT;
-					mask = (mask | defs) & (~m_tempMask | m_liveAfter[n]);
+					mask |= defs;
+					mask.AndNotAssign(m_tempMask.AndNot(m_liveAfter[n]));
 				}
 
 				m_storeAfter[n] = mask & keepAfter[n];
-				mask &= ~keepAfter[n];
+				mask.AndNotAssign(keepAfter[n]);
 			}
 
 			// Propagate to the successors
@@ -2710,10 +2712,6 @@ void CJITByteCode::CollectSlotUses(const SJITInstr &instr)
 	}
 }
 
-// TODO: runtime optimize: The dirty and live masks are 64bit, so at most 63
-//                         variables can be cached;
-//                         larger functions would need a wider mask or a second pass
-//                         choosing the variables per loop rather than per function.
 void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 {
 	m_slots.clear();
@@ -2854,7 +2852,7 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 	}
 
 	// Give each cached slot a bit for the dirty masks
-	int bit = 0;
+	int bit = int(JIT_FRAME_SLOT + 1);
 	for( asUINT n = 0; n < m_slots.size(); n++ )
 		if( m_slots[n].cacheKind != JIT_SLOT_NONE )
 			m_slots[n].cacheBit = bit++;
@@ -2870,7 +2868,7 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 		for( asUINT v = 0; v < vars.GetLength() && !named; v++ )
 			named = vars[v]->stackOffset == m_slots[n].offset && vars[v]->name.GetLength() > 0;
 		if( !named )
-			m_tempMask |= JITSlotMask(1) << m_slots[n].cacheBit;
+			m_tempMask.Set(m_slots[n].cacheBit);
 	}
 }
 

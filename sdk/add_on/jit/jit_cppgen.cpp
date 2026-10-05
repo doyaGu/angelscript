@@ -869,31 +869,31 @@ std::string CJITCppGen::VarAddr(int offset)
 // The statements that store the local variables in the mask to the frame, or load
 // them from it, and store the frame for JIT_FRAME_BIT. The masks are those of the
 // analysis, see CJITByteCode::GetDirtyMask
-std::string CJITCppGen::Stores(JITSlotMask mask)
+std::string CJITCppGen::Stores(const JITSlotMask &mask)
 {
 	std::string text;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 	{
 		SLocal &local = m_locals[n];
-		if( !(mask & (JITSlotMask(1) << local.bit)) )
+		if( !mask.Test(local.bit) )
 			continue;
 		local.used = local.read = true;
 		if( !text.empty() )
 			text += ' ';
 		text += Format("AOT_V(%s, %d) = %s;", FrameType(local.kind), local.offset, local.name.c_str());
 	}
-	if( mask & JIT_FRAME_BIT )
+	if( mask.Test(JIT_FRAME_SLOT) )
 		text += text.empty() ? "AOT_FRAME();" : " AOT_FRAME();";
 	return text;
 }
 
-std::string CJITCppGen::Loads(JITSlotMask mask)
+std::string CJITCppGen::Loads(const JITSlotMask &mask)
 {
 	std::string text;
 	for( asUINT n = 0; n < m_locals.size(); n++ )
 	{
 		SLocal &local = m_locals[n];
-		if( !(mask & (JITSlotMask(1) << local.bit)) )
+		if( !mask.Test(local.bit) )
 			continue;
 		local.used = true;
 		if( !text.empty() )
@@ -1344,9 +1344,9 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		return true;
 
 	m_pos    = pos;
-	m_sync   = Stores(m_code.GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+	m_sync   = Stores(m_code.GetDirtyMask(idx).AndNot(JIT_FRAME_BIT));
 	m_reload = Loads(m_code.GetReloadMask(idx));
-	m_frame  = (m_code.GetDirtyMask(idx) & JIT_FRAME_BIT) != 0;
+	m_frame  = m_code.GetDirtyMask(idx).Test(JIT_FRAME_SLOT);
 
 	// The operands, only valid for the instruction types that have them
 	#define SW0 int(asBC_SWORDARG0(b))
@@ -1779,7 +1779,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 				Emit("\tJIT_Free(regs, (asCObjectType*)AOT_PW(%u), (asPWORD*)%s);", pos + 1, VarAddr(SW0).c_str());
 				SLocal *local = FindLocal(SW0);
 				if( local )
-					Emit("\t%s", Loads(JITSlotMask(1) << local->bit).c_str());
+					Emit("\t%s", Loads(JITSlotMask::Bit(local->bit)).c_str());
 			}
 			Emit("}");
 		}
@@ -1860,7 +1860,7 @@ bool CJITCppGen::EmitInstr(asUINT idx)
 		{
 			SLocal *local = FindLocal(SW0);
 			if( local )
-				Emit("\t%s", Loads(JITSlotMask(1) << local->bit).c_str());
+				Emit("\t%s", Loads(JITSlotMask::Bit(local->bit)).c_str());
 		}
 		Emit("}");
 		break;

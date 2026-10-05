@@ -642,12 +642,12 @@ void CJITCodeGen::SetSlotHomeHints(JITSlotMask slotMask, const uint32_t *gpIds, 
 	{
 		int best = -1;
 		for( asUINT n = 0; n < slots.size(); n++ )
-			if( slots[n].cacheBit >= 0 && (slotMask & (JITSlotMask(1) << slots[n].cacheBit)) &&
+			if( slots[n].cacheBit >= 0 && slotMask.Test(slots[n].cacheBit) &&
 			    (best < 0 || slots[n].useCount > slots[best].useCount) )
 				best = int(n);
 		if( best < 0 )
 			break;
-		slotMask &= ~(JITSlotMask(1) << slots[best].cacheBit);
+		slotMask.Clear(slots[best].cacheBit);
 
 		const SCachedSlot &cached = m_cached[m_cachedIndex[slots[best].offset]];
 		if( cached.gp.is_valid() )
@@ -1812,25 +1812,25 @@ void CJITCodeGen::ReloadCachedSlot(int offset)
 
 // Stores the cached slots in the mask, and the frame if it has the bit, see
 // CJITByteCode::GetDirtyMask
-void CJITCodeGen::StoreDirtySlots(JITSlotMask mask)
+void CJITCodeGen::StoreDirtySlots(const JITSlotMask &mask)
 {
-	if( mask & JIT_FRAME_BIT )
+	if( mask.Test(JIT_FRAME_SLOT) )
 		StoreFrame();
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
 		int bit = m_code->GetCacheBit(m_cached[n].offset);
-		if( bit >= 0 && (mask & (JITSlotMask(1) << bit)) )
+		if( bit >= 0 && mask.Test(bit) )
 			StoreCachedSlot(m_cached[n].offset);
 	}
 }
 
 // Loads the cached slots in the mask from memory
-void CJITCodeGen::ReloadSlots(JITSlotMask mask)
+void CJITCodeGen::ReloadSlots(const JITSlotMask &mask)
 {
 	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
 	{
 		int bit = m_code->GetCacheBit(m_cached[n].offset);
-		if( bit >= 0 && (mask & (JITSlotMask(1) << bit)) )
+		if( bit >= 0 && mask.Test(bit) )
 			ReloadCachedSlot(m_cached[n].offset);
 	}
 }
@@ -1914,7 +1914,7 @@ Label CJITCodeGen::InstrLabel(asUINT idx)
 void CJITCodeGen::Bail(asUINT idx)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
-	StoreDirtySlots(m_code->GetDirtyMask(idx) & ~JIT_FRAME_BIT);
+	StoreDirtySlots(m_code->GetDirtyMask(idx).AndNot(JIT_FRAME_BIT));
 	if( m_code->IsVRLiveBefore(idx) )
 		SyncVR();
 	if( m_staticStack )

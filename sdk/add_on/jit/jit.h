@@ -152,7 +152,7 @@ public:
 
 	// Maximum number of variables kept in registers. More variables increase the
 	// register allocator's work and may be spilled to the native stack. The default
-	// is 24, the maximum is 63, and 0 disables the cache like JIT_NO_REGISTER_CACHE
+	// is 24, and 0 disables the cache like JIT_NO_REGISTER_CACHE
 	void SetMaxCachedSlots(asUINT count);
 
 	// Tiered compilation. With a call threshold the functions aren't compiled when the
