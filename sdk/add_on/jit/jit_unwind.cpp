@@ -24,11 +24,12 @@
 	// x86-64, the exceptions terminate the application in the JIT job of the automated test
 	#define JIT_UNWIND_DWARF
 	#define JIT_UNWIND_X86
-#elif defined(__aarch64__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__)) && !defined(__arm64e__)
-	// The return addresses that the prologue signs on arm64e would need the
-	// pointer authentication in the call frame instructions too
+#elif defined(__aarch64__) && (defined(__linux__) || defined(__FreeBSD__) || defined(__APPLE__))
 	#define JIT_UNWIND_DWARF
 	#define JIT_UNWIND_A64
+	#if defined(__APPLE__) && defined(__arm64e__)
+		#define JIT_UNWIND_ARM64E
+	#endif
 #endif
 
 #if defined(JIT_UNWIND_WIN64) || defined(JIT_UNWIND_X86)
@@ -105,6 +106,7 @@ enum
 	DW_CFA_offset_extended = 0x05,
 	DW_CFA_def_cfa         = 0x0c,
 	DW_CFA_def_cfa_offset  = 0x0e,
+	DW_CFA_AARCH64_negate_ra_state = 0x2d,
 	DW_CFA_advance_loc     = 0x40,
 	DW_CFA_offset          = 0x80
 };
@@ -191,6 +193,14 @@ bool CJITUnwindInfo::AddOps(const asmjit::InstNode *inst, asUINT end)
 	if( inst->op_count() > 1 ) c = inst->op(1);
 	InstId id = inst->inst_id();
 #ifdef JIT_UNWIND_A64
+#ifdef JIT_UNWIND_ARM64E
+	if( id == a64::Inst::kIdPacibsp )
+	{
+		op.kind = OP_SIGN_RA;
+		m_ops.push_back(op);
+		return true;
+	}
+#endif
 	if( id == a64::Inst::kIdBti )
 	{
 #ifdef JIT_UNWIND_WINARM64
@@ -638,6 +648,9 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 	PutU8(data, 1);    // version
 	PutU8(data, 'z');  // augmentation
 	PutU8(data, 'R');
+#ifdef JIT_UNWIND_ARM64E
+	PutU8(data, 'B'); // pacibsp signs the return address with the B-key
+#endif
 	PutU8(data, 0);
 	PutULEB(data, 1);  // code alignment
 #ifdef JIT_UNWIND_X86_32
@@ -696,6 +709,13 @@ bool CJITUnwindInfo::Register(void *code, void **handle) const
 		loc = op.end;
 		if( op.kind == OP_SET_FP || op.kind == OP_NOP )
 			continue;
+#ifdef JIT_UNWIND_ARM64E
+		if( op.kind == OP_SIGN_RA )
+		{
+			PutU8(data, DW_CFA_AARCH64_negate_ra_state);
+			continue;
+		}
+#endif
 
 		if( op.kind == OP_PUSH || op.kind == OP_ALLOC )
 		{

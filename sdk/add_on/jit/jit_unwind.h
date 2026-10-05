@@ -17,15 +17,15 @@ BEGIN_AS_NAMESPACE
 //
 //  - 64bit x86 and ARM64 Windows: unwind data appended to the code and registered
 //    with RtlAddFunctionTable.
-//  - 64bit x86 on Linux and FreeBSD, and AArch64 on Linux, FreeBSD, and macOS:
-//    a DWARF CIE and FDE registered with __register_frame.
+//  - 64bit x86 on Linux and FreeBSD, AArch64 on Linux and FreeBSD, and
+//    AArch64/arm64e on macOS: a DWARF CIE and FDE registered with __register_frame.
 //  - 32bit GCC or Clang MinGW with the DWARF unwinder: a 32bit x86 CIE and FDE
 //    registered with libgcc.
 //  - 32bit x86 with MSVC: nothing is needed, as the exceptions are dispatched
 //    through the handlers registered on the stack.
 //
-// TODO: NetBSD, OpenBSD, DragonFly BSD, 32bit MinGW configurations without
-//       DWARF, and arm64e could be supported too, but haven't been tested.
+// TODO: NetBSD, OpenBSD, DragonFly BSD, and 32bit MinGW configurations without
+//       DWARF could be supported too, but haven't been tested.
 class CJITUnwindInfo
 {
 public:
@@ -55,7 +55,8 @@ protected:
 		OP_SAVE_GP,  // store of a callee saved general purpose register in the frame
 		OP_SAVE_VEC, // store of a callee saved vector register in the frame
 		OP_SET_FP,   // AArch64 copy of the stack pointer to x29
-		OP_NOP       // AArch64 prologue instruction with no unwind operation
+		OP_NOP,      // AArch64 prologue instruction with no unwind operation
+		OP_SIGN_RA   // arm64e signing of the return address with pacibsp
 	};
 
 	struct SOp
