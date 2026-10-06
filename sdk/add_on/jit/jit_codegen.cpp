@@ -2686,11 +2686,27 @@ bool CJITCodeGen::EmitBranch(asUINT idx)
 		{
 			m_uc.j(BailLabel(idx), ucmp_ge(v, Imm(int(targets.size()))));
 			SJumpTable table;
+			std::map<int, Label> trampolines;
 			table.label = m_uc.new_label();
 			for( asUINT n = 0; n < targets.size(); n++ )
-				table.targets.push_back(InstrLabel(targets[n]));
+			{
+				std::map<int, Label>::iterator it = trampolines.find(targets[n]);
+				if( it == trampolines.end() )
+					it = trampolines.insert(std::make_pair(targets[n], m_uc.new_label())).first;
+				table.targets.push_back(it->second);
+			}
 			m_jumpTables.push_back(table);
 			EmitJumpTable(v, table.label, table.targets);
+
+			// Keep the indirect branch targets separate from the bytecode labels.
+			// AsmJit gives every annotated target the same incoming register state;
+			// direct trampolines let it reconcile that state independently with each
+			// destination, whose other predecessors may have different assignments.
+			for( std::map<int, Label>::iterator it = trampolines.begin(); it != trampolines.end(); ++it )
+			{
+				m_uc.bind(it->second);
+				m_uc.j(InstrLabel(it->first));
+			}
 			return !m_failed;
 		}
 
