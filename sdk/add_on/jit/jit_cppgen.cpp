@@ -1018,7 +1018,8 @@ void CJITCppGen::EmitScriptCall(asUINT idx, const SJITInstr &instr)
 // Calls the script function f_, whose code is t_, with the arguments pushed. The
 // function is called natively if it has been compiled and the call stack has room,
 // like JIT_CallScript does, which is left the rest and called by slow. The code of
-// the function expected is called directly if the function has it, see AOT_PopCall.
+// the function expected is called directly if t_ executes it, see AOT_Code and
+// AOT_PopCall.
 // The call state gets the frame, which is only stored for JIT_CallScript. next is
 // the position after the instruction
 void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *indent, const std::string &slow, asUINT borrowed)
@@ -1034,7 +1035,7 @@ void CJITCppGen::EmitCall(asCScriptFunction *callee, asUINT next, const char *in
 		m_out += JIT_CPPGEN_REGION;
 		m_out += target;
 		m_out += '\n';
-		Emit("%sif( t_ == %s && n_ < callLimit )", indent, target.c_str());
+		Emit("%sif( AOT_Code(t_) == %s && n_ < callLimit )", indent, target.c_str());
 		Emit("%s{", indent);
 		Emit("%s\tAOT_PushCall(ctx, n_, self, fp, bc + %u, sp);", indent, next);
 		Emit("%s\tif( %s_d(ctx, f_, sp, callLimit, %uu) )", indent, target.c_str(), borrowed);

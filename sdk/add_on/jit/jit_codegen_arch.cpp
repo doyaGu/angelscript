@@ -225,6 +225,47 @@ void JIT_AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, x86::Gp::kIdDx, TypeId::kUInt64);
 }
 
+// rax, r10, and r11 carry no arguments with either 64bit calling convention, and eax,
+// ecx, and edx none on 32bit x86, where the arguments are on the stack above the
+// return address
+bool JIT_EmitDispatch(UniCompiler &uc, const FuncSignature &sig, const void *native, const void *code, const void *deferredProfiles, const Label &slow)
+{
+	x86::Compiler *cc = uc.cc;
+	FuncDetail detail;
+	if( detail.init(sig, cc->environment()) != Error::kOk )
+		return false;
+	bool is64 = cc->environment().is_64bit();
+	uint32_t size = is64 ? 8 : 4;
+	x86::Gp target = is64 ? x86::rax : x86::eax;
+	x86::Gp count  = is64 ? x86::r11 : x86::edx;
+	const FuncValue &jitArg = detail.arg(1);
+	Label vm = cc->new_label();
+	if( jitArg.is_reg() )
+	{
+		x86::Gp arg = is64 ? x86::gpq(jitArg.reg_id()) : x86::gpd(jitArg.reg_id());
+		cc->test(arg, arg);
+	}
+	else
+		cc->cmp(x86::ptr(is64 ? x86::rsp : x86::esp, int32_t(size) + jitArg.stack_offset(), size), Imm(0));
+	cc->jnz(vm);
+	cc->mov(target, Imm(int64_t(asPWORD(native))));
+	cc->mov(target, x86::ptr(target, 0, size));
+	cc->test(target, target);
+	cc->jz(slow);
+	cc->jmp(target);
+
+	cc->bind(vm);
+	cc->mov(count, Imm(int64_t(asPWORD(deferredProfiles))));
+	cc->cmp(x86::dword_ptr(count), Imm(0));
+	cc->jnz(slow);
+	cc->mov(target, Imm(int64_t(asPWORD(code))));
+	cc->mov(target, x86::ptr(target, 0, size));
+	cc->test(target, target);
+	cc->jz(slow);
+	cc->jmp(target);
+	return true;
+}
+
 // The second register of an object returned in two, rdx or xmm1
 void CJITCodeGen::AddReturn(FuncDetail &detail, int index, TypeId type)
 {
@@ -240,6 +281,17 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	x86::Mem m(dst);
 	m.set_size(4);
 	m_uc.cc->mov(m, Imm(value));
+}
+
+void CJITCodeGen::StorePair(const Mem &dst, const Gp &first, const Gp &second)
+{
+	Mem next = dst;
+	next.add_offset(AS_PTR_SIZE * 4);
+	m_uc.store(dst, first);
+	if( second.is_valid() )
+		m_uc.store(next, second);
+	else
+		m_uc.store_zero_reg(next);
 }
 
 void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)
@@ -534,6 +586,32 @@ void JIT_AddVRReturn(FuncDetail &detail)
 	detail.ret(1).init_reg(RegType::kGp64, 1, TypeId::kUInt64);
 }
 
+// x16 and x17 are the scratch registers of veneers, which carry no arguments
+bool JIT_EmitDispatch(UniCompiler &uc, const FuncSignature &sig, const void *native, const void *code, const void *deferredProfiles, const Label &slow)
+{
+	a64::Compiler *cc = uc.cc;
+	FuncDetail detail;
+	if( detail.init(sig, cc->environment()) != Error::kOk || !detail.arg(1).is_reg() )
+		return false;
+	a64::Gp jitArg = a64::x(detail.arg(1).reg_id());
+	Label vm = cc->new_label();
+	cc->cbnz(jitArg, vm);
+	cc->mov(a64::x16, Imm(int64_t(asPWORD(native))));
+	cc->ldr(a64::x16, a64::ptr(a64::x16));
+	cc->cbz(a64::x16, slow);
+	cc->br(a64::x16);
+
+	cc->bind(vm);
+	cc->mov(a64::x17, Imm(int64_t(asPWORD(deferredProfiles))));
+	cc->ldr(a64::w17, a64::ptr(a64::x17));
+	cc->cbnz(a64::w17, slow);
+	cc->mov(a64::x16, Imm(int64_t(asPWORD(code))));
+	cc->ldr(a64::x16, a64::ptr(a64::x16));
+	cc->cbz(a64::x16, slow);
+	cc->br(a64::x16);
+	return true;
+}
+
 // The registers of an object returned in more than one follow x0 or v0
 void CJITCodeGen::AddReturn(FuncDetail &detail, int index, TypeId type)
 {
@@ -552,6 +630,27 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	Gp t = m_uc.new_gp32();
 	m_uc.mov(t, Imm(value));
 	m_uc.store_u32(dst, t);
+}
+
+// STP stores both words with one instruction, which halves the stores of the call
+// states. It takes a base register with an offset of up to 504 bytes. Zero comes
+// from the zero register
+void CJITCodeGen::StorePair(const Mem &dst, const Gp &first, const Gp &second)
+{
+	a64::Mem m(dst);
+	int64_t offset = m.offset();
+	if( !m.has_base_reg() || m.has_index() || m.is_pre_or_post() || offset < -512 || offset > 504 || offset % 8 )
+	{
+		Mem next = dst;
+		next.add_offset(8);
+		m_uc.store(dst, first);
+		if( second.is_valid() )
+			m_uc.store(next, second);
+		else
+			m_uc.store_zero_reg(next);
+		return;
+	}
+	m_uc.cc->stp(first.r64(), second.is_valid() ? second.r64() : a64::xzr, m);
 }
 
 // The whole register is moved even for a scalar. Apple's cores rename the 128bit
@@ -809,6 +908,11 @@ void JIT_AddVRReturn(FuncDetail &)
 {
 }
 
+bool JIT_EmitDispatch(UniCompiler &, const FuncSignature &, const void *, const void *, const void *, const Label &)
+{
+	return false;
+}
+
 void CJITCodeGen::AddReturn(FuncDetail &, int, TypeId)
 {
 	m_failed = true;
@@ -819,6 +923,17 @@ void CJITCodeGen::StoreImm32(const Mem &dst, int value)
 	Gp t = m_uc.new_gp32();
 	m_uc.mov(t, Imm(value));
 	m_uc.store_u32(dst, t);
+}
+
+void CJITCodeGen::StorePair(const Mem &dst, const Gp &first, const Gp &second)
+{
+	Mem next = dst;
+	next.add_offset(AS_PTR_SIZE * 4);
+	m_uc.store(dst, first);
+	if( second.is_valid() )
+		m_uc.store(next, second);
+	else
+		m_uc.store_zero_reg(next);
 }
 
 void CJITCodeGen::MoveVec(const Vec &dst, const Vec &src)

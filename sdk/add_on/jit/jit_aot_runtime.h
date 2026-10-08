@@ -177,6 +177,13 @@ template<class T> inline int aot_cmp(T a, T b)
 	return a == b ? 0 : (a < b ? -1 : 1);
 }
 
+// The code that the function with the code t executes now, which a call compares
+// with the code it expects, see JIT_wrappedEntries
+inline JITFunction AOT_Code(JITFunction t)
+{
+	return JIT_wrappedEntries && t ? JIT_WrappedCode(reinterpret_cast<asJITFunction>(t)) : t;
+}
+
 // Pushes the call state like asCContext::PushCallState, with the frame of the
 // calling function, which may not have been stored. The call stack must have room
 // for it, i.e. its length must be below callLimit
