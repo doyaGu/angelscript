@@ -34,6 +34,12 @@ struct SJITCodeGenOptions
 // Architecture-specific pieces used by the generated function wrappers too.
 asmjit::InvokeNode *JIT_Invoke(asmjit::ujit::UniCompiler &uc, const void *fn, const asmjit::FuncSignature &sig);
 void JIT_AddVRReturn(asmjit::FuncDetail &detail);
+// Emits the dispatch at the start of a function wrapper, outside of any function. A
+// native caller, which passes 0 for jitArg, jumps to the code that *native points to,
+// and the VM to the code that *code points to unless *deferredProfiles is non-zero.
+// Null code, or a non-zero count, continues at slow with the arguments untouched.
+// Returns false if the architecture has no dispatch
+bool JIT_EmitDispatch(asmjit::ujit::UniCompiler &uc, const asmjit::FuncSignature &sig, const void *native, const void *code, const void *deferredProfiles, const asmjit::Label &slow);
 
 // Translates the analysed bytecode of one function to machine code through
 // AsmJit's arch neutral UniCompiler. The generated function has the signature
@@ -228,6 +234,7 @@ protected:
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void AddReturn(asmjit::FuncDetail &detail, int index, asmjit::TypeId type);
 	void StoreImm32(const Mem &dst, int value);
+	void StorePair(const Mem &dst, const Gp &first, const Gp &second); // two pointers, the second zero if it's invalid
 	void MoveVec(const Vec &dst, const Vec &src);
 	void MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble);
 	void EmitAddRefInPlace(const Gp &obj, const Label &slow);

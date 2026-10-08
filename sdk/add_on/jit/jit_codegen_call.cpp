@@ -722,13 +722,12 @@ void CJITCodeGen::EmitMaterialize()
 		const SFrame &caller = m_frames[callee.caller];
 		const SJITInstr &instr = caller.code->GetInstructions()[callee.callIdx];
 		Mem state = PtrAt(states, int(n * layout.callStackFrameSize));
-		m_uc.store(state, FramePointer(caller.base));
-		m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(caller.code->GetFunction())));
-		m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(caller.code->GetByteCode() + instr.pos + instr.size)));
-		m_uc.store(PtrAt(state, 3), FramePointer(callee.base));
-		m_uc.store(PtrAt(state, 4), index);
+		StorePair(state, FramePointer(caller.base), PtrConst(asPWORD(caller.code->GetFunction())));
+		StorePair(PtrAt(state, 2), PtrConst(asPWORD(caller.code->GetByteCode() + instr.pos + instr.size)), FramePointer(callee.base));
 #ifdef JIT_NATIVE_RETURN
-		m_uc.store_zero_reg(PtrAt(state, 5));
+		StorePair(PtrAt(state, 4), index, Gp());
+#else
+		m_uc.store(PtrAt(state, 4), index);
 #endif
 		if( callee.borrowed )
 		{
@@ -961,13 +960,11 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 	Gp array = m_uc.new_gp_ptr();
 	m_uc.load(array, ContextField(layout.callStackArray));
 	Mem state = PtrElement(array, length);
-	m_uc.store(state, FramePointer(m_frameBase));
-	m_uc.store(PtrAt(state, 1), PtrConst(asPWORD(m_code->GetFunction())));
-	m_uc.store(PtrAt(state, 2), PtrConst(asPWORD(m_code->GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])));
+	StorePair(state, FramePointer(m_frameBase), PtrConst(asPWORD(m_code->GetFunction())));
 	// The stack pointer passed to the callee is the current one, unless the caller
 	// has pushed something below it, see EmitDelegateCall
 	Gp sp = stackPointer ? *stackPointer : StackPointer();
-	m_uc.store(PtrAt(state, 3), sp);
+	StorePair(PtrAt(state, 2), PtrConst(asPWORD(m_code->GetByteCode() + instr.pos + asBCTypeSize[asBCInfo[instr.op].type])), sp);
 	m_uc.load_u32(t, ContextField(layout.stackIndex));
 #ifdef JIT_NATIVE_RETURN
 	if( mark )
@@ -975,12 +972,11 @@ bool CJITCodeGen::EmitNativeCall(asUINT idx, const Gp &target, const Gp &callee,
 #else
 	(void)mark;
 #endif
-	m_uc.store(PtrAt(state, 4), t);
 	// Engine call states leave words 5-8 unused. The mark distinguishes this state
 	// from one the VM created, and the mask is read by the callee's direct entry.
 	Gp note = m_uc.new_gp_ptr();
 	m_uc.mov(note, Imm(asPWORD(JIT_NATIVE_CALL_STATE | (borrowed & JIT_BORROWED_ARG_MASK))));
-	m_uc.store(PtrAt(state, 5), note);
+	StorePair(PtrAt(state, 4), t, note);
 	Gp top = m_uc.new_gp_ptr();
 	m_uc.add(top, length, Imm(layout.callStackFrameSize));
 	m_uc.store_u32(ContextField(layout.callStackLength), top);

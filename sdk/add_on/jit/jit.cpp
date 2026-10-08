@@ -87,7 +87,7 @@ struct CJITCompiler::SImpl
 	struct SEntry
 	{
 		SEntry(SImpl *owner, asCScriptFunction *function, JITFunction initialCode, const std::vector<asUINT> &initialCounts)
-			: impl(owner), func(function), code(initialCode), counts(initialCounts.size()), wrapper(0), profilesVMCalls(false)
+			: impl(owner), func(function), code(initialCode), native(0), counts(initialCounts.size()), wrapper(0), base(0), profilesVMCalls(false)
 		{
 			for( size_t n = 0; n < initialCounts.size(); n++ )
 				counts[n].store(initialCounts[n], std::memory_order_relaxed);
@@ -97,8 +97,10 @@ struct CJITCompiler::SImpl
 		SImpl                             *impl;
 		asCScriptFunction                 *func;
 		std::atomic<JITFunction>           code;
+		std::atomic<JITFunction>           native; // code, unless it was generated ahead of time, see Publish
 		std::vector<std::atomic<asUINT> > counts;
 		asJITFunction                      wrapper;
+		asJITFunction                      base;   // where the code of the wrapper was added to the runtime
 		SJITProfile                        vmProfile; // call targets seen while this function is interpreted
 		std::map<const asDWORD*, SJITSeenClasses*> vmClassCalls; // cells by the address after asBC_CALLINTF
 		std::map<const asDWORD*, std::pair<SJITSeenFunctions*, int> > vmFunctionCalls; // cells and variables by the address after asBC_CallPtr
@@ -145,6 +147,7 @@ struct CJITCompiler::SImpl
 	JITFunction TierUp(SEntry *entry, bool exact);
 	JITFunction CompileExact(asCScriptFunction *func);
 	void Replace(asCScriptFunction *func, asJITFunction code);
+	void Publish(SEntry *entry, JITFunction code);
 	void Release(asJITFunction code);
 	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode = 0);
 	SEntry *FindEntry(asCScriptFunction *func);
@@ -604,14 +607,18 @@ void CJITCompiler::SImpl::NoteVMCall(asSVMRegisters *regs)
 	}
 }
 
+// Declared extern in jit_runtime.h, which gives the definition external linkage
+#if defined(ASMJIT_UJIT_X86) || defined(ASMJIT_UJIT_AARCH64)
+const bool JIT_wrappedEntries = true;
+#else
+const bool JIT_wrappedEntries = false;
+#endif
+
 asJITFunction JIT_GetNativeTarget(asCScriptFunction *func)
 {
-	if( func == 0 || func->engine == 0 || func->engine->jitCompiler == 0 )
+	if( !JIT_wrappedEntries || func == 0 || func->scriptData == 0 || func->scriptData->jitFunction == 0 )
 		return 0;
-	CJITCompiler *compiler = static_cast<CJITCompiler*>(static_cast<asIJITCompiler*>(func->engine->jitCompiler));
-	std::lock_guard<std::mutex> lock(compiler->m_impl->mutex);
-	CJITCompiler::SImpl::SEntry *entry = compiler->m_impl->FindEntry(func);
-	return entry ? reinterpret_cast<asJITFunction>(entry->code.load(std::memory_order_acquire)) : 0;
+	return reinterpret_cast<asJITFunction>(JIT_WrappedCode(func->scriptData->jitFunction));
 }
 
 int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode)
@@ -631,7 +638,20 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 	UniCompiler uc(&cc, runtime.cpu_features(), CpuHints::kNone);
 	uc.init_vec_width(VecWidth::k128);
 
+	// The wrapper starts with the address of the current code, which JIT_WrappedCode
+	// reads in front of it. The dispatch jumps to the current code without a frame of
+	// its own, and the function after it does everything else
 	FuncSignature signature = FuncSignature::build<int, asSVMRegisters*, asPWORD, asUINT, asDWORD*>();
+	static const asBYTE padding[JIT_WRAPPER_PREFIX] = {0};
+	const std::atomic<JITFunction> *slot = &entry->code;
+	cc.embed(padding, JIT_WRAPPER_PREFIX - sizeof(slot));
+	cc.embed(&slot, sizeof(slot));
+	Label dispatch = uc.new_label();
+	Label slow = uc.new_label();
+	uc.bind(dispatch);
+	bool dispatched = JIT_EmitDispatch(uc, signature, &entry->native, &entry->code, &deferredProfiles, slow);
+	uc.bind(slow);
+
 	FuncNode *wrapperFunc = uc.add_func(signature);
 #ifdef JIT_NATIVE_RETURN
 	JIT_AddVRReturn(wrapperFunc->detail());
@@ -682,7 +702,8 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 	uc.ret(result);
 	uc.end_func();
 
-	bool ok = cc.finalize() == Error::kOk && errorHandler.error == Error::kOk;
+	bool ok = dispatched && cc.finalize() == Error::kOk && errorHandler.error == Error::kOk &&
+	          holder.label_offset(dispatch) == JIT_WRAPPER_PREFIX;
 	CJITUnwindInfo unwind;
 	bool hasUnwind = false;
 #ifndef AS_NO_EXCEPTIONS
@@ -693,27 +714,31 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 	}
 #endif
 
+	asJITFunction base = 0;
 	asJITFunction wrapper = 0;
 	void *unwindHandle = 0;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		if( ok )
-			ok = runtime.add(&wrapper, &holder) == Error::kOk;
+			ok = runtime.add(&base, &holder) == Error::kOk;
 		if( ok && hasUnwind )
-			ok = unwind.Register((void*)wrapper, &unwindHandle);
-		if( !ok && wrapper )
-			runtime.release(wrapper);
+			ok = unwind.Register((void*)base, &unwindHandle);
+		if( !ok && base )
+			runtime.release(base);
 		if( ok )
 		{
 			if( byteCode )
 				RetainBorrowedTargets(entry, *byteCode);
+			Publish(entry, reinterpret_cast<JITFunction>(code));
+			wrapper = reinterpret_cast<asJITFunction>(reinterpret_cast<char*>(base) + JIT_WRAPPER_PREFIX);
 			entry->wrapper = wrapper;
+			entry->base = base;
 			entries[wrapper] = entry;
 			functionEntries[func] = entry;
-			codeSizes[wrapper] = holder.code_size();
-			stats.codeSize += codeSizes[wrapper];
+			codeSizes[base] = holder.code_size();
+			stats.codeSize += codeSizes[base];
 			if( unwindHandle )
-				unwindInfo[wrapper] = unwindHandle;
+				unwindInfo[base] = unwindHandle;
 		}
 	}
 	if( !ok )
@@ -1151,7 +1176,7 @@ JITFunction CJITCompiler::SImpl::TierUp(SEntry *entry, bool exact)
 		return 0;
 	}
 	RetainBorrowedTargets(entry, code);
-	entry->code.store(reinterpret_cast<JITFunction>(jitFunc), std::memory_order_release);
+	Publish(entry, reinterpret_cast<JITFunction>(jitFunc));
 	FinishVMProfile(entry);
 	return reinterpret_cast<JITFunction>(jitFunc);
 }
@@ -1257,7 +1282,19 @@ void CJITCompiler::SImpl::Replace(asCScriptFunction *func, asJITFunction code)
 		history.profiles.insert(history.profiles.end(), old->second.profiles.begin(), old->second.profiles.end());
 		histories.erase(old);
 	}
-	entry->code.store(reinterpret_cast<JITFunction>(code), std::memory_order_release);
+	Publish(entry, reinterpret_cast<JITFunction>(code));
+}
+
+// Sets the current code of an entry. The dispatch of the wrapper enters it directly
+// from native callers too, unless it was generated ahead of time, whose callers must
+// give it references of its own to borrowed arguments first, see ResolveEntry. The
+// two are briefly different while the code is replaced, in which case ResolveEntry
+// gives it those references too. Must be called with the lock held
+void CJITCompiler::SImpl::Publish(SEntry *entry, JITFunction code)
+{
+	bool aot = code && aotPointers.count(reinterpret_cast<asJITFunction>(code));
+	entry->code.store(code, std::memory_order_release);
+	entry->native.store(aot ? 0 : code, std::memory_order_release);
 }
 
 // Called by the code that checks for suspension and line callbacks only where they may
@@ -1278,8 +1315,9 @@ int CJITCompiler::SImpl::ExactEntry(void *impl, asSVMRegisters *regs, asPWORD ji
 	return 0;
 }
 
-// Resolves an immutable function wrapper to its current code. Deferred functions
-// count calls and loop iterations here, then publish their code through the entry.
+// Resolves an immutable function wrapper to its current code when its dispatch
+// doesn't, see JIT_EmitDispatch. Deferred functions count calls and loop iterations
+// here, then publish their code through the entry.
 // A script entry also sees the call state of its caller, from which the receiver
 // classes and function pointers at calls of deferred functions are profiled.
 asPWORD CJITCompiler::SImpl::ResolveEntry(SEntry *entry, asSVMRegisters *regs, asPWORD jitArg)
@@ -1307,7 +1345,7 @@ asPWORD CJITCompiler::SImpl::ResolveEntry(SEntry *entry, asSVMRegisters *regs, a
 	// the native caller's state. A deferred target left to the VM, or code generated
 	// ahead of time with its own direct-entry contract, must receive references of
 	// its own before the wrapper enters it.
-	if( jitArg == 0 && (code == 0 || entry->impl->aotPointers.count(reinterpret_cast<asJITFunction>(code))) )
+	if( jitArg == 0 && (code == 0 || code != entry->native.load(std::memory_order_acquire)) )
 	{
 		asCContext *ctx = static_cast<asCContext*>(regs->ctx);
 		asUINT length = ctx->m_callStack.GetLength();
@@ -1382,7 +1420,7 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 		}
 		if( releasable )
 			m_impl->Release(code);
-		m_impl->Release(func);
+		m_impl->Release(entry->base);
 		m_impl->functionEntries.erase(entry->func);
 		m_impl->entries.erase(found);
 		borrowedTargets.swap(entry->borrowedTargets);

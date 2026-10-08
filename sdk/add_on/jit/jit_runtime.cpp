@@ -1317,7 +1317,14 @@ static int ExecuteCompiled(asCContext *ctx, asCThreadLocalData *tld, asUINT limi
 	asUINT callLimit = ctx->m_callStack.GetLength() + limitWords;
 	if( callLimit > ctx->m_callStack.GetCapacity() )
 		callLimit = ctx->m_callStack.GetCapacity();
-	EnterFromApplication(regs, ctx, reinterpret_cast<JITFunction>(func->scriptData->jitFunction), callLimit);
+	// The current code is entered directly like JIT_GuardedEntry does, unless the
+	// compilation of the function is deferred, which its wrapper takes care of. The
+	// call state on top, if any, is not a native call, so no code needs references of
+	// its own to borrowed arguments, see JIT_NATIVE_CALL_STATE
+	JITFunction code = reinterpret_cast<JITFunction>(JIT_GetNativeTarget(func));
+	if( code == 0 )
+		code = reinterpret_cast<JITFunction>(func->scriptData->jitFunction);
+	EnterFromApplication(regs, ctx, code, callLimit);
 
 	// The VM continues where the native code has left it
 	for(;;)

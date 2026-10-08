@@ -5,6 +5,8 @@
 #include <angelscript.h>
 #endif
 
+#include <atomic>
+
 BEGIN_AS_NAMESPACE
 
 class asCObjectType;
@@ -62,6 +64,22 @@ typedef int (*JITFunction)(asSVMRegisters *regs, asPWORD jitArg, asUINT callLimi
 // Returns the code behind the immutable wrapper of a compiled script function,
 // or null while its compilation is still deferred.
 asJITFunction JIT_GetNativeTarget(asCScriptFunction *func);
+
+// Where the add-on generates code, the engine has an immutable wrapper as the code
+// of each compiled function, see CJITCompiler::SImpl::CreateEntry. The bytes in front
+// of the wrapper end with the address of the slot with the current code, which is
+// null while the compilation is deferred. Elsewhere the engine has the code
+// generated ahead of time itself
+extern const bool JIT_wrappedEntries;
+const asUINT JIT_WRAPPER_PREFIX = 16;
+
+// The current code behind a wrapper
+inline JITFunction JIT_WrappedCode(asJITFunction wrapper)
+{
+	const char *start = reinterpret_cast<const char*>(wrapper);
+	const std::atomic<JITFunction> *slot = *reinterpret_cast<const std::atomic<JITFunction>* const*>(start - sizeof(void*));
+	return slot->load(std::memory_order_acquire);
+}
 
 // Maximum depth of nested native calls when the VM enters one of the functions
 // generated ahead of time, see CJITCompiler::SetNativeCallDepth. It is shared by all
