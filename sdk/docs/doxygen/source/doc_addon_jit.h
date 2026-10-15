@@ -558,38 +558,38 @@ are done by helper functions on 32bit hosts.
 The table below shows the same tests measured on an Apple M5 Pro with the arm64
 release build from Apple clang 21 on macOS, as the fastest of the ten runs of each
 test in six runs of the program. By the geometric mean of the speedups over the
-interpreter, the tests are 3.6 times as fast with the JIT compiler without direct
-system calls, 4.8 times with the default settings, 5.1 times with the pooled memory
-functions too, and 4.0 times with the code generated ahead of time. The JIT
+interpreter, the tests are 3.5 times as fast with the JIT compiler without direct
+system calls, 4.7 times with the default settings, 5.0 times with the pooled memory
+functions too, and 4.1 times with the code generated ahead of time. The JIT
 compiler gains less than on x86-64, as the interpreter is faster on this CPU.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
-Basic          0.147    0.064      0.031    0.032     0.037
-Basic2         0.048    0.006      0.006    0.006     0.014
-Call           0.167    0.073      0.073    0.072     0.075
-Call2          0.204    0.106      0.108    0.108     0.107
-Fib            0.279    0.081      0.081    0.081     0.091
-Int            0.046    0.020      0.006    0.006     0.006
-Intf           0.096    0.009      0.009    0.009     0.024
-Mthd           0.091    0.009      0.009    0.009     0.019
-String         0.212    0.172      0.090    0.090     0.102
-String2        0.114    0.089      0.044    0.044     0.060
-StringPooled   0.132    0.115      0.043    0.043     0.048
+Basic          0.150    0.065      0.030    0.030     0.039
+Basic2         0.049    0.006      0.006    0.005     0.014
+Call           0.173    0.079      0.077    0.077     0.080
+Call2          0.213    0.116      0.114    0.114     0.115
+Fib            0.284    0.076      0.074    0.075     0.090
+Int            0.045    0.020      0.006    0.006     0.007
+Intf           0.096    0.010      0.009    0.010     0.028
+Mthd           0.093    0.010      0.010    0.010     0.023
+String         0.211    0.171      0.090    0.091     0.102
+String2        0.115    0.087      0.043    0.044     0.066
+StringPooled   0.134    0.118      0.046    0.046     0.049
 ThisProp       0.099    0.008      0.008    0.008     0.006
-Vector3        0.081    0.063      0.009    0.009     0.008
-Assign.1       0.053    0.005      0.005    0.005     0.010
-Assign.2       0.086    0.012      0.012    0.012     0.010
-Assign.3       0.076    0.012      0.012    0.012     0.008
-Assign.4       0.084    0.019      0.019    0.019     0.018
-Assign.5       0.085    0.019      0.019    0.019     0.018
-Array.1        0.187    0.091      0.073    0.043     0.078
-Array.2        0.082    0.014      0.014    0.014     0.010
-GlobalVar      0.039    0.033      0.012    0.012     0.018
-ClassProp      0.066    0.011      0.011    0.011     0.010
-RetObj.1       0.233    0.121      0.121    0.082     0.139
-RetObj.2       0.133    0.059      0.058    0.038     0.072
-RetObj.3       0.039    0.004      0.004    0.004     0.011
+Vector3        0.083    0.064      0.009    0.009     0.008
+Assign.1       0.050    0.005      0.005    0.005     0.011
+Assign.2       0.088    0.011      0.013    0.013     0.009
+Assign.3       0.071    0.012      0.012    0.012     0.008
+Assign.4       0.077    0.022      0.022    0.022     0.012
+Assign.5       0.081    0.021      0.022    0.022     0.011
+Array.1        0.186    0.092      0.073    0.042     0.078
+Array.2        0.088    0.015      0.015    0.015     0.009
+GlobalVar      0.039    0.034      0.012    0.012     0.019
+ClassProp      0.068    0.011      0.011    0.011     0.009
+RetObj.1       0.240    0.123      0.122    0.077     0.150
+RetObj.2       0.138    0.059      0.060    0.036     0.078
+RetObj.3       0.040    0.004      0.004    0.004     0.009
 </pre>
 
 \section doc_addon_jit_limits Known limitations
