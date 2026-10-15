@@ -91,6 +91,10 @@ int JIT_AddScriptArrayIndexers(CJITCompiler *jit)
 	r = jit->AddIndexer(asMETHODPR(CScriptArray, At, (asUINT), void*), layout);
 	if( r >= 0 )
 		r = jit->AddIndexer(asMETHODPR(CScriptArray, At, (asUINT) const, const void*), layout);
+	if( r >= 0 )
+		r = jit->AddLengthQuery(asMETHOD(CScriptArray, GetSize), layout, CJITCompiler::JIT_QUERY_LENGTH);
+	if( r >= 0 )
+		r = jit->AddLengthQuery(asMETHOD(CScriptArray, IsEmpty), layout, CJITCompiler::JIT_QUERY_IS_EMPTY);
 	return r;
 #endif
 }

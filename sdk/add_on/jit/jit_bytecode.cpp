@@ -940,12 +940,13 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
-// The indexer that the function is, if any, see CJITCompiler::AddIndexer. The
-// elements are laid out like those of CScriptArray, whose size depends on the
-// subtype, and the objects are stored as pointers to them if the subtype isn't a
-// handle. The index must be unsigned, as the negative ones are taken to be out of
-// range
-bool CJITByteCode::FindIndexer(asCScriptEngine *engine, int funcId, const std::map<asFUNCTION_t, SJITIndexer> *indexers, SJITIndexerCall &call)
+// The indexer or length query that the function is, if any, see
+// CJITCompiler::AddIndexer and AddLengthQuery. The elements are laid out like those
+// of CScriptArray, whose size depends on the subtype, and the objects are stored as
+// pointers to them if the subtype isn't a handle. The index must be unsigned, as the
+// negative ones are taken to be out of range. The length queries take nothing and
+// return a uint or a bool
+bool CJITByteCode::FindIndexer(asCScriptEngine *engine, int funcId, const TJITContainerMethods *indexers, SJITIndexerCall &call)
 {
 	if( indexers == 0 || indexers->empty() )
 		return false;
@@ -953,24 +954,33 @@ bool CJITByteCode::FindIndexer(asCScriptEngine *engine, int funcId, const std::m
 	if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 || func->objectType == 0 )
 		return false;
 	const asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
-	std::map<asFUNCTION_t, SJITIndexer>::const_iterator it = indexers->find(sysFunc->func);
+	TJITContainerMethods::const_iterator it = indexers->find(sysFunc->func);
 	if( it == indexers->end() || sysFunc->callConv != ICC_THISCALL || sysFunc->baseOffset || sysFunc->auxiliary ||
 	    sysFunc->compositeOffset || sysFunc->isCompositeIndirect )
 		return false;
+	call.layout = it->second.layout;
+	call.op     = it->second.op;
+	if( call.op != JIT_CONTAINER_INDEX )
+	{
+		call.elementSize = 0;
+		call.indirect    = false;
+		int token = func->returnType.GetTokenType();
+		return func->parameterTypes.GetLength() == 0 && !func->returnType.IsReference() &&
+		       token == (call.op == JIT_CONTAINER_LENGTH ? ttUInt : ttBool);
+	}
 	if( !func->returnType.IsReference() || func->parameterTypes.GetLength() != 1 ||
 	    func->parameterTypes[0].IsReference() || func->parameterTypes[0].GetTokenType() != ttUInt ||
 	    func->objectType->templateSubTypes.GetLength() != 1 )
 		return false;
 
 	int typeId = engine->GetTypeIdFromDataType(func->objectType->templateSubTypes[0]);
-	call.layout      = it->second;
 	call.indirect    = (typeId & asTYPEID_MASK_OBJECT) && !(typeId & asTYPEID_OBJHANDLE);
 	call.elementSize = (typeId & asTYPEID_MASK_OBJECT) ? int(sizeof(asPWORD)) : engine->GetSizeOfPrimitiveType(typeId);
 	return call.elementSize == 1 || call.elementSize == 2 || call.elementSize == 4 || call.elementSize == 8;
 }
 
 // Finds the calls of the indexers, which are compiled in place
-void CJITByteCode::FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers)
+void CJITByteCode::FindIndexers(const TJITContainerMethods *indexers)
 {
 	m_indexers.clear();
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
@@ -990,7 +1000,7 @@ void CJITByteCode::FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *index
 // can borrow. The result of that analysis is part of the AOT key. The other code still
 // doesn't depend on the callees, as the direct-call regions are guarded by their
 // function pointers and removed when their targets aren't written.
-void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
+void CJITByteCode::AnalyseForAOT(asUINT maxCachedSlots, const TJITContainerMethods *indexers)
 {
 	MarkUnreachable(false);
 	m_aot = true;

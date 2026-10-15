@@ -74,7 +74,7 @@ struct CJITCompiler::SImpl
 	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
-	std::map<asFUNCTION_t, SJITIndexer> indexers; // the methods added with AddIndexer, by their function
+	TJITContainerMethods indexers; // the methods added with AddIndexer and AddLengthQuery, by their function
 	asUINT                 callThreshold; // see SetCompileThresholds
 	asUINT                 loopThreshold;
 	std::set<asCScriptFunction*> compiling; // the functions being compiled, see TierUp, Recompile and CompileExact
@@ -328,7 +328,24 @@ int CJITCompiler::AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexe
 	std::lock_guard<std::mutex> lock(m_impl->mutex);
 	if( m_impl->stats.functionsCompiled > 0 || m_impl->stats.functionsDeferred > 0 )
 		return asERROR;
-	m_impl->indexers[method.ptr.f.func] = indexer;
+	SJITContainerMethod &entry = m_impl->indexers[method.ptr.f.func];
+	entry.layout = indexer;
+	entry.op     = JIT_CONTAINER_INDEX;
+	return asSUCCESS;
+}
+
+int CJITCompiler::AddLengthQuery(const asSFuncPtr &method, const SJITIndexer &container, ELengthQuery query)
+{
+	if( method.flag != 3 || method.ptr.f.func == 0 || container.bufferOffset < 0 || container.lengthOffset < 0 ||
+	    (query != JIT_QUERY_LENGTH && query != JIT_QUERY_IS_EMPTY) )
+		return asINVALID_ARG;
+
+	std::lock_guard<std::mutex> lock(m_impl->mutex);
+	if( m_impl->stats.functionsCompiled > 0 || m_impl->stats.functionsDeferred > 0 )
+		return asERROR;
+	SJITContainerMethod &entry = m_impl->indexers[method.ptr.f.func];
+	entry.layout = container;
+	entry.op     = query == JIT_QUERY_LENGTH ? JIT_CONTAINER_LENGTH : JIT_CONTAINER_IS_EMPTY;
 	return asSUCCESS;
 }
 
@@ -423,7 +440,7 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		if( instr.flags & JIT_INSTR_INLINE )
 			fprintf(file, "   ; inlined");
 		if( instr.flags & JIT_INSTR_INDEXER )
-			fprintf(file, "   ; indexer");
+			fprintf(file, code.GetIndexer(n)->op == JIT_CONTAINER_INDEX ? "   ; indexer" : "   ; length query");
 		if( instr.flags & JIT_INSTR_PROFILE )
 			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? " for the class seen" :
 			              (instr.op == asBC_CallPtr ? "   ; targets noted" : "   ; classes noted"));

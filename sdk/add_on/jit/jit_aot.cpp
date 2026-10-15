@@ -166,7 +166,7 @@ static asUINT GetKeyOperands(asEBCInstr op)
 	}
 }
 
-SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
+SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const TJITContainerMethods *indexers)
 {
 	// Borrowing handle arguments depends on the bytecode of the statically called
 	// functions. Hash the result of the same analysis that generates the code, rather
@@ -256,16 +256,22 @@ SJITAOTKey JIT_GetAOTKey(const CJITByteCode &code, const std::map<asFUNCTION_t, 
 		}
 
 		// The function id isn't, but how the function is called, or where the
-		// indexers compiled in place find the element
+		// indexers and length queries compiled in place find the element or the
+		// number of elements
 		if( instr.op == asBC_CALLSYS || instr.op == asBC_Thiscall1 )
 		{
 			SJITIndexerCall indexer;
 			if( CJITByteCode::FindIndexer(func->engine, asBC_INTARG(bc), indexers, indexer) )
 			{
-				hash.Add(2 | (indexer.indirect << 2) | (asQWORD(indexer.elementSize) << 3));
+				// The length queries only read the number of elements
+				if( indexer.op == JIT_CONTAINER_INDEX )
+					hash.Add(2 | (indexer.indirect << 2) | (asQWORD(indexer.elementSize) << 3));
+				else
+					hash.Add(3 | (asQWORD(indexer.op) << 2));
 				hash.Add(asQWORD(indexer.layout.bufferOffset));
 				hash.Add(asQWORD(indexer.layout.lengthOffset));
-				hash.Add(asQWORD(indexer.layout.dataOffset));
+				if( indexer.op == JIT_CONTAINER_INDEX )
+					hash.Add(asQWORD(indexer.layout.dataOffset));
 				continue;
 			}
 
@@ -296,7 +302,7 @@ static std::string GetTargetName(asCScriptFunction *func, void *indexers)
 	CJITByteCode code;
 	if( code.Decode(func) < 0 )
 		return "";
-	return JIT_GetAOTName(JIT_GetAOTKey(code, static_cast<const std::map<asFUNCTION_t, SJITIndexer>*>(indexers)));
+	return JIT_GetAOTName(JIT_GetAOTKey(code, static_cast<const TJITContainerMethods*>(indexers)));
 }
 
 // The code with the regions that call the code in the set, without the lines that
@@ -334,7 +340,7 @@ CJITAOTOutput::CJITAOTOutput()
 {
 }
 
-CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl, const std::map<asFUNCTION_t, SJITIndexer> *indexers)
+CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAOTKey &key, const char *decl, const TJITContainerMethods *indexers)
 {
 	// The code is generated from an analysis of its own, which the JIT compiler
 	// doesn't do
@@ -343,7 +349,7 @@ CJITAOTOutput::EResult CJITAOTOutput::Add(const CJITByteCode &code, const SJITAO
 
 	std::string name = JIT_GetAOTName(key);
 	std::string text;
-	CJITCppGen gen(analysed, GetTargetName, const_cast<std::map<asFUNCTION_t, SJITIndexer>*>(indexers));
+	CJITCppGen gen(analysed, GetTargetName, const_cast<TJITContainerMethods*>(indexers));
 	if( !gen.Generate(name.c_str(), text) )
 		return AOT_FAILED;
 

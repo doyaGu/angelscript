@@ -362,6 +362,21 @@ struct SJITProfile
 };
 
 // The functions that Analyse lets the code generator emit in place of their calls
+// What the call of a container method added to the compiler is compiled as, see
+// CJITCompiler::AddIndexer and AddLengthQuery
+enum EJITContainerOp
+{
+	JIT_CONTAINER_INDEX,    // the address of the element
+	JIT_CONTAINER_LENGTH,   // the number of elements
+	JIT_CONTAINER_IS_EMPTY  // whether the number of elements is 0
+};
+struct SJITContainerMethod
+{
+	SJITIndexer     layout;
+	EJITContainerOp op;
+};
+typedef std::map<asFUNCTION_t, SJITContainerMethod> TJITContainerMethods;
+
 struct SJITInlineOptions
 {
 	asUINT maxSize;  // largest bytecode in dwords, 0 inlines nothing
@@ -370,7 +385,7 @@ struct SJITInlineOptions
 	const SJITProfile *classes; // the call targets seen by the code compiled before, or null
 	bool   profile;  // mark the calls whose targets are worth noting with JIT_INSTR_PROFILE
 	bool   borrowCalls; // borrow handle arguments of non-inlined calls with checked targets
-	const std::map<asFUNCTION_t, SJITIndexer> *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
+	const TJITContainerMethods *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
 };
 
 class CJITByteCode;
@@ -385,11 +400,13 @@ struct SJITInlinee
 	std::vector<asCObjectType*>   types;
 };
 
-// A call of an indexer that is compiled in place, see CJITCompiler::AddIndexer
+// A call of an indexer or a length query that is compiled in place, see
+// CJITCompiler::AddIndexer and AddLengthQuery
 struct SJITIndexerCall
 {
-	SJITIndexer layout;
-	int  elementSize; // bytes from one element to the next
+	SJITIndexer     layout;
+	EJITContainerOp op;
+	int  elementSize; // bytes from one element to the next, 0 for the length queries
 	bool indirect;    // the elements are pointers to the objects
 };
 
@@ -416,7 +433,7 @@ public:
 	// calls are analysed only for the handle arguments that their direct entries can
 	// borrow. The calls that the code may make directly leave the frame dirty, see
 	// CJITCppGen. The indexers are part of the key too
-	void AnalyseForAOT(asUINT maxCachedSlots, const std::map<asFUNCTION_t, SJITIndexer> *indexers);
+	void AnalyseForAOT(asUINT maxCachedSlots, const TJITContainerMethods *indexers);
 
 	// The function that generated AOT code expects a script call to reach. Virtual
 	// and interface calls return null when no single implementation can be expected
@@ -529,7 +546,7 @@ public:
 
 	// Returns true if the registered function is one of the indexers, which are
 	// compiled in place, and how
-	static bool FindIndexer(asCScriptEngine *engine, int funcId, const std::map<asFUNCTION_t, SJITIndexer> *indexers, SJITIndexerCall &call);
+	static bool FindIndexer(asCScriptEngine *engine, int funcId, const TJITContainerMethods *indexers, SJITIndexerCall &call);
 
 	// Returns true if the function or one inlined into it calls something that may
 	// see the VM registers, or releases objects, where the frames of the calls that
@@ -591,7 +608,7 @@ protected:
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
 	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
-	void FindIndexers(const std::map<asFUNCTION_t, SJITIndexer> *indexers);
+	void FindIndexers(const TJITContainerMethods *indexers);
 	void AnalyseBorrows(bool borrowCalls = false);
 	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
 	void ClearBorrows();

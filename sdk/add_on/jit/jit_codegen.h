@@ -189,6 +189,7 @@ protected:
 	bool EmitCall(asUINT idx);
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	void EmitIndexer(asUINT idx);
+	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;

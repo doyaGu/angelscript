@@ -1074,15 +1074,30 @@ void CJITCppGen::EmitReload(const char *indent)
 		Emit("%s%s", indent, m_reload.c_str());
 }
 
-// Loads the address of the element instead of calling the indexer, see
-// CJITByteCode::FindIndexer. The code returns to the VM for a null object or buffer
-// and an index out of range, and the VM calls the method, which raises the
-// exception. The variables are only stored then, like the JIT does, as the call
+// Loads the address of the element instead of calling the indexer, or the number
+// of elements for a length query, see CJITByteCode::FindIndexer. The code returns
+// to the VM for a null object or buffer and an index out of range, and the VM calls
+// the method, which raises the exception. The variables are only stored then, like the JIT does, as the call
 // isn't a sync point
 void CJITCppGen::EmitIndexer(asUINT idx)
 {
 	const SJITIndexerCall &indexer = *m_code.GetIndexer(idx);
 	const int P = AS_PTR_SIZE;
+	if( indexer.op != JIT_CONTAINER_INDEX )
+	{
+		// A length query only reads the number of elements
+		Emit("{");
+		Emit("\tasPWORD o_ = AOT_S(pw, 0), b_ = o_ ? *(aot_pw*)(o_ + %d) : 0;", indexer.layout.bufferOffset);
+		Emit("\tif( b_ == 0 )");
+		Emit("\t\t%s", Bail().c_str());
+		if( indexer.op == JIT_CONTAINER_LENGTH )
+			Emit("\tAOT_SETVR(asDWORD, *(aot_u32*)(b_ + %d));", indexer.layout.lengthOffset);
+		else
+			Emit("\tAOT_SETVR(asBYTE, *(aot_u32*)(b_ + %d) == 0);", indexer.layout.lengthOffset);
+		Emit("\tsp += %d;", P);
+		Emit("}");
+		return;
+	}
 	Emit("{");
 	Emit("\tasPWORD o_ = AOT_S(pw, 0), b_ = o_ ? *(aot_pw*)(o_ + %d) : 0;", indexer.layout.bufferOffset);
 	Emit("\tasDWORD i_ = AOT_S(u32, %d);", P);

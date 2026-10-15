@@ -1384,6 +1384,11 @@ void CJITCodeGen::EmitIndexer(asUINT idx)
 {
 	const SJITIndexerCall &indexer = *m_code->GetIndexer(idx);
 	Label bail = BailLabel(idx);
+	if( indexer.op != JIT_CONTAINER_INDEX )
+	{
+		EmitLengthQuery(idx, indexer);
+		return;
+	}
 	Gp obj   = m_uc.new_gp_ptr();
 	Gp index = m_uc.new_gp_ptr();
 	Gp buf   = m_uc.new_gp_ptr();
@@ -1408,6 +1413,33 @@ void CJITCodeGen::EmitIndexer(asUINT idx)
 		SetVRAddr(idx, mem_ptr(elem));
 	else if( m_code->IsVRLiveAfter(idx) )
 		StoreVRPtr(elem);
+}
+
+// A length query pops the object and sets the value register to the number of
+// elements, or to whether there are none, like the method returns them. A null
+// object or buffer returns to the VM, which calls the method
+void CJITCodeGen::EmitLengthQuery(asUINT idx, const SJITIndexerCall &query)
+{
+	Label bail = BailLabel(idx);
+	Gp obj   = m_uc.new_gp_ptr();
+	Gp buf   = m_uc.new_gp_ptr();
+	Gp count = m_uc.new_gp32();
+	m_uc.load(obj, Stack(0));
+	m_uc.j(bail, test_z(obj));
+	m_uc.load(buf, Addr(obj, query.layout.bufferOffset));
+	m_uc.j(bail, test_z(buf));
+	PopStack(AS_PTR_SIZE * 4);
+	if( !m_code->IsVRLiveAfter(idx) )
+		return;
+	m_uc.load_u32(count, Addr(buf, query.layout.lengthOffset));
+	if( query.op == JIT_CONTAINER_IS_EMPTY )
+	{
+		Gp empty = m_uc.new_gp32();
+		m_uc.select(empty, Imm(1), Imm(0), test_z(count));
+		StoreVR32(empty);
+	}
+	else
+		StoreVR32(count);
 }
 
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)

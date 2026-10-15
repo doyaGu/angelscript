@@ -5040,12 +5040,14 @@ static bool TestSuspendChecks()
 namespace Indexers
 {
 
-// A container of primitives laid out differently from CScriptArray, whose opIndex
-// counts its calls, which the indexers compiled in place don't make. get isn't
-// added as an indexer, and at takes an int, which the indexers can't
+// A container of primitives laid out differently from CScriptArray, whose opIndex,
+// length, and isEmpty count their calls, which the indexers and length queries
+// compiled in place don't make. get isn't added as an indexer, at takes an int,
+// which the indexers can't, and size isn't added as a length query
 static int g_calls = 0;
 static int g_atInts = 0;
 static int g_gets = 0;
+static int g_sizes = 0;
 
 struct SBuffer
 {
@@ -5085,6 +5087,10 @@ struct CBox
 	// Counted apart so that the linker can't fold it with Get, which has the same code,
 	// as the indexers are found by the address of the function
 	void *AtInt(int index) { g_atInts++; return At(asUINT(index)); }
+	asUINT Length() const { g_calls++; return buf ? buf->length : 0; }
+	bool IsEmpty() const { g_calls++; return buf == 0 || buf->length == 0; }
+	// Counted apart from Length, as the linker folds the functions with the same code
+	asUINT Size() const { g_sizes++; return buf ? buf->length : 0; }
 };
 
 static bool TemplateCallback(asITypeInfo *ti, bool &dontGC)
@@ -5119,6 +5125,9 @@ static void Register(asIScriptEngine *engine)
 	r = engine->RegisterObjectMethod("box<T>", "const T &opIndex(uint) const", asMETHOD(CBox, At), asCALL_THISCALL); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("box<T>", "T &get(uint)", asMETHOD(CBox, Get), asCALL_THISCALL); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("box<T>", "T &at(int)", asMETHOD(CBox, AtInt), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "uint length() const", asMETHOD(CBox, Length), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "bool isEmpty() const", asMETHOD(CBox, IsEmpty), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("box<T>", "uint size() const", asMETHOD(CBox, Size), asCALL_THISCALL); assert( r >= 0 );
 	(void)r;
 }
 
@@ -5139,6 +5148,7 @@ static const char *script =
 	"  array<Obj@> h = {Obj(5), null}; @h[1] = h[0]; h[1].v += 1; s += h[0].v;        \n"
 	"  array<Obj> o = {Obj(3), Obj(4)}; o[1].v *= 10; s += o[0].v + o[1].v;           \n"
 	"  array<array<int>> m = {{1, 2}, {3, 4}}; m[1][0] = 9; s += m[1][0] * m[0][1];   \n"
+	"  array<int> z; s += int(z.length()) * 3 + (z.isEmpty() ? 7 : 0) + (a.isEmpty() ? 100 : 0) + int(m[1].length()) * 11; \n"
 	"  return s;                                                                      \n"
 	"}                                                                                \n"
 	"int caught() {                                                                   \n"
@@ -5172,7 +5182,16 @@ static const char *script =
 	"  return s;                                                                      \n"
 	"}                                                                                \n"
 	"int boxOut(uint i) { box<int> a(4); int s = 1; s += a[i]; return s; }            \n"
-	"int boxEmpty() { box<int> a(0); return a[0]; }                                   \n";
+	"int boxEmpty() { box<int> a(0); return a[0]; }                                   \n"
+	"int lengths() {                                                                  \n"
+	"  box<int> a(4); box<int> z(0);                                                  \n"
+	"  int s = int(a.length()) * 10 + int(z.length()) + (a.isEmpty() ? 100 : 0) + (z.isEmpty() ? 1000 : 0); \n"
+	"  for( uint i = 0; i < a.length(); i++ ) s += int(i);                            \n"
+	"  bool e = a.isEmpty(); if( !e ) s += 10000;                                     \n"
+	"  return s + int(a.size()) * 100000;                                             \n"
+	"}                                                                                \n"
+	"int nullLength() { box<int>@ b; int s = 3; s += int(b.length()); return s; }     \n"
+	"int nullEmpty() { array<int>@ a; int s = 4; if( a.isEmpty() ) s += 1; return s; } \n";
 
 // The results, the exceptions, and the variables s where they were raised, with the
 // calls of the opIndex of box made by each function
@@ -5192,7 +5211,9 @@ static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, std::vector<i
 		layout.bufferOffset = int(offsetof(CBox, buf));
 		layout.lengthOffset = int(offsetof(SBuffer, length));
 		layout.dataOffset   = int(offsetof(SBuffer, data));
-		if( JIT_AddScriptArrayIndexers(jit) < 0 || jit->AddIndexer(at, layout) < 0 || jit->AddIndexer(asMETHOD(CBox, AtInt), layout) < 0 )
+		if( JIT_AddScriptArrayIndexers(jit) < 0 || jit->AddIndexer(at, layout) < 0 || jit->AddIndexer(asMETHOD(CBox, AtInt), layout) < 0 ||
+		    jit->AddLengthQuery(asMETHOD(CBox, Length), layout, CJITCompiler::JIT_QUERY_LENGTH) < 0 ||
+		    jit->AddLengthQuery(asMETHOD(CBox, IsEmpty), layout, CJITCompiler::JIT_QUERY_IS_EMPTY) < 0 )
 			TEST_FAILED;
 	}
 
@@ -5204,8 +5225,9 @@ static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, std::vector<i
 		return "";
 	}
 
-	const char *decls[] = { "int arrays()", "int caught()", "int uncaught()", "int nullArray()", "int divide()", "int boxes()", "int boxOut(uint)", "int boxOut(uint)", "int boxEmpty()" };
-	asUINT args[] = { 0, 0, 0, 0, 0, 0, 4, 0xFFFFFFFF, 0 };
+	const char *decls[] = { "int arrays()", "int caught()", "int uncaught()", "int nullArray()", "int divide()", "int boxes()", "int boxOut(uint)", "int boxOut(uint)", "int boxEmpty()",
+	                        "int lengths()", "int nullLength()", "int nullEmpty()" };
+	asUINT args[] = { 0, 0, 0, 0, 0, 0, 4, 0xFFFFFFFF, 0, 0, 0, 0 };
 	std::stringstream result;
 	asIScriptContext *ctx = engine->CreateContext();
 	for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
@@ -5240,9 +5262,9 @@ static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, std::vector<i
 
 } // namespace Indexers
 
-// The indexers compiled in place must give the same results as calling them, also
-// where they leave the calls to the VM, which raises the exceptions, with the
-// variables cached in registers stored
+// The indexers and length queries compiled in place must give the same results as
+// calling them, also where they leave the calls to the VM, which raises the
+// exceptions, with the variables cached in registers stored
 static bool TestIndexers()
 {
 	bool fail = false;
@@ -5267,8 +5289,9 @@ static bool TestIndexers()
 		TEST_FAILED;
 	}
 
-	// Only get and at are called, and the method for the indices out of range
-	int expectedCalls[] = { 0, 0, 0, 0, 0, 2, 1, 1, 1 };
+	// Only get and at are called, and the methods for the indices out of range and
+	// the null buffer
+	int expectedCalls[] = { 0, 0, 0, 0, 0, 2, 1, 1, 1, 2, 0, 0 };
 	for( asUINT n = 0; n < jitCalls.size() && n < sizeof(expectedCalls) / sizeof(expectedCalls[0]); n++ )
 		if( jitCalls[n] != expectedCalls[n] )
 		{

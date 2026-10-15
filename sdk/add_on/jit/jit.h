@@ -29,8 +29,9 @@ struct SJITStatistics
 	asUINT functionsForLineCallbacks; // compiled functions compiled again with the checks at every statement, see JIT_CHECK_EVERY_STATEMENT
 };
 
-// Where a container keeps its elements, see CJITCompiler::AddIndexer. The object
-// points to a buffer, which holds the number of elements and then the elements
+// Where a container keeps its elements, see CJITCompiler::AddIndexer and
+// AddLengthQuery. The object points to a buffer, which holds the number of elements
+// and then the elements
 struct SJITIndexer
 {
 	int bufferOffset; // offset in the object of the pointer to the buffer, which may be null
@@ -221,6 +222,23 @@ public:
 	// called before any function is compiled. Returns a negative value on failure
 	int AddIndexer(const asSFuncPtr &method, const SJITIndexer &indexer);
 
+	// Length queries. The registered methods that return the number of elements of a
+	// container as a uint, or whether it has none as a bool, like the length and
+	// isEmpty methods of the arrays, are compiled in place as the load of the number
+	// of elements, with the layout of the container, instead of being called. The
+	// dataOffset of the layout isn't used. The methods must be registered with
+	// asCALL_THISCALL and take no arguments. The method is still called for a null
+	// buffer. JIT_AddScriptArrayIndexers adds the length and isEmpty methods of
+	// CScriptArray. The code generated ahead of time with length queries is only
+	// used with the same ones. Must be called before any function is compiled.
+	// Returns a negative value on failure
+	enum ELengthQuery
+	{
+		JIT_QUERY_LENGTH,   // the method returns the number of elements
+		JIT_QUERY_IS_EMPTY  // the method returns whether the number of elements is 0
+	};
+	int AddLengthQuery(const asSFuncPtr &method, const SJITIndexer &container, ELengthQuery query);
+
 	SJITStatistics GetStatistics() const;
 
 	// Faster versions of asIScriptContext::Prepare and Execute, for the application
@@ -346,7 +364,8 @@ protected:
 };
 
 // Adds the indexers of the opIndex methods of CScriptArray to the compiler, see
-// CJITCompiler::AddIndexer. The layout of the arrays is found by creating some in
+// CJITCompiler::AddIndexer, and the length and isEmpty methods as length queries,
+// see CJITCompiler::AddLengthQuery. The layout of the arrays is found by creating some in
 // an engine of its own, which doesn't need the add-on to be changed. The function
 // is in jit_scriptarray.cpp, which links with the add-on. Must be called before
 // any function is compiled. Returns a negative value on failure
