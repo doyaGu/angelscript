@@ -99,14 +99,23 @@ protected:
 		Vec  vec;
 	};
 
-	// A 32bit value or a pointer pushed on the static stack, which is also in a
-	// register or an immediate, see EmitDirectSystemCall and EmitInlineCall
+	// A value pushed on the static stack, which is also in a register or an
+	// immediate, see EmitDirectSystemCall, EmitInlineCall, and EmitInPlaceConstruct
 	struct SPushedValue
 	{
-		Gp   gp;
-		int  imm;
-		bool isImm;
-		bool ptr;   // a pointer, in gp
+		enum EKind
+		{
+			IMM32, // a 32bit constant, in imm
+			GP32,  // a 32bit value in gp
+			PTR,   // a pointer in gp
+			F32,   // a float in vec, and its bits in gp
+			F64    // a double in vec
+		};
+		EKind kind;
+		Gp    gp;
+		Vec   vec;
+		int   imm;
+		int   bit;  // the bit of the variable whose register holds the value, or -1, see CJITByteCode::GetCacheBit
 	};
 
 	// The code generation state of a function: the one being compiled, which is
@@ -222,6 +231,9 @@ protected:
 	std::map<std::pair<int, asUINT>, Gp> m_forwardedObjects; // by frame and the instruction reading them, see ForwardedObject
 	Gp   ForwardedObject(int frame, asUINT reader);
 	bool FindPushedArg(int offset, SPushedValue &value) const;
+	void NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var = 0);
+	bool MovePushed32(const Gp &dst, const SPushedValue &value);
+	bool MovePushedF32(const Vec &dst, const SPushedValue &value);
 	void ReloadParamSlots(const JITSlotMask &mask);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
@@ -293,6 +305,7 @@ protected:
 	// functions return the register to compute the result into, which must be
 	// passed to Commit* afterwards to store it if the variable isn't cached
 	SCachedSlot *FindCached(int offset);
+	bool IsCachedAs(int offset, int kind) { SCachedSlot *c = FindCached(offset); return c && c->kind == kind; }
 	Gp   Load32(int offset);
 	Gp   Load64(int offset);
 	Gp   LoadPtr(int offset);

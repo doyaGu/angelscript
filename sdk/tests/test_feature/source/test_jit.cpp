@@ -1151,9 +1151,24 @@ static bool TestDirectCalls()
 		// same arguments
 		"  int x = 1, y = 1;                                           \n"
 		"  assert( Cdecl(x += 1, x) == sc(y += 1, y) );                \n"
+		// The floats and doubles are passed from their vector registers, also
+		// past the computations of the other arguments, and copied between them
+		"  float f = 1.5f, g = 0.25f;                                  \n"
+		"  float h = f;                                                \n"
+		"  double dd = 2, de = dd;                                     \n"
+		"  assert( obj.Floats(f, g, h, f + g, f * 2, g, h, f, g + 1, h) == sf(f, g, h, f + g, f * 2, g, h, f, g + 1, h) + 5 ); \n"
+		"  float k = 1, m = 1;                                         \n"
+		"  assert( obj.Floats(k += 1, k, k *= 2, k, k - 1, k, k, k, k, k) == sf(m += 1, m, m *= 2, m, m - 1, m, m, m, m, m) + 5 ); \n"
+		"  double p = 1, q = 1;                                        \n"
+		"  assert( obj.Doubles(dd, de, p += 1, p, dd + de, p, p, de, dd, p) == sd(dd, de, q += 1, q, dd + de, q, q, de, dd, q) + 5 ); \n"
+		"  assert( obj.Four(h, f, de, g) == h + f + de + g + 5 );       \n"
 		"  return s;                                                   \n"
 		"}                                                             \n"
-		"int sc(int a, int b) { return a * 10 + b; }                   \n";
+		"int sc(int a, int b) { return a * 10 + b; }                   \n"
+		"float sf(float f1, float f2, float f3, float f4, float f5, float f6, float f7, float f8, float f9, float f10) \n"
+		"{ return f1 + f2 * 2 + f3 * 3 + f4 * 4 + f5 * 5 + f6 * 6 + f7 * 7 + f8 * 8 + f9 * 9 + f10 * 10; } \n"
+		"double sd(double d1, double d2, double d3, double d4, double d5, double d6, double d7, double d8, double d9, double d10) \n"
+		"{ return d1 + d2 * 2 + d3 * 3 + d4 * 4 + d5 * 5 + d6 * 6 + d7 * 7 + d8 * 8 + d9 * 9 + d10 * 10; } \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("test", script);

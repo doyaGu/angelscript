@@ -481,6 +481,9 @@ public:
 	// Returns the bit of a register cached variable in the dirty masks, or -1
 	int  GetCacheBit(int offset) const;
 
+	// Returns the mask of the register cached variables that the instruction writes
+	JITSlotMask GetWrittenMask(asUINT instrIdx) const { JITSlotMask uses, defs; GetSlotMasks(m_instrs[instrIdx], uses, defs); return defs; }
+
 	// Returns true if the function is a method that reads its object pointer with
 	// asBC_LoadThisR and never modifies the variable, so that it can be held in a
 	// register

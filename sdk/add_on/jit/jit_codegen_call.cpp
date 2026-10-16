@@ -1697,6 +1697,10 @@ CJITCodeGen::Gp CJITCodeGen::ForwardedObject(int frame, asUINT reader)
 void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 {
 	const SJITConstructor *ctor = m_code->GetInPlaceConstructor(idx);
+	// The arguments pushed right before are taken from their registers, which spares
+	// the loads waiting for the stores
+	std::map<int, SPushedValue> pushed;
+	pushed.swap(m_pushedAtCall);
 	if( m_options.noScriptCalls )
 	{
 		Bail(idx);
@@ -1748,6 +1752,36 @@ void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 	{
 		const SJITMemberInit &member = ctor->members[n];
 		int offset = member.offset;
+		std::map<int, SPushedValue>::const_iterator arg = member.arg >= 0 && m_staticStack ? pushed.find(m_spOffset + member.arg * 4) : pushed.end();
+		if( arg != pushed.end() && member.size == 4 && arg->second.kind == SPushedValue::F32 )
+		{
+			m_uc.v_storeu32_f32(Addr(obj, offset), arg->second.vec);
+			continue;
+		}
+		if( arg != pushed.end() && member.size == 8 && arg->second.kind == SPushedValue::F64 )
+		{
+			m_uc.v_storeu64_f64(Addr(obj, offset), arg->second.vec);
+			continue;
+		}
+#ifdef AS_BIG_ENDIAN
+		// The first bytes in memory are the high ones
+		bool lowBytes = member.size == 4;
+#else
+		bool lowBytes = member.size <= 4;
+#endif
+		if( arg != pushed.end() && lowBytes && (arg->second.kind == SPushedValue::IMM32 || arg->second.kind == SPushedValue::GP32) )
+		{
+			// The member gets the first bytes of the value in memory, the low ones
+			Gp value = v.r32();
+			MovePushed32(value, arg->second);
+			if( member.size == 1 )
+				m_uc.store_u8(Addr(obj, offset), value);
+			else if( member.size == 2 )
+				m_uc.store_u16(Addr(obj, offset), value);
+			else
+				m_uc.store_u32(Addr(obj, offset), value);
+			continue;
+		}
 		if( member.arg >= 0 )
 		{
 			if( member.size == 1 )
@@ -2384,12 +2418,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				// The value pushed right before is taken from its register, which
 				// spares the load waiting for the store
 				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
-				if( pushed == m_pushed.end() || pushed->second.ptr )
+				if( pushed == m_pushed.end() || !MovePushed32(gpArgs[n], pushed->second) )
 					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
-				else if( pushed->second.isImm )
-					m_uc.mov(gpArgs[n], Imm(pushed->second.imm));
-				else
-					m_uc.mov(gpArgs[n], pushed->second.gp);
 			}
 			break;
 		case ARG_I64:
@@ -2466,7 +2496,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				m_uc.v_loadu32_f32(vecArgs[n], Addr(valueObjs[n], args[n].valueOffset));
 			}
 			else
-				m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));
+			{
+				// Like the int arguments above, also from the vector register of a float
+				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
+				if( pushed == m_pushed.end() || !MovePushedF32(vecArgs[n], pushed->second) )
+					m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));
+			}
 			break;
 		case ARG_F64:
 			vecArgs[n] = m_uc.new_vec128_f64x1();
@@ -2480,7 +2515,13 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 					m_uc.v_loadu64_f64(vecArgs[n], Addr(valueObjs[n], args[n].valueOffset));
 			}
 			else
-				m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
+			{
+				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
+				if( pushed != m_pushed.end() && pushed->second.kind == SPushedValue::F64 )
+					MoveVec(vecArgs[n], pushed->second.vec);
+				else
+					m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
+			}
 			break;
 		}
 	}

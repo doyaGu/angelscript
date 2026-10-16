@@ -317,6 +317,46 @@ static bool KeepsPushedValues(asEBCInstr op)
 	}
 }
 
+// The instructions that leave the values on the stack as they are, as they only read
+// and write the variables, the value register, the globals, and the memory that the
+// value register points to, which is never the stack
+static bool LeavesStackAlone(asEBCInstr op)
+{
+	switch( op )
+	{
+	case asBC_JitEntry:
+	case asBC_SUSPEND:
+	case asBC_SetV1:  case asBC_SetV2:  case asBC_SetV4:  case asBC_SetV8:
+	case asBC_CpyVtoV4: case asBC_CpyVtoV8: case asBC_CpyVtoR4: case asBC_CpyVtoR8:
+	case asBC_CpyRtoV4: case asBC_CpyRtoV8: case asBC_CpyVtoG4: case asBC_CpyGtoV4:
+	case asBC_LdGRdR4: case asBC_LDG: case asBC_LDV: case asBC_SetG4: case asBC_ClrHi:
+	case asBC_RDR1:  case asBC_RDR2:  case asBC_RDR4:  case asBC_RDR8:
+	case asBC_WRTV1: case asBC_WRTV2: case asBC_WRTV4: case asBC_WRTV8:
+	case asBC_LoadThisR: case asBC_LoadRObjR: case asBC_LoadVObjR:
+	case asBC_NEGi: case asBC_NEGf: case asBC_NEGd: case asBC_NEGi64:
+	case asBC_INCi8: case asBC_DECi8: case asBC_INCi16: case asBC_DECi16:
+	case asBC_INCi: case asBC_DECi: case asBC_INCi64: case asBC_DECi64:
+	case asBC_INCf: case asBC_DECf: case asBC_INCd: case asBC_DECd:
+	case asBC_IncVi: case asBC_DecVi: case asBC_BNOT: case asBC_BNOT64:
+	case asBC_BAND: case asBC_BOR: case asBC_BXOR: case asBC_BSLL: case asBC_BSRL: case asBC_BSRA:
+	case asBC_BAND64: case asBC_BOR64: case asBC_BXOR64: case asBC_BSLL64: case asBC_BSRL64: case asBC_BSRA64:
+	case asBC_ADDi: case asBC_SUBi: case asBC_MULi: case asBC_ADDf: case asBC_SUBf: case asBC_MULf:
+	case asBC_ADDd: case asBC_SUBd: case asBC_MULd: case asBC_ADDi64: case asBC_SUBi64: case asBC_MULi64:
+	case asBC_ADDIi: case asBC_SUBIi: case asBC_MULIi: case asBC_ADDIf: case asBC_SUBIf: case asBC_MULIf:
+	case asBC_CMPi: case asBC_CMPu: case asBC_CMPf: case asBC_CMPd: case asBC_CMPi64: case asBC_CMPu64:
+	case asBC_CMPIi: case asBC_CMPIu: case asBC_CMPIf:
+	case asBC_TZ: case asBC_TNZ: case asBC_TS: case asBC_TNS: case asBC_TP: case asBC_TNP:
+	case asBC_iTOb: case asBC_iTOw: case asBC_sbTOi: case asBC_swTOi: case asBC_ubTOi: case asBC_uwTOi:
+	case asBC_iTOf: case asBC_fTOi: case asBC_uTOf: case asBC_fTOu: case asBC_dTOi: case asBC_dTOu:
+	case asBC_dTOf: case asBC_iTOd: case asBC_uTOd: case asBC_fTOd:
+	case asBC_i64TOi: case asBC_uTOi64: case asBC_iTOi64: case asBC_fTOi64: case asBC_dTOi64:
+	case asBC_fTOu64: case asBC_dTOu64: case asBC_i64TOf: case asBC_u64TOf: case asBC_i64TOd: case asBC_u64TOd:
+		return true;
+	default:
+		return false;
+	}
+}
+
 void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 {
 	// The heads of the innermost loops, i.e. the targets of backward branches with no
@@ -429,12 +469,28 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			m_uc.bind(m_labels[idx]);
 		if( m_staticStack )
 			m_spOffset = StackOffset(idx);
-		// The registers of the values pushed for a call stay valid while only pushes
-		// follow, which don't modify the variables
-		if( instrs[idx].flags & JIT_INSTR_INLINE )
-			m_pushedAtCall = (instrs[idx].flags & JIT_INSTR_BLOCK_START) ? std::map<int, SPushedValue>() : m_pushed;
-		if( (instrs[idx].flags & JIT_INSTR_BLOCK_START) || !KeepsPushedValues(instrs[idx].op) )
+		// The registers of the values pushed for a call stay valid until something else
+		// than a push or an instruction that leaves the stack alone follows, which
+		// includes everything that pops values
+		if( instrs[idx].flags & JIT_INSTR_BLOCK_START )
 			m_pushed.clear();
+		if( instrs[idx].flags & (JIT_INSTR_INLINE | JIT_INSTR_CONSTRUCT) )
+			m_pushedAtCall = m_pushed;
+		if( !KeepsPushedValues(instrs[idx].op) && !LeavesStackAlone(instrs[idx].op) )
+			m_pushed.clear();
+		else if( !m_pushed.empty() )
+		{
+			// The register of a variable that the instruction writes no longer holds the
+			// value pushed
+			JITSlotMask written = m_code->GetWrittenMask(idx);
+			for( std::map<int, SPushedValue>::iterator it = m_pushed.begin(); it != m_pushed.end() && written; )
+			{
+				if( it->second.bit >= 0 && written.Test(it->second.bit) )
+					m_pushed.erase(it++);
+				else
+					++it;
+			}
+		}
 
 		asUINT consumed = 1;
 		const SJITInstr &instr = instrs[idx];
@@ -1898,6 +1954,51 @@ bool CJITCodeGen::FindPushedArg(int offset, SPushedValue &value) const
 	return true;
 }
 
+// Notes the value just pushed on the static stack, see SPushedValue. The register may
+// be that of the variable pushed, which is noted, so that the value is forgotten
+// where the variable is written, see EmitBody
+void CJITCodeGen::NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var)
+{
+	if( !m_staticStack )
+		return;
+	SPushedValue &pushed = m_pushed[m_spOffset];
+	pushed.kind = kind;
+	pushed.gp   = gp;
+	pushed.vec  = vec;
+	pushed.imm  = imm;
+	pushed.bit  = kind != SPushedValue::IMM32 && FindCached(var) ? m_code->GetCacheBit(var) : -1;
+}
+
+// Moves a 32bit value pushed into the integer register, or returns false
+bool CJITCodeGen::MovePushed32(const Gp &dst, const SPushedValue &value)
+{
+	switch( value.kind )
+	{
+	case SPushedValue::IMM32: m_uc.mov(dst, Imm(value.imm)); return true;
+	case SPushedValue::GP32:  m_uc.mov(dst, value.gp.r32()); return true;
+	case SPushedValue::F32:   m_uc.mov(dst, value.gp.r32()); return true;
+	default: return false;
+	}
+}
+
+// Moves a 32bit value pushed into the vector register as a float, or returns false
+bool CJITCodeGen::MovePushedF32(const Vec &dst, const SPushedValue &value)
+{
+	switch( value.kind )
+	{
+	case SPushedValue::IMM32:
+		{
+			Gp bits = m_uc.new_gp32();
+			m_uc.mov(bits, Imm(value.imm));
+			m_uc.s_mov_u32(dst, bits);
+		}
+		return true;
+	case SPushedValue::GP32: m_uc.s_mov_u32(dst, value.gp.r32()); return true;
+	case SPushedValue::F32:  MoveVec(dst, value.vec); return true;
+	default: return false;
+	}
+}
+
 // Loads the cached slots in the mask when an inlined function is entered, the
 // parameters from the registers that the caller has pushed them from, which spares
 // the loads waiting for the stores
@@ -1911,22 +2012,14 @@ void CJITCodeGen::ReloadParamSlots(const JITSlotMask &mask)
 			continue;
 		SPushedValue arg;
 		bool pushed = FindPushedArg(c.offset, arg);
-		if( pushed && c.kind == JIT_SLOT_PTR && arg.ptr )
+		if( pushed && c.kind == JIT_SLOT_PTR && arg.kind == SPushedValue::PTR )
 			m_uc.mov(c.gp, arg.gp);
-		else if( pushed && c.kind == JIT_SLOT_I32 && !arg.ptr )
-		{
-			if( arg.isImm )
-				m_uc.mov(c.gp, Imm(arg.imm));
-			else
-				m_uc.mov(c.gp, arg.gp.r32());
-		}
-		else if( pushed && c.kind == JIT_SLOT_F32 && !arg.ptr )
-		{
-			Gp bits = arg.isImm ? m_uc.new_gp32() : arg.gp.r32();
-			if( arg.isImm )
-				m_uc.mov(bits, Imm(arg.imm));
-			m_uc.s_mov_u32(c.vec, bits);
-		}
+		else if( pushed && c.kind == JIT_SLOT_I32 && MovePushed32(c.gp, arg) )
+			;
+		else if( pushed && c.kind == JIT_SLOT_F32 && MovePushedF32(c.vec, arg) )
+			;
+		else if( pushed && c.kind == JIT_SLOT_F64 && arg.kind == SPushedValue::F64 )
+			MoveVec(c.vec, arg.vec);
 		else
 			ReloadCachedSlot(c.offset);
 	}
@@ -2186,27 +2279,22 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 		StoreImm32(Stack(0), int(asBC_DWORDARG(bc)));
 		if( m_staticStack )
 		{
-			SPushedValue &pushed = m_pushed[m_spOffset];
-			pushed.gp    = Gp();
-			pushed.imm   = int(asBC_DWORDARG(bc));
-			pushed.isImm = true;
-			pushed.ptr   = false;
+			NotePushed(SPushedValue::IMM32, Gp(), Vec(), int(asBC_DWORDARG(bc)));
 		}
 		break;
 
 	case asBC_PshV4:
 		{
+			// The integer register is stored, as the stack is read as integers mostly,
+			// and the vector register of a float is noted too, for the float arguments
 			Gp t = Load32(a0);
 			PushStack(4);
 			m_uc.store_u32(Stack(0), t);
-			if( m_staticStack )
-			{
-				SPushedValue &pushed = m_pushed[m_spOffset];
-				pushed.gp    = t;
-				pushed.imm   = 0;
-				pushed.isImm = false;
-				pushed.ptr   = false;
-			}
+			SCachedSlot *c = FindCached(a0);
+			if( c && c->kind == JIT_SLOT_F32 )
+				NotePushed(SPushedValue::F32, t, c->vec, 0, a0);
+			else
+				NotePushed(SPushedValue::GP32, t, Vec(), 0, a0);
 		}
 		break;
 
@@ -2217,7 +2305,10 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			if( c && c->kind == JIT_SLOT_I64 )
 				m_uc.store_u64(Stack(0), c->gp);
 			else if( c && c->kind == JIT_SLOT_F64 )
+			{
 				m_uc.v_storeu64_f64(Stack(0), c->vec);
+				NotePushed(SPushedValue::F64, Gp(), c->vec, 0, a0);
+			}
 			else
 				Copy64(Stack(0), Var(a0));
 		}
@@ -2280,14 +2371,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Gp t = LoadPtr(a0);
 			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
-			if( m_staticStack )
-			{
-				SPushedValue &pushed = m_pushed[m_spOffset];
-				pushed.gp    = t;
-				pushed.imm   = 0;
-				pushed.isImm = false;
-				pushed.ptr   = true;
-			}
+			NotePushed(SPushedValue::PTR, t, Vec(), 0, a0);
 		}
 		break;
 
@@ -2536,11 +2620,18 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		break;
 
 	case asBC_CpyVtoV4:
-		Commit32(a0, Load32(a1));
+		// A float held in a vector register is copied there, not through an
+		// integer register
+		if( IsCachedAs(a0, JIT_SLOT_F32) || IsCachedAs(a1, JIT_SLOT_F32) )
+			CommitF32(a0, LoadF32(a1));
+		else
+			Commit32(a0, Load32(a1));
 		break;
 
 	case asBC_CpyVtoV8:
-		if( Is64Bit() )
+		if( IsCachedAs(a0, JIT_SLOT_F64) || IsCachedAs(a1, JIT_SLOT_F64) )
+			CommitF64(a0, LoadF64(a1));
+		else if( Is64Bit() )
 			Commit64(a0, Load64(a1));
 		else
 			CommitF64(a0, LoadF64(a1));
@@ -2782,7 +2873,7 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			// its register, unless the method modifies the variable
 			SPushedValue self;
 			Gp t;
-			if( m_code->IsThisConstant() && FindPushedArg(0, self) && self.ptr )
+			if( m_code->IsThisConstant() && FindPushedArg(0, self) && self.kind == SPushedValue::PTR )
 				t = self.gp;
 			else
 				t = LoadPtr(0);
