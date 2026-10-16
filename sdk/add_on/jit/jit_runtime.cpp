@@ -1489,7 +1489,7 @@ int JIT_Execute(asIScriptContext *context, const asIJITCompilerAbstract *compile
 		func = func->funcForDelegate;
 	}
 	else
-		obj = *(asCScriptObject**)regs->stackFramePointer;
+		obj = func->objectType ? *(asCScriptObject**)regs->stackFramePointer : 0;
 	if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 		func = FindMethod(func, obj);
 	if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData->jitFunction == 0 )
