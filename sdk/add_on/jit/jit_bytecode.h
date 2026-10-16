@@ -431,6 +431,7 @@ struct SJITConstructor
 	asCObjectType              *type;
 	asUINT                      args;    // dwords of the arguments, which the constructor pops
 	asUINT                      stackNeeded; // dwords that the frame of the constructor needs below its frame pointer
+	int                         destVar; // the variable whose address asBC_PSF has pushed for the object, or 0
 	std::vector<SJITMemberInit> members; // in the order that they are set
 };
 
@@ -622,6 +623,14 @@ public:
 	// place, see FindInPlaceConstructors
 	const SJITConstructor *GetInPlaceConstructor(asUINT instrIdx) const;
 
+	// The instruction before the asBC_STOREOBJ or asBC_LOADOBJ that has just stored
+	// the object it reads, so that the object can be passed in a register, or -1, see
+	// FindForwardedObjects
+	int GetObjectSource(asUINT instrIdx) const;
+	// The instruction that reads the object passed in a register past the asBC_JitEntry,
+	// whose entry stub loads the register, or -1
+	int GetObjectReaderAfter(asUINT entryIdx) const;
+
 	// The variables of the function whose objects can be kept in its frame, and their
 	// classes, see FindFrameObjects
 	const std::map<int, asCObjectType*> &GetFrameObjects() const { return m_frameObjects; }
@@ -661,6 +670,8 @@ protected:
 	void FindLentRefs();
 	void FindInPlaceAssigns();
 	void FindInPlaceConstructors();
+	void FindForwardedObjects();
+	bool ReturnsLoadedObject() const;
 	void FindFrameObjects();
 	bool FindFreshReturn(asCObjectType *type);
 	bool IsThisSafe(asCObjectType *type) const;
@@ -729,6 +740,8 @@ protected:
 	std::map<asUINT, asUINT> m_lentFrees; // by instruction, see GetLentFree
 	std::map<asUINT, asCObjectType*> m_assigns; // by instruction, see GetInPlaceAssign
 	std::map<asUINT, SJITConstructor> m_constructors; // by instruction, see GetInPlaceConstructor
+	std::map<asUINT, asUINT> m_objectSources;  // by the instruction reading the object, see GetObjectSource
+	std::map<asUINT, asUINT> m_objectReaders;  // by the asBC_JitEntry in between, see GetObjectReaderAfter
 	std::map<int, asCObjectType*> m_frameObjects; // see GetFrameObjects
 	std::map<asUINT, int>         m_freshVars;    // by instruction, see GetFreshVar
 	int                           m_freshSource;  // see GetFreshSource

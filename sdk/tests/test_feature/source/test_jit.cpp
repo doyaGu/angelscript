@@ -3785,6 +3785,172 @@ static bool TestInPlaceConstructors()
 	return fail;
 }
 
+// The objects returned by the inlined functions, and those created by the
+// constructors compiled in place, are passed in registers as well, and so are the
+// values pushed for the parameters of the inlined functions, see
+// CJITByteCode::FindForwardedObjects and CJITCodeGen::ReloadParamSlots. The results
+// must be those of the VM, also where the VM goes on with the inlined functions
+// after a suspension or an exception and returns to the function, which loads the
+// object returned, and with a line callback
+namespace ForwardedValues
+{
+	static int lines = 0;
+	static void LineCallback(asIScriptContext *ctx, void *)
+	{
+		if( ++lines % 5 == 0 )
+			ctx->Suspend();
+	}
+	static void Suspend() { asGetActiveContext()->Suspend(); }
+
+	static const char *script =
+		"class V                                                                  \n"
+		"{                                                                        \n"
+		"  float x, y;                                                            \n"
+		"  V() {}                                                                 \n"
+		"  V(float a, float b) { x = a; y = b; }                                  \n"
+		"  V opAdd(const V &in o) const { return V(x + o.x, y + o.y); }           \n"
+		"  V opMul(float s) const { return V(x * s, y * s); }                     \n"
+		"  V scaled(int k) const { k += 1; return V(x * k, y * k); }              \n"
+		"  V paused(int k) const { if( k % 3 == 0 ) suspend(); return V(x + k, y - k); } \n"
+		"  V either(bool f) const { if( f ) return V(x, 0); return V(0, y); }     \n"
+		"}                                                                        \n"
+		"V@ g_null;                                                               \n"
+		"float sum(float a, int b, float c) { b *= 2; return a + b + c; }         \n"
+		"float forwards(int n)                                                    \n"
+		"{                                                                        \n"
+		"  V a(1, 2), b(0.5f, 0.25f);                                             \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    a = a + b * 0.5f;                                                    \n"
+		"    V c = a.scaled(i);                                                   \n"
+		"    V d = c.either(i % 2 == 0);                                          \n"
+		"    s += c.x + d.y + d.x + sum(s, i, 0.25f);                             \n"
+		"  }                                                                      \n"
+		"  return a.x + a.y + s;                                                  \n"
+		"}                                                                        \n"
+		"float suspended(int n)                                                   \n"
+		"{                                                                        \n"
+		"  V a(1, 2);                                                             \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < n; i++ )                                          \n"
+		"  {                                                                      \n"
+		"    V p = a.paused(i);                                                   \n"
+		"    s += p.x * 10 + p.y;                                                 \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"float nulls(int n)                                                       \n"
+		"{                                                                        \n"
+		"  V a(1, 2);                                                             \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    V@ h = i == 2 ? g_null : @a;                                         \n"
+		"    try { V p = h.scaled(i); s += p.x; } catch { s += 100; }             \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	// The results of the functions, without and with the line callback
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *calls[] = { "float forwards(int)", "float suspended(int)", "float nulls(int)" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 4; pass++ )
+			for( asUINT n = 0; n < sizeof(calls) / sizeof(calls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(calls[n]));
+				ctx->SetArgDWord(0, 7);
+				lines = 0;
+				if( pass >= 2 )
+					ctx->SetLineCallback(asFUNCTION(LineCallback), 0, asCALL_CDECL);
+				int r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 1000 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				ctx->ClearLineCallback();
+				s << calls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << ctx->GetReturnFloat();
+				else
+					s << "result " << r;
+				s << ", " << lines << " lines, " << suspensions << " suspensions\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestForwardedValues()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = ForwardedValues::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("float suspended(int): ") == std::string::npos || expected.find("result") != std::string::npos ||
+	    expected.find(" 0 lines, 3 suspensions") == std::string::npos )
+	{
+		PRINTF("forwarded values:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows which objects are passed
+	// in registers. The line callback must be called like by the VM
+	FILE *log = tmpfile();
+	CJITCompiler jit((envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND)) | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "float ");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = ForwardedValues::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected )
+	{
+		PRINTF("forwarded values:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log )
+	{
+		std::string text;
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+		if( !(envFlags & (CJITCompiler::JIT_AOT_ONLY | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_NO_SCRIPT_CALLS)) && text.find("; object in a register") == std::string::npos )
+		{
+			PRINTF("forwarded values: no object is passed in a register\n");
+			TEST_FAILED;
+		}
+	}
+	return fail;
+}
+
 // The objects of the plain script classes that never leave the function are kept in
 // the memory of its frame, see CJITByteCode::FindFrameObjects. The results must be
 // those of the VM, also where the VM goes on with the objects after an exception or a
@@ -6476,6 +6642,7 @@ bool Test()
 	fail = TestLentRefs() || fail;
 	fail = TestInPlaceAssigns() || fail;
 	fail = TestInPlaceConstructors() || fail;
+	fail = TestForwardedValues() || fail;
 	fail = TestFrameObjects() || fail;
 	fail = TestGenericCalls() || fail;
 	fail = TestCodeSizeStatistics() || fail;

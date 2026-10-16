@@ -400,6 +400,18 @@ const SJITConstructor *CJITByteCode::GetInPlaceConstructor(asUINT instrIdx) cons
 	return it == m_constructors.end() ? 0 : &it->second;
 }
 
+int CJITByteCode::GetObjectSource(asUINT instrIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_objectSources.find(instrIdx);
+	return it == m_objectSources.end() ? -1 : int(it->second);
+}
+
+int CJITByteCode::GetObjectReaderAfter(asUINT entryIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_objectReaders.find(entryIdx);
+	return it == m_objectReaders.end() ? -1 : int(it->second);
+}
+
 int CJITByteCode::GetFreshVar(asUINT instrIdx) const
 {
 	std::map<asUINT, int>::const_iterator it = m_freshVars.find(instrIdx);
@@ -840,6 +852,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindIndexers(inlining.indexers);
 				callee->FindInPlaceAssigns();
 				callee->FindInPlaceConstructors();
+				callee->FindForwardedObjects();
 				callee->AnalyseBorrows(inlining.borrowCalls, inlining.classes, inlining.profile);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
@@ -971,6 +984,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	FindIndexers(inlining ? inlining->indexers : 0);
 	FindInPlaceAssigns();
 	FindInPlaceConstructors();
+	FindForwardedObjects();
 	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
 	m_frameObjects.clear();
 	m_freshVars.clear();
@@ -1579,8 +1593,92 @@ void CJITByteCode::FindInPlaceConstructors()
 		info.type = type;
 		if( !DecodeSimpleConstructor(ctor, info) )
 			continue;
+		info.destVar = 0;
+		for( int psf = int(n) - 1; psf >= 0 && info.destVar == 0; psf-- )
+			if( m_instrs[psf].op == asBC_PSF && FindAllocFor(asUINT(psf)) == int(n) )
+				info.destVar = asBC_SWORDARG0(m_instrs[psf].bc);
 		instr.flags |= JIT_INSTR_CONSTRUCT;
 		m_constructors[n] = info;
+	}
+}
+
+// Whether every return of the function is right after asBC_LOADOBJ, which has put
+// the object it returns in the object register
+bool CJITByteCode::ReturnsLoadedObject() const
+{
+	bool returns = false;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		if( m_instrs[n].op != asBC_RET || (m_instrs[n].flags & JIT_INSTR_DEAD) )
+			continue;
+		if( n == 0 || m_instrs[n - 1].op != asBC_LOADOBJ || (m_instrs[n].flags & JIT_INSTR_BLOCK_START) )
+			return false;
+		returns = true;
+	}
+	return returns;
+}
+
+// The objects that one instruction stores in the object register or in a variable
+// and the next reads, past asBC_JitEntry, can be passed in a register as well, so
+// that the next doesn't wait for the store, see CJITCodeGen::ForwardedObject. These
+// are the objects returned by the functions compiled in place, which all return
+// through asBC_LOADOBJ, to asBC_STOREOBJ, and those created by the constructors
+// compiled in place to the asBC_LOADOBJ of the variable that the factory returns.
+// Nothing may jump in between. The VM enters only at asBC_JitEntry, after which the
+// object is loaded, see CJITCodeGen::EmitEntryStubs
+void CJITByteCode::FindForwardedObjects()
+{
+	m_objectSources.clear();
+	m_objectReaders.clear();
+	std::set<asUINT> targets;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		if( m_instrs[n].target >= 0 )
+			targets.insert(asUINT(m_instrs[n].target));
+		if( m_instrs[n].op == asBC_JMPP )
+		{
+			const std::vector<int> &cases = GetSwitchTargets(n);
+			for( asUINT k = 0; k < cases.size(); k++ )
+				if( cases[k] >= 0 )
+					targets.insert(asUINT(cases[k]));
+		}
+	}
+
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &reader = m_instrs[n];
+		if( (reader.op != asBC_STOREOBJ && reader.op != asBC_LOADOBJ) || (reader.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
+			continue;
+		int source = int(n) - 1;
+		while( source >= 0 && m_instrs[source].op == asBC_JitEntry )
+			source--;
+		if( source < 0 )
+			continue;
+		bool joined = false;
+		for( asUINT k = asUINT(source) + 1; k <= n && !joined; k++ )
+			joined = targets.count(k) != 0 || (m_instrs[k].flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) != 0;
+		if( joined )
+			continue;
+
+		const SJITInstr &instr = m_instrs[source];
+		bool forwarded = false;
+		if( reader.op == asBC_STOREOBJ && (instr.flags & JIT_INSTR_INLINE) )
+		{
+			const std::vector<SJITInlinee> &inlinees = GetInlinees(asUINT(source));
+			forwarded = !inlinees.empty();
+			for( asUINT k = 0; k < inlinees.size() && forwarded; k++ )
+				forwarded = inlinees[k].code->ReturnsLoadedObject();
+		}
+		else if( reader.op == asBC_LOADOBJ && (instr.flags & JIT_INSTR_CONSTRUCT) )
+		{
+			int var = GetInPlaceConstructor(asUINT(source))->destVar;
+			forwarded = var != 0 && var == asBC_SWORDARG0(reader.bc);
+		}
+		if( !forwarded )
+			continue;
+		m_objectSources[n] = asUINT(source);
+		for( asUINT k = asUINT(source) + 1; k < n; k++ )
+			m_objectReaders[k] = n;
 	}
 }
 

@@ -431,6 +431,8 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			m_spOffset = StackOffset(idx);
 		// The registers of the values pushed for a call stay valid while only pushes
 		// follow, which don't modify the variables
+		if( instrs[idx].flags & JIT_INSTR_INLINE )
+			m_pushedAtCall = (instrs[idx].flags & JIT_INSTR_BLOCK_START) ? std::map<int, SPushedValue>() : m_pushed;
 		if( (instrs[idx].flags & JIT_INSTR_BLOCK_START) || !KeepsPushedValues(instrs[idx].op) )
 			m_pushed.clear();
 
@@ -1100,6 +1102,8 @@ bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 		return true;
 	if( m_options.syncEveryInstr )
 		return m_vrInReg || !m_cached.empty();
+	if( m_code->GetObjectReaderAfter(entry) >= 0 )
+		return true;
 	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
 	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0 || HeldFields(entry) != 0;
 }
@@ -1164,6 +1168,17 @@ void CJITCodeGen::EmitEntryStubs()
 		int lentFree = m_code->GetLentFree(entries[n]);
 		if( lentFree >= 0 )
 			m_uc.mov(m_lentOwned[asUINT(lentFree)], Imm(1));
+		// The object that the instruction after reads in a register is where the VM
+		// has stored it, see ForwardedObject
+		int reader = m_code->GetObjectReaderAfter(entries[n]);
+		if( reader >= 0 )
+		{
+			Gp obj = ForwardedObject(0, asUINT(reader));
+			if( instrs[reader].op == asBC_STOREOBJ )
+				m_uc.load(obj, RegsField(offsetof(asSVMRegisters, objectRegister)));
+			else
+				m_uc.mov(obj, LoadPtr(asBC_SWORDARG0(instrs[reader].bc)));
+		}
 		m_uc.j(InstrLabel(entries[n]));
 	}
 }
@@ -1869,6 +1884,54 @@ void CJITCodeGen::StoreCachedSlot(int offset)
 	}
 }
 
+// The value that the caller of the inlined function being emitted has pushed for the
+// parameter in the variable, see EmitInlineCall
+bool CJITCodeGen::FindPushedArg(int offset, SPushedValue &value) const
+{
+	if( m_frame == 0 || offset > 0 )
+		return false;
+	const std::map<int, SPushedValue> &args = m_frames[m_frame].args;
+	std::map<int, SPushedValue>::const_iterator it = args.find(-4 * (m_frameBase + offset));
+	if( it == args.end() )
+		return false;
+	value = it->second;
+	return true;
+}
+
+// Loads the cached slots in the mask when an inlined function is entered, the
+// parameters from the registers that the caller has pushed them from, which spares
+// the loads waiting for the stores
+void CJITCodeGen::ReloadParamSlots(const JITSlotMask &mask)
+{
+	for( asUINT n = 0; n < m_cached.size() && mask; n++ )
+	{
+		const SCachedSlot &c = m_cached[n];
+		int bit = m_code->GetCacheBit(c.offset);
+		if( bit < 0 || !mask.Test(bit) )
+			continue;
+		SPushedValue arg;
+		bool pushed = FindPushedArg(c.offset, arg);
+		if( pushed && c.kind == JIT_SLOT_PTR && arg.ptr )
+			m_uc.mov(c.gp, arg.gp);
+		else if( pushed && c.kind == JIT_SLOT_I32 && !arg.ptr )
+		{
+			if( arg.isImm )
+				m_uc.mov(c.gp, Imm(arg.imm));
+			else
+				m_uc.mov(c.gp, arg.gp.r32());
+		}
+		else if( pushed && c.kind == JIT_SLOT_F32 && !arg.ptr )
+		{
+			Gp bits = arg.isImm ? m_uc.new_gp32() : arg.gp.r32();
+			if( arg.isImm )
+				m_uc.mov(bits, Imm(arg.imm));
+			m_uc.s_mov_u32(c.vec, bits);
+		}
+		else
+			ReloadCachedSlot(c.offset);
+	}
+}
+
 void CJITCodeGen::ReloadCachedSlot(int offset)
 {
 	SCachedSlot *c = FindCached(offset);
@@ -2127,6 +2190,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			pushed.gp    = Gp();
 			pushed.imm   = int(asBC_DWORDARG(bc));
 			pushed.isImm = true;
+			pushed.ptr   = false;
 		}
 		break;
 
@@ -2141,6 +2205,7 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 				pushed.gp    = t;
 				pushed.imm   = 0;
 				pushed.isImm = false;
+				pushed.ptr   = false;
 			}
 		}
 		break;
@@ -2215,6 +2280,14 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Gp t = LoadPtr(a0);
 			PushStack(PTR_BYTES);
 			m_uc.store(Stack(0), t);
+			if( m_staticStack )
+			{
+				SPushedValue &pushed = m_pushed[m_spOffset];
+				pushed.gp    = t;
+				pushed.imm   = 0;
+				pushed.isImm = false;
+				pushed.ptr   = true;
+			}
 		}
 		break;
 
@@ -2705,7 +2778,14 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		}
 		else
 		{
-			Gp t = LoadPtr(0);
+			// The object pointer pushed by the caller of an inlined method is still in
+			// its register, unless the method modifies the variable
+			SPushedValue self;
+			Gp t;
+			if( m_code->IsThisConstant() && FindPushedArg(0, self) && self.ptr )
+				t = self.gp;
+			else
+				t = LoadPtr(0);
 			m_uc.j(BailLabel(idx), test_z(t));
 			SetVRAddr(idx, Addr(t, asBC_SWORDARG0(bc)));
 		}

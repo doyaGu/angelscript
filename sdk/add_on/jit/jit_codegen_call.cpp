@@ -408,6 +408,17 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	// The object that the function returns may be created in the frame, see
 	// EmitFrameObject
 	int freshSlot = FreshSlot(idx);
+	// The parameters are passed in the registers that they have been pushed from, and
+	// the object returned in a register for the asBC_STOREOBJ after the call
+	std::map<int, SPushedValue> args;
+	args.swap(m_pushedAtCall);
+	const std::vector<SJITInstr> &callerInstrs = m_code->GetInstructions();
+	asUINT reader = idx + 1;
+	while( reader < callerInstrs.size() && callerInstrs[reader].op == asBC_JitEntry )
+		reader++;
+	Gp returnedObj;
+	if( reader < callerInstrs.size() && m_code->GetObjectSource(reader) == int(idx) )
+		returnedObj = ForwardedObject(caller, reader);
 	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
 	if( m_options.elideSuspend && m_suspendChecked )
 		checkVM = false;
@@ -542,6 +553,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		frame.lentVar  = lentFree >= 0 ? asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc) : 0;
 		frame.freshSlot = freshSlot;
 		frame.retChecked = true;
+		frame.returnedObj = returnedObj;
+		frame.args = args;
 		m_frames.push_back(frame);
 		int inlined = int(m_frames.size()) - 1;
 		SwitchFrame(inlined);
@@ -553,7 +566,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		for( asUINT n = 0; n < vars.GetLength(); n++ )
 			if( vars[n]->stackOffset > 0 && vars[n]->onHeap && (vars[n]->type.IsObject() || vars[n]->type.IsFuncdef()) )
 				m_uc.store_zero_reg(Var(vars[n]->stackOffset));
-		ReloadSlots(code->GetLiveInMask(0));
+		ReloadParamSlots(code->GetLiveInMask(0));
 
 		// The function starts where the suspend requests are checked, if they may have
 		// been made, see EmitBody
@@ -592,6 +605,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0);
 		else
 			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0);
+		if( returnedObj.is_valid() )
+			m_uc.load(returnedObj, RegsField(offsetof(asSVMRegisters, objectRegister)));
 
 		// The VM goes on after the call if the function has set a line callback, so
 		// that both paths continue where the suspend requests are checked
@@ -1658,6 +1673,21 @@ void CJITCodeGen::EmitInPlaceAssign(asUINT idx)
 		StoreVRPtr(self);
 }
 
+// The register that passes the object stored by an instruction to the asBC_STOREOBJ
+// or asBC_LOADOBJ reading it in the frame, see CJITByteCode::FindForwardedObjects.
+// The object is still stored, for the VM, which enters the function in between only
+// at an asBC_JitEntry, whose entry stub loads the register, see EmitEntryStubs
+CJITCodeGen::Gp CJITCodeGen::ForwardedObject(int frame, asUINT reader)
+{
+	std::pair<int, asUINT> key(frame, reader);
+	std::map<std::pair<int, asUINT>, Gp>::iterator it = m_forwardedObjects.find(key);
+	if( it != m_forwardedObjects.end() )
+		return it->second;
+	Gp obj = m_uc.new_gp_ptr();
+	m_forwardedObjects[key] = obj;
+	return obj;
+}
+
 // Creates the object of a script class like asBC_ALLOC, in the frame if it is kept
 // there, see EmitFrameObject, and sets its members like the constructor does, see
 // CJITByteCode::FindInPlaceConstructors. The variable whose address is below the
@@ -1783,6 +1813,14 @@ void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 			}
 		}
 	}
+
+	// The asBC_LOADOBJ of the variable takes the object from its register
+	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+	asUINT reader = idx + 1;
+	while( reader < instrs.size() && instrs[reader].op == asBC_JitEntry )
+		reader++;
+	if( reader < instrs.size() && m_code->GetObjectSource(reader) == int(idx) )
+		m_uc.mov(ForwardedObject(m_frame, reader), obj);
 
 	// The variable gets the object, which asBC_ALLOC stores before the constructor
 	// is called
@@ -2346,7 +2384,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				// The value pushed right before is taken from its register, which
 				// spares the load waiting for the store
 				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
-				if( pushed == m_pushed.end() )
+				if( pushed == m_pushed.end() || pushed->second.ptr )
 					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
 				else if( pushed->second.isImm )
 					m_uc.mov(gpArgs[n], Imm(pushed->second.imm));
@@ -3130,9 +3168,15 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_LOADOBJ:
 		{
-			Gp obj = LoadPtr(a0);
+			// The object created in place is still in its register, and the object
+			// returned by an inlined function goes on in a register too
+			Gp obj = m_code->GetObjectSource(idx) >= 0 ? ForwardedObject(m_frame, idx) : LoadPtr(a0);
 			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
 			m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
+			// Before the variable, which may hold the object in the same register, is cleared
+			const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
+			if( m_frames[m_frame].returnedObj.is_valid() && idx + 1 < instrs.size() && instrs[idx + 1].op == asBC_RET )
+				m_uc.mov(m_frames[m_frame].returnedObj, obj);
 			ClearPtr(a0);
 		}
 		break;
@@ -3140,7 +3184,10 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 	case asBC_STOREOBJ:
 		{
 			Gp obj = m_uc.new_gp_ptr();
-			m_uc.load(obj, RegsField(offsetof(asSVMRegisters, objectRegister)));
+			if( m_code->GetObjectSource(idx) >= 0 )
+				m_uc.mov(obj, ForwardedObject(m_frame, idx));
+			else
+				m_uc.load(obj, RegsField(offsetof(asSVMRegisters, objectRegister)));
 			StorePtr(a0, obj);
 			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectRegister)));
 		}

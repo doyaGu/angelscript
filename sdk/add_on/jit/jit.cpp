@@ -463,6 +463,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			fprintf(file, "   ; assigned in place");
 		if( instr.flags & JIT_INSTR_CONSTRUCT )
 			fprintf(file, "   ; constructed in place");
+		if( code.GetObjectSource(n) >= 0 )
+			fprintf(file, "   ; object in a register");
 		if( instr.flags & (JIT_INSTR_MOVE | JIT_INSTR_MOVED) )
 			fprintf(file, "   ; moved");
 		if( instr.flags & JIT_INSTR_REFCOUNT )

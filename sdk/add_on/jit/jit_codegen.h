@@ -99,6 +99,16 @@ protected:
 		Vec  vec;
 	};
 
+	// A 32bit value or a pointer pushed on the static stack, which is also in a
+	// register or an immediate, see EmitDirectSystemCall and EmitInlineCall
+	struct SPushedValue
+	{
+		Gp   gp;
+		int  imm;
+		bool isImm;
+		bool ptr;   // a pointer, in gp
+	};
+
 	// The code generation state of a function: the one being compiled, which is
 	// frame 0, or one inlined into it. The members for the frame being emitted,
 	// m_code, m_cached, m_cachedIndex, m_labels, and m_frameBase, are swapped in
@@ -119,6 +129,8 @@ protected:
 		int                       lentVar;  // the variable of the caller that holds the reference lent to the object, or 0, see CJITByteCode::FindLentRefs
 		int                       freshSlot; // where the object that the function returns is created in the frame of the outermost function, or -1, see EmitFrameObject
 		bool                      retChecked; // the suspend requests are checked before all returns, see EmitBody
+		Gp                        returnedObj; // the register that the object returned is passed in too, if valid, see ForwardedObject
+		std::map<int, SPushedValue> args;      // the values pushed by the caller for the parameters, by stack offset
 	};
 
 	// A bail stub to emit after the body
@@ -205,15 +217,12 @@ protected:
 	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);
 	void EmitFrameArena();
 
-	// A 32bit value pushed on the static stack, which is also in a register or an
-	// immediate, see EmitDirectSystemCall
-	struct SPushedValue
-	{
-		Gp   gp;
-		int  imm;
-		bool isImm;
-	};
 	std::map<int, SPushedValue> m_pushed; // by stack offset, for the pushes since the last other instruction
+	std::map<int, SPushedValue> m_pushedAtCall; // the pushes before the inlined call being emitted
+	std::map<std::pair<int, asUINT>, Gp> m_forwardedObjects; // by frame and the instruction reading them, see ForwardedObject
+	Gp   ForwardedObject(int frame, asUINT reader);
+	bool FindPushedArg(int offset, SPushedValue &value) const;
+	void ReloadParamSlots(const JITSlotMask &mask);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
