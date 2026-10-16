@@ -288,6 +288,33 @@ static bool SharesMaterialization(asEBCInstr op)
 	}
 }
 
+// The instructions that only push values onto the stack, and the calls of registered
+// functions, which take the values pushed before them from their registers, see
+// EmitDirectSystemCall
+static bool KeepsPushedValues(asEBCInstr op)
+{
+	switch( op )
+	{
+	case asBC_PshC4:
+	case asBC_PshV4:
+	case asBC_PshC8:
+	case asBC_PshV8:
+	case asBC_PshVPtr:
+	case asBC_PshRPtr:
+	case asBC_PshNull:
+	case asBC_PshG4:
+	case asBC_PshGPtr:
+	case asBC_PSF:
+	case asBC_PGA:
+	case asBC_TYPEID:
+	case asBC_CALLSYS:
+	case asBC_Thiscall1:
+		return true;
+	default:
+		return false;
+	}
+}
+
 void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 {
 	// The heads of the innermost loops, i.e. the targets of backward branches with no
@@ -400,6 +427,10 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 			m_uc.bind(m_labels[idx]);
 		if( m_staticStack )
 			m_spOffset = StackOffset(idx);
+		// The registers of the values pushed for a call stay valid while only pushes
+		// follow, which don't modify the variables
+		if( (instrs[idx].flags & JIT_INSTR_BLOCK_START) || !KeepsPushedValues(instrs[idx].op) )
+			m_pushed.clear();
 
 		asUINT consumed = 1;
 		const SJITInstr &instr = instrs[idx];
@@ -453,6 +484,10 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 					m_failedOp = instr.op;
 				break;
 			}
+
+			// The call has popped the values
+			if( instr.op == asBC_CALLSYS || instr.op == asBC_Thiscall1 )
+				m_pushed.clear();
 
 			// An address left to the next instruction must not outlive it
 			assert( !addrPending || !m_vrAddrValid );
@@ -526,6 +561,7 @@ void CJITCodeGen::EmitBody(std::vector<bool> &calls)
 // Makes the frame the one being emitted
 void CJITCodeGen::SwitchFrame(int frame)
 {
+	m_pushed.clear();
 	SFrame &from = m_frames[m_frame];
 	from.cached.swap(m_cached);
 	from.cachedIndex.swap(m_cachedIndex);
@@ -2080,6 +2116,13 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 	case asBC_TYPEID:
 		PushStack(4);
 		StoreImm32(Stack(0), int(asBC_DWORDARG(bc)));
+		if( m_staticStack )
+		{
+			SPushedValue &pushed = m_pushed[m_spOffset];
+			pushed.gp    = Gp();
+			pushed.imm   = int(asBC_DWORDARG(bc));
+			pushed.isImm = true;
+		}
 		break;
 
 	case asBC_PshV4:
@@ -2087,6 +2130,13 @@ bool CJITCodeGen::EmitStackOp(const SJITInstr &instr)
 			Gp t = Load32(a0);
 			PushStack(4);
 			m_uc.store_u32(Stack(0), t);
+			if( m_staticStack )
+			{
+				SPushedValue &pushed = m_pushed[m_spOffset];
+				pushed.gp    = t;
+				pushed.imm   = 0;
+				pushed.isImm = false;
+			}
 		}
 		break;
 

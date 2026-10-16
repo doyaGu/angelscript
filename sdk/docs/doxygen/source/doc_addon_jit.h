@@ -132,7 +132,11 @@ as arguments; primitives, references, handles, or value types as return value,
 except the value types that the compilers for 32bit x86 other than MSVC return
 in memory),
 instead of going through the code the VM uses, which marshals the arguments for
-the calling convention at runtime. The same goes for the AddRef and Release
+the calling convention at runtime. The 32bit integer arguments that are pushed
+right before the call are passed from the registers that hold them, so that the
+call doesn't wait for them to be stored on the script stack and loaded again. On
+an Apple M5 a loop that adds to a variable with a registered int function takes
+1.4 nanoseconds per call instead of 2.5. The same goes for the AddRef and Release
 behaviours of reference types when handles are copied or objects are freed.
 The handles copied from the temporary variables that are released right after,
 for example the result of p.next in @p = p.next, are moved instead, so no

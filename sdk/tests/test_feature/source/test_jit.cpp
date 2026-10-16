@@ -1131,7 +1131,29 @@ static bool TestDirectCalls()
 		"  vec v = MakeVec(1, 2, 3) + MakeVec(4, 5, 6);                \n"
 		"  assert( v.x == 5 && v.y == 7 && v.z == 9 );                 \n"
 		"  return int(a.y + q.w + p.x + d.x + e.z + f.y + v.z) + i.c + int(l.a / 1000000000); \n"
-		"}                                                             \n";
+		"}                                                             \n"
+		// The values pushed right before a call are passed from their registers,
+		// but not past the other instructions in between
+		"int forwarded()                                               \n"
+		"{                                                             \n"
+		"  int a = 1, b = 2, c = 3;                                    \n"
+		"  assert( Cdecl(a + 1, b) == 22 );                            \n"
+		"  assert( Cdecl(a, Std(b, 1)) == 11 );                        \n"
+		"  assert( Cdecl(Std(a, b), a) == -9 );                        \n"
+		"  int s = 0;                                                  \n"
+		"  for( int n = 0; n < 10; n++ ) s = Std(s, -n);               \n"
+		"  assert( s == 45 );                                          \n"
+		"  assert( CdeclB(a == 1, c, 4) && !CdeclB(a == 1, b, 4) );    \n"
+		"  obj.v = 5;                                                  \n"
+		"  assert( obj.Four(a, b, c, 4) == 15 );                       \n"
+		// The variable in a register is pushed for the last argument first, and
+		// modified for the argument before it, and the script function gets the
+		// same arguments
+		"  int x = 1, y = 1;                                           \n"
+		"  assert( Cdecl(x += 1, x) == sc(y += 1, y) );                \n"
+		"  return s;                                                   \n"
+		"}                                                             \n"
+		"int sc(int a, int b) { return a * 10 + b; }                   \n";
 
 	asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("test", script);
@@ -1235,6 +1257,15 @@ static bool TestDirectCalls()
 	{
 		if( r == asEXECUTION_EXCEPTION )
 			PRINTF("stackArgs: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
+		TEST_FAILED;
+	}
+
+	ctx->Prepare(mod->GetFunctionByDecl("int forwarded()"));
+	r = ctx->Execute();
+	if( r != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 45 )
+	{
+		if( r == asEXECUTION_EXCEPTION )
+			PRINTF("forwarded: exception: %s at line %d\n", ctx->GetExceptionString(), ctx->GetExceptionLineNumber());
 		TEST_FAILED;
 	}
 

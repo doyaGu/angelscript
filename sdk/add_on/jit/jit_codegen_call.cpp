@@ -1989,7 +1989,17 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 				}
 			}
 			else
-				m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
+			{
+				// The value pushed right before is taken from its register, which
+				// spares the load waiting for the store
+				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
+				if( pushed == m_pushed.end() )
+					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
+				else if( pushed->second.isImm )
+					m_uc.mov(gpArgs[n], Imm(pushed->second.imm));
+				else
+					m_uc.mov(gpArgs[n], pushed->second.gp);
+			}
 			break;
 		case ARG_I64:
 			if( Is64Bit() )

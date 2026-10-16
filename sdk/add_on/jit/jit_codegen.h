@@ -192,6 +192,16 @@ protected:
 	void EmitIndexer(asUINT idx);
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
 	void EmitOwnLent(asUINT idx);
+
+	// A 32bit value pushed on the static stack, which is also in a register or an
+	// immediate, see EmitDirectSystemCall
+	struct SPushedValue
+	{
+		Gp   gp;
+		int  imm;
+		bool isImm;
+	};
+	std::map<int, SPushedValue> m_pushed; // by stack offset, for the pushes since the last other instruction
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
