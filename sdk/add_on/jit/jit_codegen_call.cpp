@@ -397,6 +397,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	int base = -StackOffset(idx) / 4;
 	int caller = m_frame;
 	asUINT borrowed = m_code->GetBorrowedArgs(idx);
+	// The object may have been lent a reference, see CJITByteCode::FindLentRefs
+	int lentFree = caller == 0 ? m_code->GetLentFree(idx) : -1;
 	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
 	if( m_options.elideSuspend && m_suspendChecked )
 		checkVM = false;
@@ -528,6 +530,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		frame.exit     = m_uc.new_label();
 		frame.exitUsed = false;
 		frame.borrowed = borrowed;
+		frame.lentVar  = lentFree >= 0 ? asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc) : 0;
 		frame.retChecked = true;
 		m_frames.push_back(frame);
 		int inlined = int(m_frames.size()) - 1;
@@ -564,6 +567,17 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		Label cont = m_uc.new_label();
 		BaseNode *cold = BeginCold(call);
 		m_spOffset = StackOffset(idx);
+		if( lentFree >= 0 )
+		{
+			// The method called instead may release anything, so the variable gets
+			// a reference of its own, which the FREE after the call releases then
+			Gp obj = LoadPtr(asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc));
+			Label none = m_uc.new_label();
+			m_uc.j(none, test_z(obj));
+			EmitScriptAddRef(idx, obj);
+			m_uc.bind(none);
+			m_uc.mov(m_lentOwned[asUINT(lentFree)], Imm(1));
+		}
 		if( virtualCall )
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0);
 		else
@@ -661,6 +675,19 @@ void CJITCodeGen::EmitInlineExit(int frame)
 		SwitchFrame(m_frames[f].caller);
 		StoreDirtySlots(m_code->GetDirtyMask(m_frames[f].callIdx).AndNot(JIT_FRAME_BIT));
 		inlined.insert(inlined.begin(), f);
+	}
+
+	// The variable of the outermost function that lends its reference to the object
+	// gets one of its own, which the VM releases, see CJITByteCode::FindLentRefs
+	int lentVar = m_frames[inlined[0]].lentVar;
+	if( lentVar )
+	{
+		Gp obj = LoadPtr(lentVar);
+		Label none = m_uc.new_label();
+		m_uc.j(none, test_z(obj));
+		InvokeNode *addRef = Invoke((const void*)JIT_AddRefScriptObject, FuncSignature::build<void, void*>());
+		addRef->set_arg(0, obj);
+		m_uc.bind(none);
 	}
 	StoreFrame();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
@@ -2628,6 +2655,23 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		break;
 
 	case asBC_FREE:
+		if( (instr.flags & JIT_INSTR_LENT) && m_frame == 0 )
+		{
+			// The variable holds the lent reference, which is only cleared, unless the
+			// call or the VM has given it a reference of its own, see
+			// CJITByteCode::FindLentRefs
+			Label owned = m_uc.new_label();
+			Label clear = m_uc.new_label();
+			m_uc.j(owned, test_nz(m_lentOwned[idx]));
+			BaseNode *cold = BeginCold(owned);
+			Gp obj = LoadPtr(a0);
+			m_uc.j(clear, test_z(obj));
+			EmitScriptRelease(idx, obj);
+			EndCold(cold, clear);
+			m_uc.bind(clear);
+			ClearPtr(a0);
+			break;
+		}
 		// A separately generated direct entry gets its borrowed-parameter mask at
 		// run time. Clear a still-borrowed parameter so the ordinary release path
 		// below sees null. Once a sync point has taken ownership, the mask is zero
@@ -2724,6 +2768,19 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_REFCPY:
 	case asBC_RefCpyV:
+		if( (instr.flags & JIT_INSTR_LEND) && m_frame == 0 )
+		{
+			// Lends the reference of the memory that the handle was read from to the
+			// call, see CJITByteCode::FindLentRefs. The VM copies the handle if the
+			// copy would release anything
+			Gp s   = m_uc.new_gp_ptr();
+			Gp old = LoadPtr(a0);
+			m_uc.j(BailLabel(idx), test_nz(old));
+			m_uc.load(s, Stack(0));
+			StorePtr(a0, s);
+			m_uc.mov(m_lentOwned[asUINT(m_code->GetLentFree(idx))], Imm(0));
+			break;
+		}
 		if( IsBorrowed(idx) )
 		{
 			// Lends the reference to the inlined call. The first of the copies for the

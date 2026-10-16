@@ -34,7 +34,9 @@ enum EJITInstrFlags
 	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
 	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
 	JIT_INSTR_PROFILE     = 0x1000, // call whose receiver class or function-pointer target is noted in the profile, see SJITProfile
-	JIT_INSTR_INDEXER     = 0x2000  // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
+	JIT_INSTR_INDEXER     = 0x2000, // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
+	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, see FindLentRefs
+	JIT_INSTR_LENT        = 0x8000  // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -584,6 +586,11 @@ public:
 	// checks for all of them
 	const std::vector<int> &GetBorrowChecks(asUINT instrIdx) const;
 
+	// The asBC_FREE that releases the variable whose reference the asBC_RefCpyV marked
+	// with JIT_INSTR_LEND lends to the call after it, for the copy, the call, and the
+	// entry points between the call and the release, or -1, see FindLentRefs
+	int GetLentFree(asUINT instrIdx) const;
+
 	// Marks instructions that must return to the VM. Must be called before Analyse,
 	// which marks them in the inlined functions too
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
@@ -608,6 +615,7 @@ protected:
 	void FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget);
 	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
+	void FindLentRefs();
 	void FindIndexers(const TJITContainerMethods *indexers);
 	void AnalyseBorrows(bool borrowCalls = false);
 	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
@@ -662,6 +670,7 @@ protected:
 	std::map<asUINT, std::vector<asCScriptFunction*> > m_borrowedTargets; // checked targets of dynamic calls
 	std::vector<asCScriptFunction*> m_borrowedDependencies; // dynamic targets embedded in generated code
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
+	std::map<asUINT, asUINT> m_lentFrees; // by instruction, see GetLentFree
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;

@@ -26,6 +26,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	frame.callIdx  = 0;
 	frame.exitUsed = false;
 	frame.borrowed = 0;
+	frame.lentVar  = 0;
 	frame.retChecked = true;
 	m_frames.push_back(frame);
 	m_frame      = 0;
@@ -75,6 +76,11 @@ bool CJITCodeGen::Generate()
 	for( asUINT n = 0; n < entries.size(); n++ )
 		if( EntryNeedsStub(n) )
 			m_entryLabels[n] = m_uc.new_label();
+	// Whether the variables that hold lent references have references of their own,
+	// see CJITByteCode::FindLentRefs
+	for( asUINT n = 0; n < m_code->GetInstructions().size(); n++ )
+		if( m_code->GetInstructions()[n].flags & JIT_INSTR_LENT )
+			m_lentOwned[n] = m_uc.new_gp32();
 
 	m_bailCommon = m_uc.new_label();
 	m_bailMaterialized = m_uc.new_label();
@@ -1044,13 +1050,15 @@ void CJITCodeGen::EmitPrologue()
 	CreateCachedSlots();
 }
 
-// Whether entering at the entry point needs to load anything, otherwise the
-// dispatch goes straight to its instruction
+// Whether entering at the entry point needs to load anything, or to release a lent
+// reference, otherwise the dispatch goes straight to its instruction
 bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 {
+	asUINT entry = m_code->GetEntries()[n];
+	if( m_code->GetLentFree(entry) >= 0 )
+		return true;
 	if( m_options.syncEveryInstr )
 		return m_vrInReg || !m_cached.empty();
-	asUINT entry = m_code->GetEntries()[n];
 	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
 	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0 || HeldFields(entry) != 0;
 }
@@ -1110,8 +1118,31 @@ void CJITCodeGen::EmitEntryStubs()
 			ReloadSlots(m_code->GetEntryMask(entries[n]));
 			ReloadFields(HeldFields(entries[n]));
 		}
+		// The VM returns to the function after a call whose object has been lent a
+		// reference only once the variable holds one of its own
+		int lentFree = m_code->GetLentFree(entries[n]);
+		if( lentFree >= 0 )
+			m_uc.mov(m_lentOwned[asUINT(lentFree)], Imm(1));
 		m_uc.j(InstrLabel(entries[n]));
 	}
+}
+
+// Gives the variable that holds a reference lent to the object of an inlined call a
+// reference of its own before the VM sees it, where the function hands itself to the
+// VM between the copy and the FREE, e.g. to compile it again, unless the call made in
+// place of the inlined one has already given it one, see CJITByteCode::FindLentRefs
+void CJITCodeGen::EmitOwnLent(asUINT idx)
+{
+	int lentFree = m_code->GetLentFree(idx);
+	if( lentFree < 0 || (m_code->GetInstructions()[idx].flags & JIT_INSTR_LEND) )
+		return;
+	Label done = m_uc.new_label();
+	m_uc.j(done, test_nz(m_lentOwned[asUINT(lentFree)]));
+	Gp obj = LoadPtr(asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc));
+	m_uc.j(done, test_z(obj));
+	InvokeNode *addRef = Invoke((const void*)JIT_AddRefScriptObject, FuncSignature::build<void, void*>());
+	addRef->set_arg(0, obj);
+	m_uc.bind(done);
 }
 
 void CJITCodeGen::EmitBailStubs()
@@ -1122,6 +1153,8 @@ void CJITCodeGen::EmitBailStubs()
 		m_materialized = m_bails[n].materialized;
 		m_materialBorrowed = m_bails[n].borrowed;
 		m_uc.bind(m_bails[n].label);
+		if( m_bails[n].frame == 0 )
+			EmitOwnLent(m_bails[n].idx);
 		Bail(m_bails[n].idx);
 	}
 	m_materialized = false;

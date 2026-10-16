@@ -3241,6 +3241,189 @@ static bool TestScriptRefCounts()
 	return fail;
 }
 
+// The handles read from the elements of an array lend their references to the
+// methods compiled in place, see CJITByteCode::FindLentRefs. The objects must be
+// destroyed as often as with the VM, also when the method of another class is called
+// instead, which replaces the element that it is called on, when the method raises an
+// exception, when the element is null, and when the VM executes the method of the
+// other class and returns to the function
+namespace LentRefs
+{
+	static const char *script =
+		"int g_destroyed = 0;                                                     \n"
+		"int g_zero = 0;                                                          \n"
+		"array<Base@> g_list;                                                     \n"
+		"array<Item@> g_items;                                                    \n"
+		"class Base                                                               \n"
+		"{                                                                        \n"
+		"  int v;                                                                 \n"
+		"  ~Base() { g_destroyed++; }                                             \n"
+		"  void up() { v += 1; }                                                  \n"
+		"  void div() { v += 10 / g_zero; }                                       \n"
+		"}                                                                        \n"
+		// The class seen first is compiled in place, see SetProfileThreshold, and
+		// the method of the other class replaces the element that it is called on
+		"class Item                                                               \n"
+		"{                                                                        \n"
+		"  int v;                                                                 \n"
+		"  ~Item() { g_destroyed++; }                                             \n"
+		"  void up() { v += 1; }                                                  \n"
+		"}                                                                        \n"
+		"class SwapItem : Item                                                    \n"
+		"{                                                                        \n"
+		"  void up() override { v += 100; @g_items[1] = Item(); }                 \n"
+		"}                                                                        \n"
+		"int normal()                                                             \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  g_list.insertLast(Base()); g_list.insertLast(Base()); g_list.insertLast(Base()); \n"
+		"  for( int k = 0; k < 100; k++ )                                         \n"
+		"    for( uint i = 0; i < g_list.length(); i++ )                          \n"
+		"      g_list[i].up();                                                    \n"
+		"  int s = g_list[0].v + g_list[2].v;                                     \n"
+		"  g_list.resize(0);                                                      \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int replaced()                                                           \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 200; k++ )                                         \n"
+		"  {                                                                      \n"
+		"    g_items.resize(0);                                                   \n"
+		"    g_items.insertLast(Item());                                          \n"
+		"    if( k < 150 ) g_items.insertLast(Item()); else g_items.insertLast(SwapItem()); \n"
+		"    g_items.insertLast(Item());                                          \n"
+		"    for( uint i = 0; i < g_items.length(); i++ )                         \n"
+		"      g_items[i].up();                                                   \n"
+		"    s += g_items[0].v + g_items[1].v * 10 + g_items[2].v * 100;          \n"
+		"  }                                                                      \n"
+		"  g_items.resize(0);                                                     \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int divide()                                                             \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  g_list.insertLast(Base()); g_list.insertLast(Base());                  \n"
+		"  int s = 0;                                                             \n"
+		"  try { for( uint i = 0; i < g_list.length(); i++ ) g_list[i].div(); } catch { s = 1; } \n"
+		"  g_list.resize(0);                                                      \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int nullElement()                                                        \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  g_list.insertLast(Base()); g_list.insertLast(null); g_list.insertLast(Base()); \n"
+		"  int s = 0;                                                             \n"
+		"  try { for( uint i = 0; i < g_list.length(); i++ ) g_list[i].up(); } catch { s = 1; } \n"
+		"  g_list.resize(0);                                                      \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n";
+
+	// The results of the functions, executed twice so that the deferred functions
+	// are compiled for the second time
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterScriptArray(engine, false);
+		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
+			TEST_FAILED;
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "int normal()", "int replaced()", "int divide()", "int nullElement()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				int r = ctx->Execute();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << int(ctx->GetReturnDWord());
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString();
+				else
+					s << "result " << r;
+				s << "\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestLentRefs()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = LentRefs::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("int normal(): 200003\n") == std::string::npos || expected.find("int divide(): 1002\n") == std::string::npos ||
+	    expected.find("int nullElement(): 1002\n") == std::string::npos )
+	{
+		PRINTF("lent references:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// With the functions compiled first, and with the methods called instead left to
+	// the VM, which returns to the function after the call, as they haven't been
+	// called often enough to be compiled
+	for( int tiered = 0; tiered < 2; tiered++ )
+	{
+		// The JIT compiler must outlive the engine. The log shows where the
+		// references are lent
+		FILE *log = tmpfile();
+		CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+		if( log )
+			jit.SetLogFile(log, "int normal()");
+		jit.SetProfileThreshold(20);
+		if( tiered )
+			jit.SetCompileThresholds(1000, 1);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = LentRefs::Run(engine, &jit, fail);
+		engine->ShutDownAndRelease();
+		if( actual != expected )
+		{
+			PRINTF("lent references%s:\n  VM:\n%s  JIT:\n%s", tiered ? " (tiered)" : "", expected.c_str(), actual.c_str());
+			TEST_FAILED;
+		}
+
+		bool inlines = !(envFlags & (CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_AOT_ONLY));
+		if( log )
+		{
+			std::string text;
+			char buf[4096];
+			rewind(log);
+			size_t len;
+			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+				text.append(buf, len);
+			fclose(log);
+			if( inlines && !tiered && (text.find("; lends") == std::string::npos || text.find("; lent") == std::string::npos) )
+			{
+				PRINTF("lent references: the reference of the element isn't lent\n");
+				TEST_FAILED;
+			}
+		}
+	}
+	return fail;
+}
+
 // The initialization lists with nothing to destroy in them are freed without going
 // through the list, see CJITByteCode::FindListFrees. Nothing may be leaked, and the
 // values in the other lists must still be destroyed
@@ -5464,6 +5647,7 @@ bool Test()
 	fail = TestProfiles() || fail;
 	fail = TestSuspendChecks() || fail;
 	fail = TestIndexers() || fail;
+	fail = TestLentRefs() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

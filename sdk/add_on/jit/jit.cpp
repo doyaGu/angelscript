@@ -446,6 +446,10 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			              (instr.op == asBC_CallPtr ? "   ; targets noted" : "   ; classes noted"));
 		if( instr.flags & JIT_INSTR_BORROW )
 			fprintf(file, "   ; borrowed");
+		if( instr.flags & JIT_INSTR_LEND )
+			fprintf(file, "   ; lends");
+		if( instr.flags & JIT_INSTR_LENT )
+			fprintf(file, "   ; lent");
 		if( instr.flags & (JIT_INSTR_MOVE | JIT_INSTR_MOVED) )
 			fprintf(file, "   ; moved");
 		if( instr.flags & JIT_INSTR_REFCOUNT )

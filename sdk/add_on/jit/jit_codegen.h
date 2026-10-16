@@ -111,6 +111,7 @@ protected:
 		Label                     exit;     // hands the function to the VM, see EmitInlineExit
 		bool                      exitUsed;
 		asUINT                    borrowed; // the parameters that borrow the references of the caller, see CJITByteCode::AnalyseBorrows
+		int                       lentVar;  // the variable of the caller that holds the reference lent to the object, or 0, see CJITByteCode::FindLentRefs
 		bool                      retChecked; // the suspend requests are checked before all returns, see EmitBody
 	};
 
@@ -190,6 +191,7 @@ protected:
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	void EmitIndexer(asUINT idx);
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
+	void EmitOwnLent(asUINT idx);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;
 	bool CallsBehaviourDirectly(const SJITInstr &instr) const;
@@ -387,6 +389,7 @@ protected:
 	std::map<int, asUINT>      m_cachedIndex;
 	std::vector<Label>         m_labels;       // per instruction, valid for block starts
 	std::vector<Label>         m_entryLabels;  // per entry
+	std::map<asUINT, Gp>       m_lentOwned;    // non-zero where the variable that holds a lent reference has one of its own, by asBC_FREE, see CJITByteCode::FindLentRefs
 	std::vector<SBail>         m_bails;        // bail stubs to emit
 	std::vector<SJumpTable>    m_jumpTables;   // switch tables to emit after the function
 	std::vector<std::pair<asmjit::BaseNode*, asmjit::BaseNode*> > m_cold;  // first and last nodes of the cold ranges

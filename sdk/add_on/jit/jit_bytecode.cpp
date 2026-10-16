@@ -381,6 +381,12 @@ const std::vector<asCScriptFunction*> &CJITByteCode::GetBorrowedTargets(asUINT i
 	return it == m_borrowedTargets.end() ? none : it->second;
 }
 
+int CJITByteCode::GetLentFree(asUINT instrIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_lentFrees.find(instrIdx);
+	return it == m_lentFrees.end() ? -1 : int(it->second);
+}
+
 const std::vector<int> &CJITByteCode::GetBorrowChecks(asUINT instrIdx) const
 {
 	std::map<asUINT, std::vector<int> >::const_iterator it = m_borrowChecks.find(instrIdx);
@@ -1161,6 +1167,7 @@ void CJITByteCode::AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, 
 	FindMovedRefs();
 	FindInPlaceRefCounts();
 	FindListFrees();
+	FindLentRefs();
 }
 
 // Finds script functions, checked implementations of virtual and interface methods,
@@ -1283,13 +1290,14 @@ void CJITByteCode::FindCalledBorrowedArgs(const SJITProfile *profile, bool profi
 void CJITByteCode::ClearBorrows()
 {
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
-		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST);
+		m_instrs[n].flags &= ~(JIT_INSTR_BORROW | JIT_INSTR_MOVE | JIT_INSTR_MOVED | JIT_INSTR_REFCOUNT | JIT_INSTR_FREE_LIST | JIT_INSTR_LEND | JIT_INSTR_LENT);
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_borrowedArgs.clear();
 	m_borrowedTargets.clear();
 	m_borrowedDependencies.clear();
 	m_borrowChecks.clear();
+	m_lentFrees.clear();
 }
 
 // The handles copied from variables that are released right after the copy, e.g.
@@ -1360,6 +1368,70 @@ void CJITByteCode::FindInPlaceRefCounts()
 			continue;
 		if( GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_SCRIPT_OBJECT )
 			instr.flags |= JIT_INSTR_REFCOUNT;
+	}
+}
+
+// The handles read from memory, e.g. from the elements of an array, that are copied
+// into a temporary variable for a method compiled in place and released after it,
+// like the compiler does for a method called on an element:
+//
+//   RDSPtr; RefCpyV vT; CALLINTF; JitEntry; FREE vA; FREE vT
+//
+// The memory holds a reference of its own, which keeps the object alive while
+// nothing is released, so the copy lends that reference to the call instead of
+// adding one, and the FREE only clears the variable. The methods compiled in place
+// must not call or release anything then, which also keeps the memory from being
+// modified. Nothing but the releases of other variables may be in between the call
+// and the FREE, which don't read the variable. The VM may only see the variable once
+// it holds a reference of its own: the code that hands the inlined method to the VM
+// adds one, and so does the call of the method made in its place, for which the FREE
+// releases it, as it does when the VM returns to the function between the call and
+// the FREE, see CJITCodeGen::EmitInlineExit, EmitInlineCall, and EmitEntryStubs. The
+// copy must not release anything either, so it returns to the VM unless the
+// variable is null
+void CJITByteCode::FindLentRefs()
+{
+	for( asUINT n = 1; n + 2 < m_instrs.size(); n++ )
+	{
+		SJITInstr &copy = m_instrs[n];
+		const SJITInstr &call = m_instrs[n + 1];
+		if( copy.op != asBC_RefCpyV || m_instrs[n - 1].op != asBC_RDSPtr || !(copy.flags & JIT_INSTR_REFCOUNT) ||
+		    (copy.flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_BORROW | JIT_INSTR_MOVE)) ||
+		    (call.op != asBC_CALL && call.op != asBC_CALLINTF) || !(call.flags & JIT_INSTR_INLINE) ||
+		    (call.flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_DEAD)) )
+			continue;
+
+		// The object is the one that the method is called on
+		const std::vector<SJITInlinee> &inlinees = GetInlinees(n + 1);
+		bool plain = !inlinees.empty() && inlinees[0].code->GetFunction()->objectType != 0;
+		for( asUINT k = 0; k < inlinees.size() && plain; k++ )
+		{
+			const std::vector<SJITInstr> &body = inlinees[k].code->GetInstructions();
+			for( asUINT i = 0; i < body.size() && plain; i++ )
+				plain = (body[i].flags & JIT_INSTR_DEAD) ||
+				        (!IsSyncPoint(body[i].op) && body[i].op != asBC_FREE && body[i].op != asBC_COPY && body[i].op != asBC_Cast);
+		}
+		if( !plain )
+			continue;
+
+		// The handles of other variables may be released in between, e.g. the one that
+		// keeps an array alive while the method is called on its element
+		int var = asBC_SWORDARG0(copy.bc);
+		asUINT f = n + 2;
+		while( f < m_instrs.size() && !(m_instrs[f].flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) &&
+		       (m_instrs[f].op == asBC_JitEntry || (m_instrs[f].op == asBC_FREE && asBC_SWORDARG0(m_instrs[f].bc) != var)) )
+			f++;
+		if( f >= m_instrs.size() )
+			continue;
+		SJITInstr &release = m_instrs[f];
+		if( release.op != asBC_FREE || asBC_SWORDARG0(release.bc) != var || !(release.flags & JIT_INSTR_REFCOUNT) ||
+		    (release.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_MOVED)) )
+			continue;
+
+		copy.flags    |= JIT_INSTR_LEND;
+		release.flags |= JIT_INSTR_LENT;
+		for( asUINT i = n; i < f; i++ )
+			m_lentFrees[i] = f;
 	}
 }
 
