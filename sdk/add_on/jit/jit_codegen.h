@@ -15,6 +15,8 @@
 
 BEGIN_AS_NAMESPACE
 
+struct SJITGenericInfo;
+
 struct SJITCodeGenOptions
 {
 	bool noSuspend;         // don't emit the suspend checks
@@ -31,6 +33,7 @@ struct SJITCodeGenOptions
 	void       *exactParam;
 	const std::map<int, int> *frameSlots; // the variables whose objects are kept in the frame, and where they are, or null, see EmitFrameObject
 	asUINT frameObjectSize;  // the bytes of the memory for those objects
+	std::vector<SJITGenericInfo*> *genericInfos; // where the calls of generic functions add what JIT_CallGeneric looks up, which the code needs, or null
 };
 
 // Architecture-specific pieces used by the generated function wrappers too.

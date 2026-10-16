@@ -12,6 +12,7 @@
 #include "as_memory.h"
 #include "as_texts.h"
 #include "as_thread.h"
+#include "as_generic.h"
 
 #include <math.h>
 #include <string.h>
@@ -130,9 +131,188 @@ static inline int CheckStatusAfterSystemCall(asSVMRegisters *regs, asCContext *c
 	return 0;
 }
 
+// The generic interface with the checks of the arguments and the return value
+// looked up in SJITGenericInfo. The results are the same as those of asCGeneric
+class CJITGeneric : public asCGeneric
+{
+public:
+	CJITGeneric(asCScriptEngine *engine, const SJITGenericInfo *info, void *obj, asDWORD *args)
+		: asCGeneric(engine, info->func, obj, args), m_info(info) {}
+
+	asBYTE GetArgByte(asUINT arg)     { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 1 ? *(asBYTE*)&stackPointer[a->offset] : 0; }
+	asWORD GetArgWord(asUINT arg)     { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 2 ? *(asWORD*)&stackPointer[a->offset] : 0; }
+	asDWORD GetArgDWord(asUINT arg)   { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 4 ? *(asDWORD*)&stackPointer[a->offset] : 0; }
+	asQWORD GetArgQWord(asUINT arg)   { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 8 ? *(asQWORD*)&stackPointer[a->offset] : 0; }
+	float GetArgFloat(asUINT arg)     { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 4 ? *(float*)&stackPointer[a->offset] : 0; }
+	double GetArgDouble(asUINT arg)   { const SJITGenericArg *a = Arg(arg); return a && a->primitive == 8 ? *(double*)&stackPointer[a->offset] : 0; }
+	void *GetArgAddress(asUINT arg)   { const SJITGenericArg *a = Arg(arg); return a && a->address ? (void*)*(asPWORD*)&stackPointer[a->offset] : 0; }
+	void *GetArgObject(asUINT arg)    { const SJITGenericArg *a = Arg(arg); return a && a->object ? *(void**)&stackPointer[a->offset] : 0; }
+	void *GetAddressOfArg(asUINT arg)
+	{
+		const SJITGenericArg *a = Arg(arg);
+		if( a == 0 )
+			return 0;
+		return a->value ? *(void**)&stackPointer[a->offset] : (void*)&stackPointer[a->offset];
+	}
+
+	int SetReturnByte(asBYTE val)     { if( m_info->returnPrimitive != 1 ) return asINVALID_TYPE; *(asBYTE*)&returnVal = val; return 0; }
+	int SetReturnWord(asWORD val)     { if( m_info->returnPrimitive != 2 ) return asINVALID_TYPE; *(asWORD*)&returnVal = val; return 0; }
+	int SetReturnDWord(asDWORD val)   { if( m_info->returnPrimitive != 4 ) return asINVALID_TYPE; *(asDWORD*)&returnVal = val; return 0; }
+	int SetReturnQWord(asQWORD val)   { if( m_info->returnDWords != 2 ) return asINVALID_TYPE; returnVal = val; return 0; }
+	int SetReturnFloat(float val)     { if( m_info->returnDWords != 1 ) return asINVALID_TYPE; *(float*)&returnVal = val; return 0; }
+	int SetReturnDouble(double val)   { if( m_info->returnDWords != 2 ) return asINVALID_TYPE; *(double*)&returnVal = val; return 0; }
+
+private:
+	const SJITGenericArg *Arg(asUINT arg) const { return arg < m_info->args.size() ? &m_info->args[arg] : 0; }
+	const SJITGenericInfo *m_info;
+};
+
+// Whether CallSimpleGeneric can call the function, see SJITGenericInfo
+static bool IsSimpleGeneric(asCScriptFunction *func)
+{
+	const asSSystemFunctionInterface *sysFunc = func ? func->sysFuncIntf : 0;
+	return sysFunc && (sysFunc->callConv == ICC_GENERIC_FUNC || sysFunc->callConv == ICC_GENERIC_METHOD) && !func->IsVariadic();
+}
+
+SJITGenericInfo *JIT_CreateGenericInfo(asCScriptFunction *func)
+{
+	if( !IsSimpleGeneric(func) )
+		return 0;
+	SJITGenericInfo *info = new SJITGenericInfo;
+	info->func = func;
+	const asCDataType &ret = func->returnType;
+	bool retPrimitive = !(ret.IsObject() || ret.IsFuncdef() || ret.IsReference());
+	info->returnPrimitive = retPrimitive ? ret.GetSizeInMemoryBytes() : 0;
+	info->returnDWords    = retPrimitive ? ret.GetSizeOnStackDWords() : 0;
+	int offset = 0;
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = func->parameterTypes[n];
+		SJITGenericArg arg;
+		arg.offset    = offset;
+		arg.primitive = (dt.IsObject() || dt.IsFuncdef() || dt.IsReference()) ? 0 : dt.GetSizeInMemoryBytes();
+		arg.address   = dt.IsReference() || dt.IsObjectHandle();
+		arg.object    = dt.IsObject() || dt.IsFuncdef();
+		arg.value     = !dt.IsReference() && dt.IsObject() && !dt.IsObjectHandle();
+		info->args.push_back(arg);
+		offset += dt.GetSizeOnStackDWords();
+	}
+	return info;
+}
+
+// Calls the function with the generic interface and handles the return value and
+// the arguments after it like asCContext::CallGeneric
+template<class T> static void InvokeGeneric(asCContext *ctx, T &gen, asCScriptFunction *descr, asSVMRegisters *regs)
+{
+	ctx->m_callingSystemFunction = descr;
+#ifdef AS_NO_EXCEPTIONS
+	((void (*)(asIScriptGeneric*))descr->sysFuncIntf->func)(&gen);
+#else
+	try
+	{
+		((void (*)(asIScriptGeneric*))descr->sysFuncIntf->func)(&gen);
+	}
+	catch(...)
+	{
+		ctx->HandleAppException();
+	}
+#endif
+	ctx->m_callingSystemFunction = 0;
+	regs->valueRegister  = gen.returnVal;
+	regs->objectRegister = gen.objectRegister;
+	regs->objectType     = descr->returnType.GetTypeInfo();
+
+	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+	asCScriptEngine *engine = ctx->m_engine;
+	if( sysFunc->returnAutoHandle && engine->ep.genericCallMode == 1 && regs->objectRegister )
+		engine->CallObjectMethod(regs->objectRegister, CastToObjectType(descr->returnType.GetTypeInfo())->beh.addref);
+
+	const asUINT cleanCount = sysFunc->cleanArgs.GetLength();
+	for( asUINT n = 0; n < cleanCount; n++ )
+	{
+		const asSSystemFunctionInterface::SClean &clean = sysFunc->cleanArgs[n];
+		void **addr = (void**)&gen.stackPointer[clean.off];
+		if( clean.op == 0 )
+		{
+			if( *addr != 0 )
+			{
+				engine->CallObjectMethod(*addr, clean.ot->beh.release);
+				*addr = 0;
+			}
+		}
+		else
+		{
+			if( clean.op == 2 )
+				engine->CallObjectMethod(*addr, clean.ot->beh.destruct);
+			engine->CallFree(*addr);
+		}
+	}
+}
+
+// Calls the function like asCContext::CallGeneric for the functions that
+// IsSimpleGeneric accepts, without making the interface for the variadic functions
+// as well, with the interface that checks the types itself unless the information
+// is given. Returns the dwords of the arguments to pop, or -1 for a null object,
+// which the context raises the exception for
+static int CallSimpleGeneric(asSVMRegisters *regs, asCContext *ctx, asCScriptFunction *descr, const SJITGenericInfo *info)
+{
+	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+	asDWORD *args = regs->stackPointer;
+	int popSize = sysFunc->paramSize;
+	void *obj = 0;
+	if( sysFunc->callConv == ICC_GENERIC_METHOD )
+	{
+		obj = *(void**)args;
+		if( obj == 0 )
+			return -1;
+		args += AS_PTR_SIZE;
+		popSize += AS_PTR_SIZE;
+	}
+	if( descr->DoesReturnOnStack() )
+	{
+		args += AS_PTR_SIZE;
+		popSize += AS_PTR_SIZE;
+	}
+	if( info )
+	{
+		CJITGeneric gen(ctx->m_engine, info, obj, args);
+		InvokeGeneric(ctx, gen, descr, regs);
+	}
+	else
+	{
+		asCGeneric gen(ctx->m_engine, descr, obj, args);
+		InvokeGeneric(ctx, gen, descr, regs);
+	}
+	return popSize;
+}
+
+int JIT_CallGeneric(asSVMRegisters *regs, const SJITGenericInfo *info) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+	int popSize = CallSimpleGeneric(regs, ctx, info->func, info);
+	if( popSize < 0 )
+		return JIT_CallSystem(regs, info->func->GetId());
+	regs->stackPointer += popSize;
+	regs->programPointer += 2;
+	return CheckStatusAfterSystemCall(regs, ctx);
+}
+
 int JIT_CallSystem(asSVMRegisters *regs, int funcId) noexcept
 {
 	asCContext *ctx = GetContext(regs);
+
+	// The engine makes the interface for the variadic functions for every generic call
+	asCScriptFunction *descr = ctx->m_engine->scriptFunctions[funcId];
+	if( IsSimpleGeneric(descr) )
+	{
+		int popSize = CallSimpleGeneric(regs, ctx, descr, 0);
+		if( popSize >= 0 )
+		{
+			regs->stackPointer += popSize;
+			regs->programPointer += 2;
+			return CheckStatusAfterSystemCall(regs, ctx);
+		}
+	}
 
 	// The program pointer must stay on the CALLSYS instruction during the call
 	regs->stackPointer += CallSystemFunction(funcId, ctx);

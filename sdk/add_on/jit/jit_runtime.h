@@ -6,6 +6,7 @@
 #endif
 
 #include <atomic>
+#include <vector>
 
 BEGIN_AS_NAMESPACE
 
@@ -128,6 +129,32 @@ struct SJITObjectLayout
 };
 
 const SJITObjectLayout &JIT_GetObjectLayout() noexcept;
+
+// A registered function with the generic calling convention, and what the generic
+// interface checks of its arguments and return value, so that the function reads
+// them without the checks going through the types each time, see JIT_CallGeneric.
+// Only made for the functions that aren't variadic
+struct SJITGenericArg
+{
+	int    offset;    // dwords from the first argument
+	asUINT primitive; // size in memory of a primitive passed by value, else 0
+	bool   address;   // a reference or a handle, which GetArgAddress reads
+	bool   object;    // an object or a function, which GetArgObject reads
+	bool   value;     // an object passed by value, whose address is the pointer
+};
+struct SJITGenericInfo
+{
+	asCScriptFunction          *func;
+	asUINT                      returnPrimitive; // size in memory of a primitive return value, else 0
+	asUINT                      returnDWords;    // dwords on the stack of a primitive return value, else 0
+	std::vector<SJITGenericArg> args;
+};
+
+// The information of the function, or null if it doesn't qualify. The caller owns it
+SJITGenericInfo *JIT_CreateGenericInfo(asCScriptFunction *func);
+
+// asBC_CALLSYS of the function of the information, like JIT_CallSystem
+int    JIT_CallGeneric(asSVMRegisters *regs, const SJITGenericInfo *info) noexcept;
 
 // Kinds of calls handled by JIT_CallScript
 enum EJITCallKind

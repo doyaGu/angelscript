@@ -663,8 +663,10 @@ RetObj.3       0.040    0.004      0.004    0.004     0.009
    hidden pointer in x8.
  - Direct system calls are only made for functions with primitive, reference,
    and handle parameters, and primitive, reference, handle, and value type return
-   values. Everything else, including asCALL_GENERIC, goes through the same code
-   as the VM.
+   values. Everything else goes through the same code as the VM, except that the
+   functions with asCALL_GENERIC, other than the variadic ones, get an
+   asIScriptGeneric that knows where their arguments are and which types they
+   have, instead of looking them up for each argument read and value returned.
  - The \ref doc_addon_jit_tiered "deferred functions" are compiled by the thread
    that executes them when they reach a threshold, which waits for the compilation.
    The application can call \c CJITCompiler::CompileDeferred from another thread
@@ -687,7 +689,8 @@ engineering work is:
  - Find an unwind-registration scheme that works with the system unwinder on
    x86-64 macOS, so that direct system calls can be enabled there by default.
  - Extend direct system calls to more native ABI layouts. Complex value types
-   and asCALL_GENERIC deliberately continue through the engine today.
+   and asCALL_GENERIC deliberately continue to be called through the interfaces
+   of the engine today.
  - Avoid synchronous compilation pauses at tier and profile thresholds. The
    application can already compile not-yet-triggered deferred functions in a
    worker thread with \c CJITCompiler::CompileDeferred, but the add-on has no

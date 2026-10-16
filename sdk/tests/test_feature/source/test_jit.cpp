@@ -5984,6 +5984,251 @@ static bool TestCodeSizeStatistics()
 	return fail;
 }
 
+// The calls of the registered functions with the generic calling convention go
+// through the generic interface of JIT_CallGeneric, whose arguments and return values
+// must be those of the VM's, also for the wrong types, which give zero or
+// asINVALID_TYPE, and for the methods, the null objects, the exceptions and the
+// suspensions in the functions, the objects and handles passed and returned, and
+// the variadic functions
+namespace GenericCalls
+{
+	struct Counter { int value; };
+	static Counter g_counter;
+	static std::string g_log;
+	static CBufferedOutStream msgs; // also for the messages of the engine when it shuts down
+
+	// Every accessor on every argument, and on one past them
+	static void Probe(asIScriptGeneric *gen)
+	{
+		std::stringstream s;
+		for( asUINT n = 0; n <= asUINT(gen->GetArgCount()); n++ )
+			s << unsigned(gen->GetArgByte(n)) << ',' << gen->GetArgWord(n) << ',' << gen->GetArgDWord(n) << ',' << gen->GetArgQWord(n) << ','
+			  << gen->GetArgFloat(n) << ',' << gen->GetArgDouble(n) << ',' << (gen->GetArgAddress(n) != 0) << ','
+			  << (gen->GetArgObject(n) != 0) << ',' << (gen->GetAddressOfArg(n) != 0) << ';';
+		s << *(std::string*)gen->GetArgAddress(6) << ',' << (gen->GetArgAddress(7) == &g_counter) << ',' << (gen->GetArgObject(7) == &g_counter) << ','
+		  << *(std::string*)gen->GetArgObject(8) << ',' << *(std::string*)gen->GetAddressOfArg(8) << ',' << **(std::string**)gen->GetAddressOfArg(6) << '\n';
+		g_log += s.str();
+		gen->SetReturnDWord(gen->GetArgDWord(2) + asDWORD(gen->GetArgByte(0)) + gen->GetArgWord(9));
+	}
+
+	// Every setter, then the one of the type
+	static void Returns(asIScriptGeneric *gen)
+	{
+		int k = int(gen->GetArgDWord(0));
+		std::stringstream s;
+		s << gen->SetReturnByte(asBYTE(k)) << gen->SetReturnWord(asWORD(k)) << gen->SetReturnDWord(asDWORD(k)) << gen->SetReturnQWord(asQWORD(k))
+		  << gen->SetReturnFloat(float(k)) << gen->SetReturnDouble(double(k)) << gen->SetReturnAddress(&g_counter) << '\n';
+		g_log += s.str();
+		int typeId = gen->GetReturnTypeId();
+		if( typeId == asTYPEID_INT8 )        gen->SetReturnByte(asBYTE(-k));
+		else if( typeId == asTYPEID_INT16 )  gen->SetReturnWord(asWORD(-1000 * k));
+		else if( typeId == asTYPEID_INT32 )  gen->SetReturnDWord(asDWORD(-100000 * k));
+		else if( typeId == asTYPEID_INT64 )  gen->SetReturnQWord(asQWORD(-(asINT64(1) << 40) * k));
+		else if( typeId == asTYPEID_FLOAT )  gen->SetReturnFloat(0.5f * float(k));
+		else if( typeId == asTYPEID_DOUBLE ) gen->SetReturnDouble(0.25 * k);
+		else                                 new(gen->GetAddressOfReturnLocation()) std::string(k, 'x');
+	}
+
+	static void GetCounter(asIScriptGeneric *gen) { gen->SetReturnObject(&g_counter); }
+	static void Add(asIScriptGeneric *gen)
+	{
+		Counter *c = (Counter*)gen->GetObject();
+		c->value += int(gen->GetArgDWord(0));
+		gen->SetReturnDWord(asDWORD(c->value));
+	}
+	static void Self(asIScriptGeneric *gen) { gen->SetReturnAddress(gen->GetObject()); }
+	static void Length(asIScriptGeneric *gen) { gen->SetReturnDWord(((CScriptArray*)gen->GetArgObject(0))->GetSize()); }
+	static void LengthOwned(asIScriptGeneric *gen)
+	{
+		// The handles that aren't auto handles are released by the function
+		CScriptArray *a = (CScriptArray*)gen->GetArgObject(0);
+		gen->SetReturnDWord(a->GetSize());
+		a->Release();
+	}
+	static void Sum(asIScriptGeneric *gen)
+	{
+		int s = 0;
+		for( int n = 0; n < gen->GetArgCount(); n++ )
+			s += int(gen->GetArgDWord(n));
+		gen->SetReturnDWord(asDWORD(s));
+	}
+	static void Fails(asIScriptGeneric *gen)
+	{
+		int mode = int(gen->GetArgDWord(0));
+		if( mode == 1 )
+			asGetActiveContext()->SetException("set by the function");
+		else if( mode == 2 )
+			throw std::runtime_error("thrown by the function");
+		else if( mode == 3 )
+			asGetActiveContext()->Suspend();
+		gen->SetReturnDWord(asDWORD(mode + 10));
+	}
+
+	static const char *script =
+		"int probeAll(int k)                                                                          \n"
+		"{                                                                                            \n"
+		"  string s = 'ref' + k;                                                                      \n"
+		"  int r = 0;                                                                                 \n"
+		"  for( int i = 0; i < 3; i++ )                                                               \n"
+		"    r += probe(int8(-3 * k), 2.5 * k, 100000 + k, int64(1) << (32 + k), 1.25f * k, k % 2 == 1, \n"
+		"               s, getCounter(), 'val' + k, int16(-300 - k), uint8(200 + k));                 \n"
+		"  return r;                                                                                  \n"
+		"}                                                                                            \n"
+		"string returns(int k)                                                                        \n"
+		"{                                                                                            \n"
+		"  return rByte(k) + ',' + rWord(k) + ',' + rDWord(k) + ',' + rQWord(k) + ',' + rFloat(k) + ',' + \n"
+		"         rDouble(k) + ',' + rString(k);                                                      \n"
+		"}                                                                                            \n"
+		"int methods(int k)                                                                           \n"
+		"{                                                                                            \n"
+		"  Counter@ c = getCounter();                                                                 \n"
+		"  c.value = 0;                                                                               \n"
+		"  int s = 0;                                                                                 \n"
+		"  for( int i = 0; i < k; i++ ) s += c.add(i);                                                \n"
+		"  s += c.self().add(1000);                                                                   \n"
+		"  Counter@ n;                                                                                \n"
+		"  try { s += n.add(1); } catch { s += 7; }                                                   \n"
+		"  return s;                                                                                  \n"
+		"}                                                                                            \n"
+		"int nullMethod() { Counter@ n; return n.add(1); }                                            \n"
+		"int handles(int k)                                                                           \n"
+		"{                                                                                            \n"
+		"  array<int> a(k);                                                                           \n"
+		"  int s = length(a) * 10 + lengthAuto(a) + vsum() + vsum(k) + vsum(1, 2, k);                 \n"
+		"  return s + length(a);                                                                      \n"
+		"}                                                                                            \n"
+		"string failures(int k)                                                                       \n"
+		"{                                                                                            \n"
+		"  string r;                                                                                  \n"
+		"  for( int i = 0; i < 3; i++ ) { try { r += fails(i) + k + ';'; } catch { r += 'caught;'; } } \n"
+		"  return r;                                                                                  \n"
+		"}                                                                                            \n"
+		"int uncaught(int k) { return fails(k); }                                                     \n"
+		"int suspended(int k) { int s = 0; for( int i = 0; i < k; i++ ) s += fails(3) + i; return s; } \n";
+
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetEngineProperty(asEP_USE_CHARACTER_LITERALS, false);
+		engine->SetJITCompiler(jit);
+		RegisterStdString(engine);
+		RegisterScriptArray(engine, false);
+		int r = 0;
+		r |= engine->RegisterObjectType("Counter", 0, asOBJ_REF | asOBJ_NOCOUNT);
+		r |= engine->RegisterObjectProperty("Counter", "int value", asOFFSET(Counter, value));
+		r |= engine->RegisterObjectMethod("Counter", "int add(int)", asFUNCTION(Add), asCALL_GENERIC);
+		r |= engine->RegisterObjectMethod("Counter", "Counter &self()", asFUNCTION(Self), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("Counter@ getCounter()", asFUNCTION(GetCounter), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int probe(int8, double, int, int64, float, bool, const string &in, Counter@, string, int16, uint8)", asFUNCTION(Probe), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int8 rByte(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int16 rWord(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int rDWord(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int64 rQWord(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("float rFloat(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("double rDouble(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("string rString(int)", asFUNCTION(Returns), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int length(array<int>@)", asFUNCTION(LengthOwned), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int lengthAuto(array<int>@+)", asFUNCTION(Length), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int vsum(int ...)", asFUNCTION(Sum), asCALL_GENERIC);
+		r |= engine->RegisterGlobalFunction("int fails(int)", asFUNCTION(Fails), asCALL_GENERIC);
+		if( r < 0 )
+			TEST_FAILED;
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *calls[] = { "int probeAll(int)", "string returns(int)", "int methods(int)", "int nullMethod()", "int handles(int)",
+		                        "string failures(int)", "int uncaught(int)", "int suspended(int)" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		g_log.clear();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(calls) / sizeof(calls[0]); n++ )
+				for( int k = 1; k <= 3; k++ )
+				{
+					asIScriptFunction *func = mod->GetFunctionByDecl(calls[n]);
+					ctx->Prepare(func);
+					if( func->GetParamCount() )
+						ctx->SetArgDWord(0, asDWORD(k));
+					int r = ctx->Execute();
+					int suspensions = 0;
+					while( r == asEXECUTION_SUSPENDED && suspensions < 100 )
+					{
+						suspensions++;
+						r = ctx->Execute();
+					}
+					s << calls[n] << " " << k << ": ";
+					if( r == asEXECUTION_FINISHED )
+					{
+						if( strstr(calls[n], "string ") == calls[n] )
+							s << *(std::string*)ctx->GetReturnObject();
+						else
+							s << int(ctx->GetReturnDWord());
+					}
+					else if( r == asEXECUTION_EXCEPTION )
+						s << ctx->GetExceptionString();
+					else
+						s << "result " << r;
+					if( suspensions )
+						s << " after " << suspensions << " suspensions";
+					s << "\n" << g_log;
+					g_log.clear();
+				}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestGenericCalls()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	GenericCalls::msgs.buffer.clear();
+	std::string expected = GenericCalls::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( !GenericCalls::msgs.buffer.empty() )
+	{
+		PRINTF("%s", GenericCalls::msgs.buffer.c_str());
+		TEST_FAILED;
+	}
+	if( expected.find("int probeAll(int) 1: ") == std::string::npos || expected.find("int suspended(int) 3: 42 after 3 suspensions") == std::string::npos ||
+	    expected.find("int nullMethod() 1: Null pointer access") == std::string::npos )
+	{
+		PRINTF("generic calls:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine
+	CJITCompiler jit(envFlags);
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	GenericCalls::msgs.buffer.clear();
+	std::string actual = GenericCalls::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	if( !GenericCalls::msgs.buffer.empty() )
+	{
+		PRINTF("%s", GenericCalls::msgs.buffer.c_str());
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("generic calls:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -6055,6 +6300,7 @@ bool Test()
 	fail = TestLentRefs() || fail;
 	fail = TestInPlaceAssigns() || fail;
 	fail = TestFrameObjects() || fail;
+	fail = TestGenericCalls() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

@@ -1214,10 +1214,27 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			break;
 		{
 			SyncForCall(idx);
-			InvokeNode *call = Invoke((const void*)JIT_CallSystem, FuncSignature::build<int, asSVMRegisters*, int>());
+			SJITGenericInfo *generic = 0;
+			if( m_options.genericInfos )
+			{
+				asCScriptEngine *engine = m_code->GetFunction()->engine;
+				generic = JIT_CreateGenericInfo(engine->scriptFunctions[asBC_INTARG(bc)]);
+				if( generic )
+					m_options.genericInfos->push_back(generic);
+			}
+			InvokeNode *call;
+			if( generic )
+			{
+				call = Invoke((const void*)JIT_CallGeneric, FuncSignature::build<int, asSVMRegisters*, const SJITGenericInfo*>());
+				call->set_arg(1, Imm((asPWORD)generic));
+			}
+			else
+			{
+				call = Invoke((const void*)JIT_CallSystem, FuncSignature::build<int, asSVMRegisters*, int>());
+				call->set_arg(1, Imm(asBC_INTARG(bc)));
+			}
 			Gp r = m_uc.new_gp32();
 			SetRegsArg(call, 0);
-			call->set_arg(1, Imm(asBC_INTARG(bc)));
 			call->set_ret(0, r);
 			EmitAfterHelperCall(r, idx);
 		}

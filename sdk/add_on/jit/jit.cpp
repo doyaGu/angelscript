@@ -71,6 +71,7 @@ struct CJITCompiler::SImpl
 	SJITStatistics         stats;
 	std::map<asJITFunction, void*> unwindInfo; // registered unwind information by function
 	std::map<asJITFunction, size_t> codeSizes; // the sizes of the current and retired code
+	std::map<asJITFunction, std::vector<SJITGenericInfo*> > genericInfos; // what the code passes to JIT_CallGeneric
 	CJITAOTOutput          aotOutput;    // the code generated for SetAOTOutput
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
@@ -1111,6 +1112,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	options.exactParam = this;
 	options.frameSlots = &frameObjectSlots;
 	options.frameObjectSize = frameObjectSize;
+	std::vector<SJITGenericInfo*> generic;
+	options.genericInfos = &generic;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
@@ -1186,8 +1189,12 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 			stats.callsInlined         += gen.GetInlinedCallCount();
 			codeSizes[jitFunc] = holder.code_size();
 			stats.codeSize += codeSizes[jitFunc];
+			if( !generic.empty() )
+				genericInfos[jitFunc].swap(generic);
 		}
 	}
+	for( size_t n = 0; n < generic.size(); n++ )
+		delete generic[n];
 
 	if( !ok )
 	{
@@ -1511,6 +1518,13 @@ void CJITCompiler::SImpl::Release(asJITFunction code)
 	{
 		CJITUnwindInfo::Unregister(it->second);
 		unwindInfo.erase(it);
+	}
+	std::map<asJITFunction, std::vector<SJITGenericInfo*> >::iterator generic = genericInfos.find(code);
+	if( generic != genericInfos.end() )
+	{
+		for( size_t n = 0; n < generic->second.size(); n++ )
+			delete generic->second[n];
+		genericInfos.erase(generic);
 	}
 	if( runtime.release(code) == asmjit::Error::kOk )
 	{
