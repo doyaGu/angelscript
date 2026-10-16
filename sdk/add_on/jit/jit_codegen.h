@@ -191,6 +191,7 @@ protected:
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	void EmitIndexer(asUINT idx);
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
+	void EmitInPlaceAssign(asUINT idx);
 	void EmitOwnLent(asUINT idx);
 
 	// A 32bit value pushed on the static stack, which is also in a register or an

@@ -1,4 +1,5 @@
 #include "jit_bytecode.h"
+#include "jit_runtime.h"
 
 // Internal engine headers. The JIT must be compiled with the same
 // configuration as the engine library (see CMakeLists.txt)
@@ -7,6 +8,7 @@
 #include "as_module.h"
 #include "as_objecttype.h"
 #include "as_callfunc.h"
+#include "as_scriptobject.h"
 
 #include <algorithm>
 #include <climits>
@@ -379,6 +381,12 @@ const std::vector<asCScriptFunction*> &CJITByteCode::GetBorrowedTargets(asUINT i
 	static const std::vector<asCScriptFunction*> none;
 	std::map<asUINT, std::vector<asCScriptFunction*> >::const_iterator it = m_borrowedTargets.find(instrIdx);
 	return it == m_borrowedTargets.end() ? none : it->second;
+}
+
+asCObjectType *CJITByteCode::GetInPlaceAssign(asUINT instrIdx) const
+{
+	std::map<asUINT, asCObjectType*>::const_iterator it = m_assigns.find(instrIdx);
+	return it == m_assigns.end() ? 0 : it->second;
 }
 
 int CJITByteCode::GetLentFree(asUINT instrIdx) const
@@ -813,6 +821,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 				search.path.pop_back();
 				callee->FindIndexers(inlining.indexers);
+				callee->FindInPlaceAssigns();
 				callee->AnalyseBorrows(inlining.borrowCalls, inlining.classes, inlining.profile);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
@@ -942,6 +951,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
 	FindIndexers(inlining ? inlining->indexers : 0);
+	FindInPlaceAssigns();
 	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
@@ -1368,6 +1378,52 @@ void CJITByteCode::FindInPlaceRefCounts()
 			continue;
 		if( GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_SCRIPT_OBJECT )
 			instr.flags |= JIT_INSTR_REFCOUNT;
+	}
+}
+
+// The default assignments of the script classes whose objects are copied by copying
+// the bytes of their members, see JIT_IsPlainScriptType. The engine's assignment
+// copies member by member, looking at the type of each. The class is that of the
+// variable the assignment is called on, and the code checks that both objects are of
+// it, and otherwise returns to the VM, which calls the assignment. As nothing is
+// called then, the instruction isn't a sync point
+void CJITByteCode::FindInPlaceAssigns()
+{
+	m_assigns.clear();
+	asCScriptEngine *engine = m_func->engine;
+	const asCArray<asSScriptVariable*> &vars = m_func->scriptData->variables;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		instr.flags &= ~JIT_INSTR_ASSIGN;
+		if( instr.op != asBC_CALLSYS || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) || !m_staticStack )
+			continue;
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 ||
+		    func->sysFuncIntf->callConv != ICC_CDECL_OBJLAST ||
+		    func->sysFuncIntf->func != reinterpret_cast<asFUNCTION_t>(ScriptObject_Assignment) )
+			continue;
+
+		// The object is pushed last, from the variable
+		int push = FindPush(n, m_stackDepth[n]);
+		if( push < 0 || m_instrs[push].op != asBC_PshVPtr )
+			continue;
+		int var = asBC_SWORDARG0(m_instrs[push].bc);
+		asCObjectType *type = 0;
+		bool unique = true;
+		for( asUINT v = 0; v < vars.GetLength() && unique; v++ )
+		{
+			if( vars[v]->stackOffset != var )
+				continue;
+			asCObjectType *varType = CastToObjectType(vars[v]->type.GetTypeInfo());
+			unique = varType && (type == 0 || type == varType);
+			type = varType;
+		}
+		if( !unique || type == 0 || !(type->flags & asOBJ_SCRIPT_OBJECT) || !JIT_IsPlainScriptType(type) )
+			continue;
+		instr.flags |= JIT_INSTR_ASSIGN;
+		m_assigns[n] = type;
 	}
 }
 

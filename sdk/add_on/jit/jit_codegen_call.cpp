@@ -1189,6 +1189,11 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	switch( instr.op )
 	{
 	case asBC_CALLSYS:
+		if( instr.flags & JIT_INSTR_ASSIGN )
+		{
+			EmitInPlaceAssign(idx);
+			break;
+		}
 		if( instr.flags & JIT_INSTR_INDEXER )
 		{
 			EmitIndexer(idx);
@@ -1440,6 +1445,75 @@ void CJITCodeGen::EmitIndexer(asUINT idx)
 		SetVRAddr(idx, mem_ptr(elem));
 	else if( m_code->IsVRLiveAfter(idx) )
 		StoreVRPtr(elem);
+}
+
+// Copies the members of an object of a plain script class to the other, which the
+// default assignment does member by member, see CJITByteCode::FindInPlaceAssigns.
+// Both objects must be of the class of the variable, otherwise the VM calls the
+// assignment, which also raises the exception for a null object. Pops the objects
+// and leaves the reference to the assigned one in the value register
+void CJITCodeGen::EmitInPlaceAssign(asUINT idx)
+{
+	asCObjectType *type = m_code->GetInPlaceAssign(idx);
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Label bail = BailLabel(idx);
+	Gp self  = m_uc.new_gp_ptr();
+	Gp other = m_uc.new_gp_ptr();
+	Gp t     = m_uc.new_gp_ptr();
+	Gp expected = PtrConst(asPWORD(type));
+	m_uc.load(self, Stack(0));
+	m_uc.load(other, Stack(AS_PTR_SIZE));
+	m_uc.j(bail, test_z(self));
+	m_uc.j(bail, test_z(other));
+	m_uc.load(t, Addr(self, layout.objectType));
+	m_uc.j(bail, cmp_ne(t, expected));
+	m_uc.load(t, Addr(other, layout.objectType));
+	m_uc.j(bail, cmp_ne(t, expected));
+
+	// The members follow the object header. A copy onto itself changes nothing
+	int start = layout.scriptObjectSize;
+	int size  = int(type->size) - start;
+	if( size > 128 )
+	{
+		Gp dst = m_uc.new_gp_ptr();
+		Gp src = m_uc.new_gp_ptr();
+		m_uc.add(dst, self, Imm(start));
+		m_uc.add(src, other, Imm(start));
+		InvokeNode *call = Invoke((const void*)memmove, FuncSignature::build<void*, void*, const void*, size_t>());
+		call->set_arg(0, dst);
+		call->set_arg(1, src);
+		call->set_arg(2, Imm(int64_t(size)));
+	}
+	else
+	{
+		int offset = start;
+		Gp v = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
+		if( Is64Bit() )
+			for( ; size - (offset - start) >= 8; offset += 8 )
+			{
+				m_uc.load_u64(v, Addr(other, offset));
+				m_uc.store_u64(Addr(self, offset), v);
+			}
+		for( ; size - (offset - start) >= 4; offset += 4 )
+		{
+			m_uc.load_u32(v.r32(), Addr(other, offset));
+			m_uc.store_u32(Addr(self, offset), v.r32());
+		}
+		for( ; size - (offset - start) >= 2; offset += 2 )
+		{
+			m_uc.load_u16(v.r32(), Addr(other, offset));
+			m_uc.store_u16(Addr(self, offset), v.r32());
+		}
+		for( ; size - (offset - start) >= 1; offset += 1 )
+		{
+			m_uc.load_u8(v.r32(), Addr(other, offset));
+			m_uc.store_u8(Addr(self, offset), v.r32());
+		}
+	}
+
+	PopStack(2 * PTR_BYTES);
+	if( m_code->IsVRLiveAfter(idx) )
+		StoreVRPtr(self);
 }
 
 // A length query pops the object and sets the value register to the number of

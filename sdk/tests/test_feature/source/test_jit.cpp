@@ -3455,6 +3455,160 @@ static bool TestLentRefs()
 	return fail;
 }
 
+// The default assignments of the plain script classes copy the members in place,
+// see CJITByteCode::FindInPlaceAssigns. The results must be those of the VM, also for
+// members of different sizes, large classes, objects of other classes than that of
+// the variable, a null object, an object assigned to itself, and the classes that
+// the engine's assignment is still called for
+namespace InPlaceAssigns
+{
+	static const char *script =
+		"class Vec2                                                               \n"
+		"{                                                                        \n"
+		"  float x, y;                                                            \n"
+		"  Vec2() {}                                                              \n"
+		"  Vec2(float a, float b) { x = a; y = b; }                               \n"
+		"  Vec2 opAdd(const Vec2 &in o) const { return Vec2(x + o.x, y + o.y); }  \n"
+		"}                                                                        \n"
+		"class Flags { bool a; int8 b; int16 c; bool d; int e; }                  \n"
+		"class Big                                                                \n"
+		"{                                                                        \n"
+		"  double a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;                         \n"
+		"  double b0, b1, b2, b3, b4, b5, b6, b7, b8, b9;                         \n"
+		"}                                                                        \n"
+		"class Base { int v; }                                                    \n"
+		"class Derived : Base { int w; }                                          \n"
+		"class WithHandle { Base@ h; int v; }                                     \n"
+		"class Custom { int v; Custom &opAssign(const Custom &in o) { v = o.v * 2; return this; } } \n"
+		"int vec()                                                                \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2), b(3, 4);                                                 \n"
+		"  for( int i = 0; i < 10; i++ )                                          \n"
+		"    a = a + b;                                                           \n"
+		"  return int(a.x * 100 + a.y);                                           \n"
+		"}                                                                        \n"
+		"int flags()                                                              \n"
+		"{                                                                        \n"
+		"  Flags f, g;                                                            \n"
+		"  g.a = true; g.b = -3; g.c = 300; g.d = true; g.e = 7;                  \n"
+		"  f = g;                                                                 \n"
+		"  return (f.a ? 1 : 0) + f.b * 10 + f.c * 100 + (f.d ? 100000 : 0) + f.e * 1000000; \n"
+		"}                                                                        \n"
+		"int big()                                                                \n"
+		"{                                                                        \n"
+		"  Big a, b;                                                              \n"
+		"  b.a0 = 1; b.a9 = 2; b.b0 = 3; b.b9 = 4;                                \n"
+		"  a = b;                                                                 \n"
+		"  return int(a.a0 + a.a9 * 10 + a.b0 * 100 + a.b9 * 1000);              \n"
+		"}                                                                        \n"
+		"int derived() { Derived d; d.v = 5; d.w = 6; Base b; b = d; return b.v; } \n"
+		"int derivedTarget()                                                      \n"
+		"{                                                                        \n"
+		"  Base b; b.v = 3;                                                       \n"
+		"  Derived d; d.v = 1; d.w = 9;                                           \n"
+		"  Base@ h = d;                                                           \n"
+		"  h = b;                                                                 \n"
+		"  return d.v * 10 + d.w;                                                 \n"
+		"}                                                                        \n"
+		"int nullSource() { Vec2 a(1, 2); Vec2@ n; a = n; return int(a.x); }      \n"
+		"int self() { Vec2 a(1, 2); a = a; return int(a.x * 10 + a.y); }          \n"
+		"int handles()                                                            \n"
+		"{                                                                        \n"
+		"  WithHandle w, v;                                                       \n"
+		"  @v.h = Base(); v.v = 4;                                                \n"
+		"  w = v;                                                                 \n"
+		"  return w.v + (w.h is v.h ? 10 : 0);                                    \n"
+		"}                                                                        \n"
+		"int custom() { Custom c, d; d.v = 3; c = d; return c.v; }                \n";
+
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "int vec()", "int flags()", "int big()", "int derived()", "int derivedTarget()",
+		                        "int nullSource()", "int self()", "int handles()", "int custom()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+		{
+			ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+			int r = ctx->Execute();
+			s << decls[n] << ": ";
+			if( r == asEXECUTION_FINISHED )
+				s << int(ctx->GetReturnDWord());
+			else if( r == asEXECUTION_EXCEPTION )
+				s << ctx->GetExceptionString() << " at " << ctx->GetExceptionLineNumber();
+			else
+				s << "result " << r;
+			s << "\n";
+		}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestInPlaceAssigns()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = InPlaceAssigns::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("int vec(): 3142\n") == std::string::npos || expected.find("int derived(): 5\n") == std::string::npos ||
+	    expected.find("int custom(): 6\n") == std::string::npos )
+	{
+		PRINTF("in-place assignments:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows which assignments are
+	// copied in place
+	FILE *log = tmpfile();
+	CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "int vec()");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = InPlaceAssigns::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected )
+	{
+		PRINTF("in-place assignments:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log )
+	{
+		std::string text;
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+		if( !(envFlags & CJITCompiler::JIT_AOT_ONLY) && text.find("; assigned in place") == std::string::npos )
+		{
+			PRINTF("in-place assignments: the assignment isn't copied in place\n");
+			TEST_FAILED;
+		}
+	}
+	return fail;
+}
+
 // The initialization lists with nothing to destroy in them are freed without going
 // through the list, see CJITByteCode::FindListFrees. Nothing may be leaked, and the
 // values in the other lists must still be destroyed
@@ -5679,6 +5833,7 @@ bool Test()
 	fail = TestSuspendChecks() || fail;
 	fail = TestIndexers() || fail;
 	fail = TestLentRefs() || fail;
+	fail = TestInPlaceAssigns() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

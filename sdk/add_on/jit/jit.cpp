@@ -450,6 +450,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			fprintf(file, "   ; lends");
 		if( instr.flags & JIT_INSTR_LENT )
 			fprintf(file, "   ; lent");
+		if( instr.flags & JIT_INSTR_ASSIGN )
+			fprintf(file, "   ; assigned in place");
 		if( instr.flags & (JIT_INSTR_MOVE | JIT_INSTR_MOVED) )
 			fprintf(file, "   ; moved");
 		if( instr.flags & JIT_INSTR_REFCOUNT )

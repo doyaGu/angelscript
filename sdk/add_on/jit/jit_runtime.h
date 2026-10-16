@@ -124,6 +124,7 @@ struct SJITObjectLayout
 	int deadFlag;             // byte of the hasRefCountReachedZero bit field in asCScriptObject
 	int deadFlagMask;
 	int atomicRefCount;       // 1 if the engine changes the reference counts with atomic operations
+	int scriptObjectSize;     // sizeof(asCScriptObject), after which the members of a script object start
 };
 
 const SJITObjectLayout &JIT_GetObjectLayout() noexcept;
@@ -278,6 +279,11 @@ void   JIT_AddRefObject(asSVMRegisters *regs, asCObjectType *objType, void *obj)
 // registers must have been synced, as Release may execute the destructor
 void   JIT_AddRefScriptObject(void *obj) noexcept;
 void   JIT_ReleaseScriptObject(void *obj) noexcept;
+
+// True for the script classes without a destructor or garbage collection whose
+// members are all primitives or enums, see JIT_ReleaseScriptObject. Their objects
+// are copied by copying the bytes of the members, see CJITByteCode::FindInPlaceAssigns
+bool   JIT_IsPlainScriptType(const asCObjectType *type);
 
 // asBC_Cast. handle is the address of the handle to cast, may be null
 void   JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept;

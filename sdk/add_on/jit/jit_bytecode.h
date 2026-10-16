@@ -36,7 +36,8 @@ enum EJITInstrFlags
 	JIT_INSTR_PROFILE     = 0x1000, // call whose receiver class or function-pointer target is noted in the profile, see SJITProfile
 	JIT_INSTR_INDEXER     = 0x2000, // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
 	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, see FindLentRefs
-	JIT_INSTR_LENT        = 0x8000  // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
+	JIT_INSTR_LENT        = 0x8000, // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
+	JIT_INSTR_ASSIGN      = 0x10000 // asBC_CALLSYS of the default assignment of a script class whose members are copied in place, see FindInPlaceAssigns
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -560,7 +561,7 @@ public:
 	// The copies of the references lent to the inlined calls don't, and neither do
 	// the copies of the script objects counted in place, which only store them on
 	// the rare paths, and the indexers compiled in place, which leave those to the VM
-	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER)); }
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER | JIT_INSTR_ASSIGN)); }
 
 	// Returns the index of the parameter in the variable, or -1
 	int    FindParam(int offset) const;
@@ -591,6 +592,10 @@ public:
 	// entry points between the call and the release, or -1, see FindLentRefs
 	int GetLentFree(asUINT instrIdx) const;
 
+	// The class whose members the instruction marked with JIT_INSTR_ASSIGN copies, see
+	// FindInPlaceAssigns
+	asCObjectType *GetInPlaceAssign(asUINT instrIdx) const;
+
 	// Marks instructions that must return to the VM. Must be called before Analyse,
 	// which marks them in the inlined functions too
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
@@ -616,6 +621,7 @@ protected:
 	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
 	void FindLentRefs();
+	void FindInPlaceAssigns();
 	void FindIndexers(const TJITContainerMethods *indexers);
 	void AnalyseBorrows(bool borrowCalls = false);
 	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
@@ -671,6 +677,7 @@ protected:
 	std::vector<asCScriptFunction*> m_borrowedDependencies; // dynamic targets embedded in generated code
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::map<asUINT, asUINT> m_lentFrees; // by instruction, see GetLentFree
+	std::map<asUINT, asCObjectType*> m_assigns; // by instruction, see GetInPlaceAssign
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;

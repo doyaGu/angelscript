@@ -94,10 +94,11 @@ const SJITObjectLayout &JIT_GetObjectLayout() noexcept
 		SJITScriptObject::FlagByte(true),
 		SJITScriptObject::FlagMask(true),
 #if defined(AS_NO_THREADS) || defined(AS_NO_ATOMIC)
-		0
+		0,
 #else
-		1
+		1,
 #endif
+		int(sizeof(asCScriptObject))
 	};
 	return layout;
 }
@@ -920,7 +921,7 @@ void JIT_AddRefScriptObject(void *obj) noexcept
 // destroyed but to be freed: no destructor, no garbage collection, and no members
 // but primitives and enums. The check reads a few fields of the type, which is
 // cheaper than caching it, as the user data of the types is read under a lock
-static bool IsPlainScriptType(const asCObjectType *type)
+bool JIT_IsPlainScriptType(const asCObjectType *type)
 {
 	if( type->flags & asOBJ_GC )
 		return false;
@@ -944,7 +945,7 @@ void JIT_ReleaseScriptObject(void *obj) noexcept
 {
 	asCScriptObject *o = static_cast<asCScriptObject*>(obj);
 	asCObjectType *type = o->objType;
-	if( SJITScriptObject::RefCount(o).get() == 1 && !SJITScriptObject::HasExtra(o) && IsPlainScriptType(type) )
+	if( SJITScriptObject::RefCount(o).get() == 1 && !SJITScriptObject::HasExtra(o) && JIT_IsPlainScriptType(type) )
 	{
 		SJITScriptObject::RefCount(o).set(0);
 		type->engine->CallFree(o);
