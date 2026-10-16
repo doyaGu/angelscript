@@ -98,14 +98,14 @@ bool CJITCodeGen::Generate()
 			loopDepth[n + 1]--;
 		}
 
-	// The room for the inlined functions is checked on entry if they are called in
-	// loops, see EmitInlineRoom
+	// The room for the inlined functions, and the constructors compiled in place, is
+	// checked on entry if they are called in loops, see EmitInlineRoom
 	bool inlinedInLoop = false;
 	int inLoop = 0;
 	for( asUINT n = 0; n < instrs.size(); n++ )
 	{
 		inLoop += loopDepth[n];
-		if( !(instrs[n].flags & JIT_INSTR_INLINE) )
+		if( !(instrs[n].flags & (JIT_INSTR_INLINE | JIT_INSTR_CONSTRUCT)) )
 			continue;
 		inlinedInLoop = inlinedInLoop || inLoop > 0;
 		int extent, depth;

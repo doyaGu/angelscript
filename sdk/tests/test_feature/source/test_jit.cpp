@@ -3609,6 +3609,182 @@ static bool TestInPlaceAssigns()
 	return fail;
 }
 
+// The constructors that only set members to their arguments and to constants are
+// compiled in place of the asBC_ALLOC calling them, see
+// CJITByteCode::FindInPlaceConstructors. The objects must be those of the VM, in the
+// frame and on the heap, and so must the members of all sizes, while the other
+// constructors are called. With a line callback, which suspends every few lines,
+// the VM constructs the objects
+namespace InPlaceConstructors
+{
+	static int lines = 0;
+	static void LineCallback(asIScriptContext *ctx, void *)
+	{
+		if( ++lines % 5 == 0 )
+			ctx->Suspend();
+	}
+
+	static const char *script =
+		"class A                                                                  \n"
+		"{                                                                        \n"
+		"  float x, y;                                                            \n"
+		"  A() { x = 0; y = 0; }                                                  \n"
+		"  A(float a, float b) { x = a; y = b; }                                  \n"
+		"  A opAdd(const A &in o) const { return A(x + o.x, y + o.y); }           \n"
+		"  A opMul(float s) const { return A(x * s, y * s); }                     \n"
+		"}                                                                        \n"
+		"class B { float x = 0, v = 1; int8 c = -3; double d = 2.5; int64 q; bool f = true; uint16 w = 65000; } \n"
+		"class C { int a; C(int v) { a = v; v = 7; } C(int v, double w) { a = v * 2; } } \n"
+		"class D : A { D() { super(1, 2); } }                                     \n"
+		"class E { A@ h; float k; E(float a) { k = a; } }                         \n"
+		"class F { int8 b; int16 w; F(int8 x, int16 y) { b = x; w = y; } }        \n"
+		"class G { double d; int64 q; G(double a, int64 b) { d = a; q = b; } }    \n"
+		"array<A@> g_list;                                                        \n"
+		"A@ g_kept;                                                               \n"
+		"float vectors(int n)                                                     \n"
+		"{                                                                        \n"
+		"  A a(1, 2), b(0.5f, 0.25f), z;                                          \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"    a = a + b * 0.5f + z;                                                \n"
+		"  return a.x + a.y;                                                      \n"
+		"}                                                                        \n"
+		"string members()                                                         \n"
+		"{                                                                        \n"
+		"  B b; C c(3); C d(1, 2.0); D e; E f(1.5f); F g(-5, -300);               \n"
+		"  G h(0.125, -(int64(1) << 40));                                         \n"
+		"  return b.x + ',' + b.v + ',' + b.c + ',' + b.d + ',' + b.q + ',' + b.f + ',' + b.w + ';' + \n"
+		"         c.a + ',' + d.a + ';' + e.x + ',' + e.y + ';' + f.k + ';' + g.b + ',' + g.w + ';' + \n"
+		"         h.d + ',' + h.q;                                                \n"
+		"}                                                                        \n"
+		"float stored(int n)                                                      \n"
+		"{                                                                        \n"
+		"  g_list.resize(0);                                                      \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"    g_list.insertLast(A(float(i), 1));                                   \n"
+		"  @g_kept = A(7, 8);                                                     \n"
+		"  float s = g_kept.x + g_kept.y * 100;                                   \n"
+		"  for( uint i = 0; i < g_list.length(); i++ )                            \n"
+		"    s += g_list[i].x * 10 + g_list[i].y;                                 \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	// The results of the functions, without and with the line callback
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetEngineProperty(asEP_USE_CHARACTER_LITERALS, false);
+		engine->SetJITCompiler(jit);
+		RegisterStdString(engine);
+		RegisterScriptArray(engine, false);
+		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
+			TEST_FAILED;
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *calls[] = { "float vectors(int)", "string members()", "float stored(int)" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 4; pass++ )
+			for( asUINT n = 0; n < sizeof(calls) / sizeof(calls[0]); n++ )
+			{
+				asIScriptFunction *func = mod->GetFunctionByDecl(calls[n]);
+				ctx->Prepare(func);
+				if( func->GetParamCount() )
+					ctx->SetArgDWord(0, 6);
+				lines = 0;
+				if( pass >= 2 )
+					ctx->SetLineCallback(asFUNCTION(LineCallback), 0, asCALL_CDECL);
+				int r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 1000 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				ctx->ClearLineCallback();
+				s << calls[n] << ": ";
+				if( r != asEXECUTION_FINISHED )
+					s << "result " << r;
+				else if( strstr(calls[n], "string ") == calls[n] )
+					s << *(std::string*)ctx->GetReturnObject();
+				else
+					s << ctx->GetReturnFloat();
+				s << ", " << lines << " lines, " << suspensions << " suspensions\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestInPlaceConstructors()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = InPlaceConstructors::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("string members(): 0,1,-3,2.5,0,true,65000;3,2;1,2;1.5;-5,-300;0.125,-1099511627776, 0 lines") == std::string::npos ||
+	    expected.find("lines, 0 suspensions") == std::string::npos || expected.find(" 0 lines, 0 suspensions") == std::string::npos )
+	{
+		PRINTF("in-place constructors:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows which constructors are
+	// compiled in place. The line callback must be called like by the VM
+	FILE *log = tmpfile();
+	CJITCompiler jit((envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND)) | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "@");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = InPlaceConstructors::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected )
+	{
+		PRINTF("in-place constructors:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log )
+	{
+		std::string text;
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+		const char *expectedLog[][2] = { { "A@ A()", "1" }, { "A@ A(float, float)", "1" }, { "B@ B()", "1" }, { "C@ C(int)", "1" },
+		                                 { "C@ C(int, double)", "0" }, { "D@ D()", "0" }, { "E@ E(float)", "0" }, { "F@ F(int8, int16)", "1" },
+		                                 { "G@ G(double, int64)", "1" }, { "A@ A(const A&inout)", "0" } };
+		for( asUINT n = 0; n < sizeof(expectedLog) / sizeof(expectedLog[0]) && !(envFlags & CJITCompiler::JIT_AOT_ONLY); n++ )
+		{
+			std::string head = std::string("; ---- ") + expectedLog[n][0] + " ----";
+			size_t at = text.find(head);
+			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
+			bool inPlace = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; constructed in place") != std::string::npos;
+			if( at == std::string::npos || inPlace != (expectedLog[n][1][0] == '1') )
+			{
+				PRINTF("in-place constructors: %s is %sconstructed in place\n", expectedLog[n][0], inPlace ? "" : "not ");
+				TEST_FAILED;
+			}
+		}
+	}
+	return fail;
+}
+
 // The objects of the plain script classes that never leave the function are kept in
 // the memory of its frame, see CJITByteCode::FindFrameObjects. The results must be
 // those of the VM, also where the VM goes on with the objects after an exception or a
@@ -6299,6 +6475,7 @@ bool Test()
 	fail = TestIndexers() || fail;
 	fail = TestLentRefs() || fail;
 	fail = TestInPlaceAssigns() || fail;
+	fail = TestInPlaceConstructors() || fail;
 	fail = TestFrameObjects() || fail;
 	fail = TestGenericCalls() || fail;
 	fail = TestCodeSizeStatistics() || fail;

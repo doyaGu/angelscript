@@ -198,6 +198,7 @@ protected:
 	void EmitIndexer(asUINT idx);
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
 	void EmitInPlaceAssign(asUINT idx);
+	void EmitInPlaceConstruct(asUINT idx);
 	void EmitOwnLent(asUINT idx);
 	int  FrameSlot(int var) const;
 	int  FreshSlot(asUINT idx) const;

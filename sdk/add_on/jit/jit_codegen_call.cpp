@@ -640,9 +640,21 @@ void CJITCodeGen::EmitStackBlockCheck(int extent, const Label &none)
 	m_uc.j(none, ucmp_lt(limit, PtrElement(blocks, index)));
 }
 
+// Adds the frame of a constructor compiled in place, which starts below the object
+// pushed at the stack depth, at the base in dwords below the frame pointer. The VM
+// would push its call state at the level
+static void AddConstructorRoom(const SJITConstructor *ctor, int base, int level, int &extent, int &depth)
+{
+	base += AS_PTR_SIZE;
+	if( base + int(ctor->stackNeeded) > extent )
+		extent = base + int(ctor->stackNeeded);
+	if( level > depth )
+		depth = level;
+}
+
 // Adds the frame of an inlined function, which starts at the base in dwords below
-// the frame pointer, and the frames of the functions inlined into it at the level
-// below, see GetInlineRoom
+// the frame pointer, and the frames of the functions inlined into it, and of the
+// constructors compiled in place in it, at the level below, see GetInlineRoom
 static void AddInlineRoom(const CJITByteCode *code, int base, int level, int &extent, int &depth)
 {
 	asCScriptFunction *func = code->GetFunction();
@@ -658,15 +670,23 @@ static void AddInlineRoom(const CJITByteCode *code, int base, int level, int &ex
 			for( asUINT k = 0; k < inlinees.size(); k++ )
 				AddInlineRoom(inlinees[k].code.get(), base + int(func->scriptData->variableSpace) + code->GetStackDepth(n), level + 1, extent, depth);
 		}
+		else if( instrs[n].flags & JIT_INSTR_CONSTRUCT )
+			AddConstructorRoom(code->GetInPlaceConstructor(n), base + int(func->scriptData->variableSpace) + code->GetStackDepth(n), level + 1, extent, depth);
 }
 
 // The dwords below the frame pointer that the frames of the function inlined by the
 // instruction and of the functions inlined into it reach, and the most call states
-// that their exits push
+// that their exits push, which the VM pushes for the calls. For a constructor
+// compiled in place that is the room for calling it
 void CJITCodeGen::GetInlineRoom(asUINT idx, int &extent, int &depth) const
 {
 	extent = 0;
 	depth  = 0;
+	if( m_code->GetInstructions()[idx].flags & JIT_INSTR_CONSTRUCT )
+	{
+		AddConstructorRoom(m_code->GetInPlaceConstructor(idx), -StackOffset(idx) / 4, 1, extent, depth);
+		return;
+	}
 	const std::vector<SJITInlinee> &inlinees = m_code->GetInlinees(idx);
 	for( asUINT k = 0; k < inlinees.size(); k++ )
 		AddInlineRoom(inlinees[k].code.get(), -StackOffset(idx) / 4, 1, extent, depth);
@@ -1636,6 +1656,143 @@ void CJITCodeGen::EmitInPlaceAssign(asUINT idx)
 	PopStack(2 * PTR_BYTES);
 	if( m_code->IsVRLiveAfter(idx) )
 		StoreVRPtr(self);
+}
+
+// Creates the object of a script class like asBC_ALLOC, in the frame if it is kept
+// there, see EmitFrameObject, and sets its members like the constructor does, see
+// CJITByteCode::FindInPlaceConstructors. The variable whose address is below the
+// arguments gets the object, and the arguments are popped. Where the VM has something
+// to do, like calling the line callback when the constructor is entered, or the call
+// would grow the call stack or need another stack block, it executes the instruction
+void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
+{
+	const SJITConstructor *ctor = m_code->GetInPlaceConstructor(idx);
+	if( m_options.noScriptCalls )
+	{
+		Bail(idx);
+		return;
+	}
+	Label bail = BailLabel(idx);
+	if( !(m_options.elideSuspend && m_suspendChecked) )
+	{
+		Gp flag = m_uc.new_gp32();
+		m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+		m_uc.j(bail, test_nz(flag));
+	}
+	if( m_frame == 0 )
+	{
+		// The VM would push the call state of the constructor, and enter its frame,
+		// for which there must be room like for the inlined calls. In the inlined
+		// functions the outermost call has checked the room for it
+		const SJITContextLayout &ctxLayout = JIT_GetContextLayout();
+		int extent, depth;
+		GetInlineRoom(idx, extent, depth);
+		Imm words = Imm(depth * int(ctxLayout.callStackFrameSize));
+		if( m_inlineRoom.is_valid() )
+			m_uc.j(bail, ucmp_lt(m_inlineRoom, words));
+		else
+		{
+			Gp length = m_uc.new_gp32();
+			Gp room   = m_uc.new_gp32();
+			m_uc.load_u32(length, ContextField(ctxLayout.callStackLength));
+			m_uc.load_u32(room, ContextField(ctxLayout.callStackCapacity));
+			m_uc.sub(room, room, length);
+			m_uc.j(bail, ucmp_lt(room, words));
+			EmitStackBlockCheck(extent, bail);
+		}
+	}
+
+	Gp obj = m_uc.new_gp_ptr();
+	int slot = FreshSlot(idx);
+	if( slot >= 0 )
+		EmitFrameObject(obj, slot, ctor->type);
+	else
+	{
+		InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
+		alloc->set_arg(0, Imm(int64_t(asPWORD(ctor->type))));
+		alloc->set_ret(0, obj);
+	}
+
+	Gp v = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
+	for( size_t n = 0; n < ctor->members.size(); n++ )
+	{
+		const SJITMemberInit &member = ctor->members[n];
+		int offset = member.offset;
+		if( member.arg >= 0 )
+		{
+			if( member.size == 1 )
+			{
+				m_uc.load_u8(v.r32(), Stack(member.arg));
+				m_uc.store_u8(Addr(obj, offset), v.r32());
+			}
+			else if( member.size == 2 )
+			{
+				m_uc.load_u16(v.r32(), Stack(member.arg));
+				m_uc.store_u16(Addr(obj, offset), v.r32());
+			}
+			else if( member.size == 4 || !Is64Bit() )
+			{
+				for( asUINT k = 0; k < member.size / 4; k++ )
+				{
+					m_uc.load_u32(v.r32(), Stack(member.arg + int(k)));
+					m_uc.store_u32(Addr(obj, offset + int(k) * 4), v.r32());
+				}
+			}
+			else
+			{
+				m_uc.load_u64(v, Stack(member.arg));
+				m_uc.store_u64(Addr(obj, offset), v);
+			}
+			continue;
+		}
+
+		// The constant is in the first bytes of the value, like in memory
+		if( member.size == 1 || member.size == 2 )
+		{
+			asWORD value = 0;
+			memcpy(&value, &member.value, member.size);
+			m_uc.mov(v.r32(), Imm(int(value)));
+			if( member.size == 1 )
+				m_uc.store_u8(Addr(obj, offset), v.r32());
+			else
+				m_uc.store_u16(Addr(obj, offset), v.r32());
+		}
+		else if( member.size == 8 && Is64Bit() )
+		{
+			if( member.value == 0 )
+				m_uc.store_zero_reg(Addr(obj, offset));
+			else
+			{
+				m_uc.mov(v, Imm(int64_t(member.value)));
+				m_uc.store_u64(Addr(obj, offset), v);
+			}
+		}
+		else
+		{
+			asDWORD values[2] = { 0, 0 };
+			memcpy(values, &member.value, member.size);
+			for( asUINT k = 0; k < member.size / 4; k++ )
+			{
+				if( values[k] == 0 )
+					m_uc.store_zero_u32(Addr(obj, offset + int(k) * 4));
+				else
+				{
+					m_uc.mov(v.r32(), Imm(int(values[k])));
+					m_uc.store_u32(Addr(obj, offset + int(k) * 4), v.r32());
+				}
+			}
+		}
+	}
+
+	// The variable gets the object, which asBC_ALLOC stores before the constructor
+	// is called
+	Gp var = m_uc.new_gp_ptr();
+	Label none = m_uc.new_label();
+	m_uc.load(var, Stack(int(ctor->args)));
+	m_uc.j(none, test_z(var));
+	m_uc.store(mem_ptr(var), obj);
+	m_uc.bind(none);
+	PopStack(int(ctor->args) * 4);
 }
 
 // A length query pops the object and sets the value register to the number of
@@ -2836,6 +2993,11 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 	switch( instr.op )
 	{
 	case asBC_ALLOC:
+		if( instr.flags & JIT_INSTR_CONSTRUCT )
+		{
+			EmitInPlaceConstruct(idx);
+			break;
+		}
 		{
 			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(bc);
 			int func = asBC_INTARG(bc + AS_PTR_SIZE);

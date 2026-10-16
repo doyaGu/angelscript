@@ -11,6 +11,7 @@
 #include "as_scriptobject.h"
 
 #include <algorithm>
+#include <string.h>
 #include <set>
 #include <climits>
 
@@ -391,6 +392,12 @@ asCObjectType *CJITByteCode::GetInPlaceAssign(asUINT instrIdx) const
 {
 	std::map<asUINT, asCObjectType*>::const_iterator it = m_assigns.find(instrIdx);
 	return it == m_assigns.end() ? 0 : it->second;
+}
+
+const SJITConstructor *CJITByteCode::GetInPlaceConstructor(asUINT instrIdx) const
+{
+	std::map<asUINT, SJITConstructor>::const_iterator it = m_constructors.find(instrIdx);
+	return it == m_constructors.end() ? 0 : &it->second;
 }
 
 int CJITByteCode::GetFreshVar(asUINT instrIdx) const
@@ -832,6 +839,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				search.path.pop_back();
 				callee->FindIndexers(inlining.indexers);
 				callee->FindInPlaceAssigns();
+				callee->FindInPlaceConstructors();
 				callee->AnalyseBorrows(inlining.borrowCalls, inlining.classes, inlining.profile);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
@@ -962,6 +970,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	}
 	FindIndexers(inlining ? inlining->indexers : 0);
 	FindInPlaceAssigns();
+	FindInPlaceConstructors();
 	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
 	m_frameObjects.clear();
 	m_freshVars.clear();
@@ -1438,6 +1447,140 @@ void CJITByteCode::FindInPlaceAssigns()
 			continue;
 		instr.flags |= JIT_INSTR_ASSIGN;
 		m_assigns[n] = type;
+	}
+}
+
+// Decodes a constructor that only sets members of its object to its arguments and to
+// constants, which the variables have been set to, the way the default constructors
+// and the initializations of the members are compiled. The members get the first
+// bytes of the variables, like the VM copies them, where asBC_SetV1 and asBC_SetV2
+// have set a dword. Returns false for any other constructor
+static bool DecodeSimpleConstructor(asCScriptFunction *ctor, SJITConstructor &info)
+{
+	// The bytes set in the variables, by the offset of the variable, and their number
+	std::map<int, std::pair<asUINT, asQWORD> > constants;
+	const asCArray<asDWORD> &bc = ctor->scriptData->byteCode;
+	asUINT length = bc.GetLength();
+	info.args = asUINT(ctor->GetSpaceNeededForArguments());
+	info.stackNeeded = ctor->scriptData->stackNeeded;
+	info.members.clear();
+	for( asUINT pos = 0; pos < length; )
+	{
+		const asDWORD *instr = &bc[pos];
+		asEBCInstr op = asEBCInstr(*(const asBYTE*)instr);
+		pos += asBCTypeSize[asBCInfo[op].type];
+		switch( op )
+		{
+		case asBC_JitEntry:
+		case asBC_SUSPEND:
+			break;
+
+		case asBC_RET:
+			return pos == length;
+
+		case asBC_SetV1:
+		case asBC_SetV2:
+		case asBC_SetV4:
+		case asBC_SetV8:
+			{
+				int var = asBC_SWORDARG0(instr);
+				asUINT size = op == asBC_SetV8 ? 8 : 4;
+				asQWORD value = 0;
+				if( op == asBC_SetV8 )
+					value = asBC_QWORDARG(instr);
+				else
+				{
+					asDWORD dw = asBC_DWORDARG(instr);
+					memcpy(&value, &dw, 4);
+				}
+				// The variable is at -4 * offset from the frame pointer
+				std::map<int, std::pair<asUINT, asQWORD> >::iterator it = constants.begin();
+				while( it != constants.end() )
+				{
+					if( -4 * it->first < -4 * var + int(size) && -4 * var < -4 * it->first + int(it->second.first) )
+						constants.erase(it++);
+					else
+						++it;
+				}
+				constants[var] = std::make_pair(size, value);
+			}
+			break;
+
+		case asBC_LoadThisR:
+			{
+				// The member is written right after its address is loaded
+				if( pos >= length || info.members.size() >= 64 )
+					return false;
+				const asDWORD *write = &bc[pos];
+				asEBCInstr writeOp = asEBCInstr(*(const asBYTE*)write);
+				if( writeOp != asBC_WRTV1 && writeOp != asBC_WRTV2 && writeOp != asBC_WRTV4 && writeOp != asBC_WRTV8 )
+					return false;
+				pos += asBCTypeSize[asBCInfo[writeOp].type];
+
+				SJITMemberInit member;
+				member.offset = asBC_SWORDARG0(instr);
+				member.size   = writeOp == asBC_WRTV1 ? 1 : writeOp == asBC_WRTV2 ? 2 : writeOp == asBC_WRTV4 ? 4 : 8;
+				member.arg    = -1;
+				member.value  = 0;
+				if( member.offset < 0 || asUINT(member.offset) + member.size > info.type->size )
+					return false;
+				int var = asBC_SWORDARG0(write);
+				std::map<int, std::pair<asUINT, asQWORD> >::iterator it = constants.find(var);
+				if( it != constants.end() )
+				{
+					if( it->second.first < member.size )
+						return false;
+					memcpy(&member.value, &it->second.second, member.size);
+				}
+				else
+				{
+					for( it = constants.begin(); it != constants.end(); ++it )
+						if( -4 * it->first < -4 * var + int(member.size) && -4 * var < -4 * it->first + int(it->second.first) )
+							return false;
+					// The arguments follow the object pointer
+					member.arg = -var - AS_PTR_SIZE;
+					if( member.arg < 0 || asUINT(member.arg) * 4 + member.size > info.args * 4 )
+						return false;
+				}
+				info.members.push_back(member);
+			}
+			break;
+
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
+// The constructors of the script classes that only set members of the object to their
+// arguments and to constants, which the default constructors and the initializations
+// of the members do, are compiled in place of the asBC_ALLOC calling them, see
+// CJITCodeGen::EmitInPlaceConstruct. The objects of the classes kept by the garbage
+// collector are left to the calls, as creating them may execute scripts, which the VM
+// is synced for. As nothing is called otherwise, the instruction isn't a sync point
+void CJITByteCode::FindInPlaceConstructors()
+{
+	m_constructors.clear();
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		instr.flags &= ~JIT_INSTR_CONSTRUCT;
+		if( instr.op != asBC_ALLOC || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
+			continue;
+		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
+		int id = asBC_INTARG(instr.bc + AS_PTR_SIZE);
+		asCScriptFunction *ctor = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( !(type->flags & asOBJ_SCRIPT_OBJECT) || (type->flags & asOBJ_GC) || ctor == 0 ||
+		    ctor->funcType != asFUNC_SCRIPT || ctor->scriptData == 0 || ctor->objectType != type )
+			continue;
+		SJITConstructor info;
+		info.type = type;
+		if( !DecodeSimpleConstructor(ctor, info) )
+			continue;
+		instr.flags |= JIT_INSTR_CONSTRUCT;
+		m_constructors[n] = info;
 	}
 }
 
@@ -2474,7 +2617,7 @@ bool CJITByteCode::LeavesFrameDirty(asUINT instrIdx) const
 #ifdef JIT_NATIVE_RETURN
 	asEBCInstr op = instr.op;
 	if( op == asBC_ALLOC )
-		return (reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc))->flags & asOBJ_SCRIPT_OBJECT) != 0;
+		return !(instr.flags & JIT_INSTR_CONSTRUCT) && (reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc))->flags & asOBJ_SCRIPT_OBJECT);
 	return op == asBC_CALL || op == asBC_CALLINTF || (op == asBC_CallPtr && m_staticStack);
 #else
 	return false;

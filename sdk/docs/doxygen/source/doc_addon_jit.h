@@ -163,8 +163,8 @@ depth of its call stack, as only one function executes at a depth at a time, and
 that it releases with the context. Their header has a reference more than that of
 an allocated object, so the VM can go on with them after an exception or a
 suspension like with any other object without ever freeing them, and the compiled
-code only forgets them where they are released. The constructor is still called,
-and the members are read and written in memory. On an Apple M5 the loop adding
+code only forgets them where they are released. The members are read and written
+in memory. On an Apple M5 the loop adding
 script-class 2D vectors takes 21 nanoseconds per iteration instead of 51, and
 RetObj.1 of the test_performance project 0.075 seconds instead of 0.121. The code
 generated ahead of time allocates the objects. The initialization lists that hold only
@@ -184,6 +184,18 @@ exception thrown by a registered function that was called directly terminates th
 application.
 \ref CJITCompiler::JIT_NO_DIRECT_SYSTEM_CALLS turns the direct calls off. Neither
 flag applies to the code generated ahead of time, see \ref doc_addon_jit_aot.
+
+The constructors that only set members to their arguments and to constants, like
+the default constructors, the initializations of the members, and the constructors
+of vector classes taking the coordinates, are compiled in place of asBC_ALLOC for
+the script classes without garbage collection, whose objects are created in the
+frame or allocated. The VM executes the instruction, which calls the constructor,
+where it has something to do, like calling the line callback, or where the call
+would grow the call stack or need another stack block. The other constructors are
+called. On an Apple M5 that takes the loop adding script-class 2D vectors from 21
+to 12 nanoseconds per iteration, and RetObj.1 and RetObj.2 of the test_performance
+project about 11% less time. The code generated ahead of time calls the
+constructors.
 
 The application can call the script functions through \ref CJITCompiler::Prepare
 and \ref CJITCompiler::Execute instead of the methods of the context with the same

@@ -37,7 +37,8 @@ enum EJITInstrFlags
 	JIT_INSTR_INDEXER     = 0x2000, // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
 	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, see FindLentRefs
 	JIT_INSTR_LENT        = 0x8000, // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
-	JIT_INSTR_ASSIGN      = 0x10000 // asBC_CALLSYS of the default assignment of a script class whose members are copied in place, see FindInPlaceAssigns
+	JIT_INSTR_ASSIGN      = 0x10000, // asBC_CALLSYS of the default assignment of a script class whose members are copied in place, see FindInPlaceAssigns
+	JIT_INSTR_CONSTRUCT   = 0x20000  // asBC_ALLOC of a script class whose constructor is compiled in place, see FindInPlaceConstructors
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -414,6 +415,25 @@ struct SJITIndexerCall
 	bool indirect;    // the elements are pointers to the objects
 };
 
+// A member that a constructor compiled in place sets, from an argument or a constant
+struct SJITMemberInit
+{
+	int     offset; // of the member in the object
+	asUINT  size;   // 1, 2, 4, or 8 bytes
+	int     arg;    // dwords from the first argument to the value, or -1 for the constant
+	asQWORD value;  // the constant, in its first bytes
+};
+
+// The constructor of a script class compiled in place of the asBC_ALLOC calling it,
+// see CJITByteCode::FindInPlaceConstructors
+struct SJITConstructor
+{
+	asCObjectType              *type;
+	asUINT                      args;    // dwords of the arguments, which the constructor pops
+	asUINT                      stackNeeded; // dwords that the frame of the constructor needs below its frame pointer
+	std::vector<SJITMemberInit> members; // in the order that they are set
+};
+
 // Decodes the bytecode of a script function and gathers the information
 // needed by the code generator: instructions, basic blocks, branch targets,
 // switch tables, JIT entry points, variable usage, and value register liveness
@@ -561,8 +581,9 @@ public:
 	// Returns true if the instruction stores the cached variables, see IsSyncPoint.
 	// The copies of the references lent to the inlined calls don't, and neither do
 	// the copies of the script objects counted in place, which only store them on
-	// the rare paths, and the indexers compiled in place, which leave those to the VM
-	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER | JIT_INSTR_ASSIGN)); }
+	// the rare paths, and the indexers, assignments, and constructors compiled in
+	// place, which leave those to the VM
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER | JIT_INSTR_ASSIGN | JIT_INSTR_CONSTRUCT)); }
 
 	// Returns the index of the parameter in the variable, or -1
 	int    FindParam(int offset) const;
@@ -596,6 +617,10 @@ public:
 	// The class whose members the instruction marked with JIT_INSTR_ASSIGN copies, see
 	// FindInPlaceAssigns
 	asCObjectType *GetInPlaceAssign(asUINT instrIdx) const;
+
+	// The constructor that the instruction marked with JIT_INSTR_CONSTRUCT compiles in
+	// place, see FindInPlaceConstructors
+	const SJITConstructor *GetInPlaceConstructor(asUINT instrIdx) const;
 
 	// The variables of the function whose objects can be kept in its frame, and their
 	// classes, see FindFrameObjects
@@ -635,6 +660,7 @@ protected:
 	bool CanBeInlined() const;
 	void FindLentRefs();
 	void FindInPlaceAssigns();
+	void FindInPlaceConstructors();
 	void FindFrameObjects();
 	bool FindFreshReturn(asCObjectType *type);
 	bool IsThisSafe(asCObjectType *type) const;
@@ -702,6 +728,7 @@ protected:
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::map<asUINT, asUINT> m_lentFrees; // by instruction, see GetLentFree
 	std::map<asUINT, asCObjectType*> m_assigns; // by instruction, see GetInPlaceAssign
+	std::map<asUINT, SJITConstructor> m_constructors; // by instruction, see GetInPlaceConstructor
 	std::map<int, asCObjectType*> m_frameObjects; // see GetFrameObjects
 	std::map<asUINT, int>         m_freshVars;    // by instruction, see GetFreshVar
 	int                           m_freshSource;  // see GetFreshSource
