@@ -27,6 +27,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	frame.exitUsed = false;
 	frame.borrowed = 0;
 	frame.lentVar  = 0;
+	frame.freshSlot = -1;
 	frame.retChecked = true;
 	m_frames.push_back(frame);
 	m_frame      = 0;
@@ -171,6 +172,7 @@ bool CJITCodeGen::Generate()
 	}
 	if( m_inlineRoom.is_valid() )
 		EmitInlineRoom();
+	EmitFrameArena();
 #ifdef JIT_NATIVE_RETURN
 	{
 		// The function returns to the VM now, also if it was called natively and
@@ -1045,6 +1047,9 @@ void CJITCodeGen::EmitPrologue()
 			break;
 		}
 	}
+
+	if( m_options.frameSlots && !m_options.frameSlots->empty() )
+		m_objectArena = m_uc.new_gp_ptr("objectArena");
 
 	// A C++ exception can only leave the functions that call registered functions
 	// or behaviours directly, or script functions natively

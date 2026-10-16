@@ -75,6 +75,14 @@ struct CJITCompiler::SImpl
 	std::map<SJITAOTKey, JITAOTFunction_t> aotFunctions; // the functions added with AddAOTFunctions
 	std::set<asJITFunction> aotPointers; // the same functions, which aren't released
 	TJITContainerMethods indexers; // the methods added with AddIndexer and AddLengthQuery, by their function
+	// Where the objects kept in the frames of the functions are in the memory for them,
+	// by variable, and its size, see Compile
+	struct SFrameLayout
+	{
+		std::map<int, int> offsets;
+		asUINT             size;
+	};
+	std::map<asCScriptFunction*, SFrameLayout> frameLayouts;
 	asUINT                 callThreshold; // see SetCompileThresholds
 	asUINT                 loopThreshold;
 	std::set<asCScriptFunction*> compiling; // the functions being compiled, see TierUp, Recompile and CompileExact
@@ -1020,8 +1028,39 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	}
 	inlining.classes     = profile ? &profile->compiledWith : seenBefore;
 	inlining.indexers    = &indexers;
+	inlining.frameObjects = inlining.maxSize > 0;
 	code.SetBailInstructions(bailOps);
 	code.Analyse((flags & JIT_NO_REGISTER_CACHE) == 0, cachedSlots, &inlining);
+
+	// The objects kept in the frame of the function are laid out in the memory for
+	// them when the function is first compiled. The code compiled again keeps them
+	// where they are, as the function may go on with the objects that the code before
+	// has created, see CJITCodeGen::EmitFrameObject
+	std::map<int, int> frameObjectSlots;
+	asUINT frameObjectSize = 0;
+	const std::map<int, asCObjectType*> &frameObjects = code.GetFrameObjects();
+	if( !frameObjects.empty() )
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		SFrameLayout &layout = frameLayouts[func];
+		if( layout.offsets.empty() )
+		{
+			layout.size = 0;
+			for( std::map<int, asCObjectType*>::const_iterator it = frameObjects.begin(); it != frameObjects.end(); ++it )
+			{
+				layout.offsets[it->first] = int(layout.size);
+				layout.size += (asUINT(it->second->size) + 15) / 16 * 16;
+			}
+			JIT_RegisterFrameArenas(func->engine);
+		}
+		for( std::map<int, asCObjectType*>::const_iterator it = frameObjects.begin(); it != frameObjects.end(); ++it )
+		{
+			std::map<int, int>::const_iterator slot = layout.offsets.find(it->first);
+			if( slot != layout.offsets.end() )
+				frameObjectSlots[it->first] = slot->second;
+		}
+		frameObjectSize = layout.size;
+	}
 
 	if( log )
 	{
@@ -1033,6 +1072,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 		else if( exact )
 			fprintf(logFile, "; compiled for the line callbacks\n");
 		DumpByteCode(logFile, code);
+		for( std::map<int, int>::const_iterator it = frameObjectSlots.begin(); it != frameObjectSlots.end(); ++it )
+			fprintf(logFile, "; the object of v%d is kept in the frame at %d\n", it->first, it->second);
 	}
 
 	// Generate the code. Everything here is local to the call so that
@@ -1068,6 +1109,8 @@ int CJITCompiler::SImpl::Compile(asCScriptFunction *func, CJITByteCode &code, bo
 	options.recompile = (const void*)Recompile;
 	options.exactEntry = (const void*)ExactEntry;
 	options.exactParam = this;
+	options.frameSlots = &frameObjectSlots;
+	options.frameObjectSize = frameObjectSize;
 #ifdef AS_NO_EXCEPTIONS
 	// Without exception handling in the engine nothing is lost by calling directly
 	options.directSystemCalls = (flags & JIT_NO_DIRECT_SYSTEM_CALLS) == 0;
@@ -1444,6 +1487,7 @@ void CJITCompiler::ReleaseJITFunction(asJITFunction func)
 		if( releasable )
 			m_impl->Release(code);
 		m_impl->Release(entry->base);
+		m_impl->frameLayouts.erase(entry->func);
 		m_impl->functionEntries.erase(entry->func);
 		m_impl->entries.erase(found);
 		borrowedTargets.swap(entry->borrowedTargets);

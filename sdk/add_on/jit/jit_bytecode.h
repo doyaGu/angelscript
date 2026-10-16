@@ -389,6 +389,7 @@ struct SJITInlineOptions
 	bool   profile;  // mark the calls whose targets are worth noting with JIT_INSTR_PROFILE
 	bool   borrowCalls; // borrow handle arguments of non-inlined calls with checked targets
 	const TJITContainerMethods *indexers; // by the native function, see CJITCompiler::AddIndexer, or null
+	bool   frameObjects; // find the objects that can be kept in the frame of the function, see FindFrameObjects
 };
 
 class CJITByteCode;
@@ -596,6 +597,18 @@ public:
 	// FindInPlaceAssigns
 	asCObjectType *GetInPlaceAssign(asUINT instrIdx) const;
 
+	// The variables of the function whose objects can be kept in its frame, and their
+	// classes, see FindFrameObjects
+	const std::map<int, asCObjectType*> &GetFrameObjects() const { return m_frameObjects; }
+	// The variable of the function that the object created by the asBC_ALLOC, or
+	// returned by the inlined call, at the instruction ends up in, or 0
+	int GetFreshVar(asUINT instrIdx) const;
+	// The asBC_ALLOC, or the inlined call, that creates the object that an inlined
+	// function returns, or -1, see FindFreshReturn
+	int GetFreshSource() const { return m_freshSource; }
+	// Whether the decoded constructor keeps its object nowhere, see FindFrameObjects
+	bool IsCtorThisSafe();
+
 	// Marks instructions that must return to the VM. Must be called before Analyse,
 	// which marks them in the inlined functions too
 	void SetBailInstructions(const bool bail[asBC_MAXBYTECODE]);
@@ -622,6 +635,17 @@ protected:
 	bool CanBeInlined() const;
 	void FindLentRefs();
 	void FindInPlaceAssigns();
+	void FindFrameObjects();
+	bool FindFreshReturn(asCObjectType *type);
+	bool IsThisSafe(asCObjectType *type) const;
+	bool IsRefParamSafe(int var, asCObjectType *type) const;
+	bool IsPushSafe(asUINT pushIdx, asCObjectType *type) const;
+	bool IsRefArgSafe(asUINT varIdx, asCObjectType *type) const;
+	bool IsMethodSafe(asUINT callIdx, asCObjectType *type) const;
+	int  FindConsumer(asUINT pushIdx, bool allowRef = false) const;
+	int  FindAllocFor(asUINT psfIdx) const;
+	bool GetCallTargets(asUINT callIdx, std::vector<asCScriptFunction*> &targets) const;
+	CJITByteCode *FindInlinee(asUINT callIdx, asCScriptFunction *func) const;
 	void FindIndexers(const TJITContainerMethods *indexers);
 	void AnalyseBorrows(bool borrowCalls = false);
 	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
@@ -678,6 +702,11 @@ protected:
 	std::map<asUINT, std::vector<int> > m_borrowChecks; // by instruction, see GetBorrowChecks
 	std::map<asUINT, asUINT> m_lentFrees; // by instruction, see GetLentFree
 	std::map<asUINT, asCObjectType*> m_assigns; // by instruction, see GetInPlaceAssign
+	std::map<int, asCObjectType*> m_frameObjects; // see GetFrameObjects
+	std::map<asUINT, int>         m_freshVars;    // by instruction, see GetFreshVar
+	int                           m_freshSource;  // see GetFreshSource
+	int                           m_freshState;   // 0 not looked for, 1 found for m_freshType, -1 not found
+	asCObjectType                *m_freshType;
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions
 	bool                    m_staticStack;

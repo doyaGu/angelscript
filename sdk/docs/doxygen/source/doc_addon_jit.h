@@ -149,7 +149,25 @@ copies the bytes of the members in place when both objects are of the class of t
 variable assigned to, instead of the engine's assignment looking at each member.
 On an Apple M5 that takes a loop adding script-class 2D vectors from 61 to 51
 nanoseconds per iteration. The code generated ahead of time still calls the
-assignment. The initialization lists that hold only
+assignment.
+
+The objects of those plain script classes that a function creates and that never
+leave it, like the temporary results of the operators of a vector class, aren't
+allocated by the JIT compiled code either. A variable of the function qualifies
+when its objects are created by asBC_ALLOC or by functions compiled in place that
+return a new object, and are only used to read and write their members, to check
+them for null, to be released, and to be passed to the default assignment and to
+the methods compiled in place that use them the same way. The objects of such
+variables are kept in memory that the context holds for the functions at each
+depth of its call stack, as only one function executes at a depth at a time, and
+that it releases with the context. Their header has a reference more than that of
+an allocated object, so the VM can go on with them after an exception or a
+suspension like with any other object without ever freeing them, and the compiled
+code only forgets them where they are released. The constructor is still called,
+and the members are read and written in memory. On an Apple M5 the loop adding
+script-class 2D vectors takes 21 nanoseconds per iteration instead of 51, and
+RetObj.1 of the test_performance project 0.075 seconds instead of 0.121. The code
+generated ahead of time allocates the objects. The initialization lists that hold only
 primitives, enums, or value types without a destructor are freed without going
 through their elements. A C++ exception thrown by a function called this way is
 still caught and turned into a script exception like with the VM. For that the

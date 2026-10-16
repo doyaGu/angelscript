@@ -15,6 +15,9 @@
 
 #include <math.h>
 #include <string.h>
+#include <new>
+#include <vector>
+#include <stdlib.h>
 
 BEGIN_AS_NAMESPACE
 
@@ -935,6 +938,87 @@ bool JIT_IsPlainScriptType(const asCObjectType *type)
 			return false;
 	}
 	return true;
+}
+
+void JIT_GetFrameObjectHeader(asCObjectType *type, void *header)
+{
+	asCScriptObject *proto = static_cast<asCScriptObject*>(type->engine->CallAlloc(type));
+	ScriptObject_Construct(type, proto);
+	memcpy(header, static_cast<void*>(proto), sizeof(asCScriptObject));
+	SJITScriptObject::RefCount(static_cast<asCScriptObject*>(header)).set(2);
+	proto->Release();
+}
+
+// The memory of the objects kept in the frames, by the depth of the call stack
+struct SJITFrameArena
+{
+	std::vector<void*>  blocks;
+	std::vector<asUINT> sizes;
+};
+
+// The user data type of the contexts for their SJITFrameArena, which is the address
+// of the variable so that nothing else uses it
+static const int g_frameArenaTag = 0;
+static asPWORD FrameArenaType() { return reinterpret_cast<asPWORD>(&g_frameArenaTag); }
+
+static void FreeFrameArena(asIScriptContext *ctx)
+{
+	SJITFrameArena *arena = static_cast<SJITFrameArena*>(ctx->GetUserData(FrameArenaType()));
+	if( arena == 0 )
+		return;
+	for( size_t n = 0; n < arena->blocks.size(); n++ )
+		free(arena->blocks[n]);
+	delete arena;
+}
+
+void JIT_RegisterFrameArenas(asIScriptEngine *engine)
+{
+	engine->SetContextUserDataCleanupCallback(FreeFrameArena, FrameArenaType());
+}
+
+void *JIT_GetFrameArena(asSVMRegisters *regs, asUINT bytes) noexcept
+{
+	asCContext *ctx = GetContext(regs);
+
+	// Only the context itself sets its arena, so it is looked up without the lock that
+	// GetUserData takes
+	SJITFrameArena *arena = 0;
+	for( asUINT n = 0; n + 1 < ctx->m_userData.GetLength() && arena == 0; n += 2 )
+		if( ctx->m_userData[n] == FrameArenaType() )
+			arena = reinterpret_cast<SJITFrameArena*>(ctx->m_userData[n + 1]);
+	if( arena == 0 )
+	{
+		arena = new(std::nothrow) SJITFrameArena;
+		if( arena == 0 )
+			return 0;
+		ctx->SetUserData(arena, FrameArenaType());
+	}
+
+	// A smaller block holds no objects of the function yet, as they need all of it
+	asUINT depth = ctx->m_callStack.GetLength() / CALLSTACK_FRAME_SIZE;
+#ifndef AS_NO_EXCEPTIONS
+	try
+#endif
+	{
+		if( depth >= arena->blocks.size() )
+		{
+			arena->blocks.resize(depth + 1, 0);
+			arena->sizes.resize(depth + 1, 0);
+		}
+	}
+#ifndef AS_NO_EXCEPTIONS
+	catch(...)
+	{
+		return 0;
+	}
+#endif
+	if( arena->sizes[depth] < bytes )
+	{
+		free(arena->blocks[depth]);
+		arena->blocks[depth] = malloc(bytes);
+		arena->sizes[depth]  = arena->blocks[depth] ? bytes : 0;
+	}
+	return arena->blocks[depth];
 }
 
 // The generated code gives up the last reference of a script object here, see

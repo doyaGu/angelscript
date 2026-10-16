@@ -131,10 +131,16 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 	if( native && kind == JIT_CALL_ALLOC )
 	{
 		SyncForCall(idx);
-		InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
 		Gp obj = m_uc.new_gp_ptr();
-		alloc->set_arg(0, Imm(int64_t(extra)));
-		alloc->set_ret(0, obj);
+		int slot = FreshSlot(idx);
+		if( slot >= 0 )
+			EmitFrameObject(obj, slot, reinterpret_cast<asCObjectType*>(extra));
+		else
+		{
+			InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
+			alloc->set_arg(0, Imm(int64_t(extra)));
+			alloc->set_ret(0, obj);
+		}
 
 		Gp var = m_uc.new_gp_ptr();
 		Label noVar = m_uc.new_label();
@@ -399,6 +405,9 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	asUINT borrowed = m_code->GetBorrowedArgs(idx);
 	// The object may have been lent a reference, see CJITByteCode::FindLentRefs
 	int lentFree = caller == 0 ? m_code->GetLentFree(idx) : -1;
+	// The object that the function returns may be created in the frame, see
+	// EmitFrameObject
+	int freshSlot = FreshSlot(idx);
 	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
 	if( m_options.elideSuspend && m_suspendChecked )
 		checkVM = false;
@@ -531,6 +540,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		frame.exitUsed = false;
 		frame.borrowed = borrowed;
 		frame.lentVar  = lentFree >= 0 ? asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc) : 0;
+		frame.freshSlot = freshSlot;
 		frame.retChecked = true;
 		m_frames.push_back(frame);
 		int inlined = int(m_frames.size()) - 1;
@@ -1141,6 +1151,7 @@ void CJITCodeGen::EmitDirectEntry()
 	m_uc.bind(ready);
 	if( m_callStackLength.is_valid() )
 		m_uc.load_u32(m_callStackLength, ContextField(layout.callStackLength));
+	EmitFrameArena();
 	ReloadThis();
 	if( m_inlineRoom.is_valid() )
 		EmitInlineRoom();
@@ -1445,6 +1456,100 @@ void CJITCodeGen::EmitIndexer(asUINT idx)
 		SetVRAddr(idx, mem_ptr(elem));
 	else if( m_code->IsVRLiveAfter(idx) )
 		StoreVRPtr(elem);
+}
+
+// Where the object of the variable of the outermost function is kept in the memory
+// for the objects in its frame, or -1, see CJITByteCode::FindFrameObjects
+int CJITCodeGen::FrameSlot(int var) const
+{
+	if( var == 0 || m_options.frameSlots == 0 )
+		return -1;
+	std::map<int, int>::const_iterator it = m_options.frameSlots->find(var);
+	return it == m_options.frameSlots->end() ? -1 : it->second;
+}
+
+// Where the object created by the asBC_ALLOC, or returned by the call compiled in
+// place, at the instruction is kept, or -1
+int CJITCodeGen::FreshSlot(asUINT idx) const
+{
+	if( m_frame == 0 )
+		return FrameSlot(m_code->GetFreshVar(idx));
+	int slot = m_frames[m_frame].freshSlot;
+	return slot >= 0 && m_code->GetFreshSource() == int(idx) ? slot : -1;
+}
+
+// Gets the memory for the objects kept in the frame when the function is entered,
+// which stays the same while it executes, see JIT_GetFrameArena
+void CJITCodeGen::EmitFrameArena()
+{
+	if( !m_objectArena.is_valid() )
+		return;
+	InvokeNode *call = Invoke((const void*)JIT_GetFrameArena, FuncSignature::build<void*, asSVMRegisters*, asUINT>());
+	SetRegsArg(call, 0);
+	call->set_arg(1, Imm(int(m_options.frameObjectSize)));
+	call->set_ret(0, m_objectArena);
+}
+
+// Creates an object of a plain script class in the memory for the objects kept in the
+// frame of the outermost function instead of allocating it, as it never leaves the
+// function, see CJITByteCode::FindFrameObjects and JIT_GetFrameArena. The header is
+// that of a new object, with a reference more, so that the releases by the VM, which
+// goes on with the objects like with any other, never free it, and the members are
+// cleared like ScriptObject_Construct does. The variable the object ends up in isn't
+// released by the generated code, which only forgets the object, and the next object
+// for it takes its place
+void CJITCodeGen::EmitFrameObject(const Gp &obj, int slot, asCObjectType *type)
+{
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	Label heap = m_uc.new_label();
+	Label done = m_uc.new_label();
+	m_uc.j(heap, test_z(m_objectArena));
+	m_uc.add(obj, m_objectArena, Imm(slot));
+	std::vector<asBYTE> header(size_t(layout.scriptObjectSize));
+	JIT_GetFrameObjectHeader(type, &header[0]);
+	int size = int(type->size);
+	Gp t = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
+	int offset = 0;
+	if( Is64Bit() )
+		for( ; offset + 8 <= size; offset += 8 )
+		{
+			asQWORD value = 0;
+			if( offset < layout.scriptObjectSize )
+				memcpy(&value, &header[size_t(offset)], offset + 8 <= layout.scriptObjectSize ? 8 : size_t(layout.scriptObjectSize - offset));
+			if( value == 0 )
+				m_uc.store_zero_reg(Addr(obj, offset));
+			else
+			{
+				m_uc.mov(t, Imm(int64_t(value)));
+				m_uc.store_u64(Addr(obj, offset), t);
+			}
+		}
+	for( ; offset + 4 <= size; offset += 4 )
+	{
+		asDWORD value = 0;
+		if( offset < layout.scriptObjectSize )
+			memcpy(&value, &header[size_t(offset)], offset + 4 <= layout.scriptObjectSize ? 4 : size_t(layout.scriptObjectSize - offset));
+		if( value == 0 )
+			m_uc.store_zero_u32(Addr(obj, offset));
+		else
+		{
+			m_uc.mov(t.r32(), Imm(int(value)));
+			m_uc.store_u32(Addr(obj, offset), t.r32());
+		}
+	}
+	for( ; offset < size; offset++ )
+	{
+		m_uc.mov(t.r32(), Imm(0));
+		m_uc.store_u8(Addr(obj, offset), t.r32());
+	}
+
+	// Without the memory the object is allocated
+	BaseNode *cold = BeginCold(heap);
+	InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
+	alloc->set_arg(0, Imm(int64_t(asPWORD(type))));
+	alloc->set_ret(0, obj);
+	EndCold(cold, done);
+	m_uc.bind(done);
 }
 
 // Copies the members of an object of a plain script class to the other, which the
@@ -2792,11 +2897,23 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 		}
 		if( instr.flags & JIT_INSTR_REFCOUNT )
 		{
-			// Like the VM the variable is cleared after the release
+			// Like the VM the variable is cleared after the release. An object kept in
+			// the frame is only forgotten, see EmitFrameObject
 			Gp obj = LoadPtr(a0);
 			Label skip = m_uc.new_label();
 			m_uc.j(skip, test_z(obj));
+			int slot = m_frame == 0 ? FrameSlot(a0) : -1;
+			Label clear;
+			if( slot >= 0 )
+			{
+				clear = m_uc.new_label();
+				Gp at = m_uc.new_gp_ptr();
+				m_uc.add(at, m_objectArena, Imm(slot));
+				m_uc.j(clear, cmp_eq(obj, at));
+			}
 			EmitScriptRelease(idx, obj);
+			if( slot >= 0 )
+				m_uc.bind(clear);
 			ClearPtr(a0);
 			m_uc.bind(skip);
 			break;

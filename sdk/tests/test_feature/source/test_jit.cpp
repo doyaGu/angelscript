@@ -3609,6 +3609,226 @@ static bool TestInPlaceAssigns()
 	return fail;
 }
 
+// The objects of the plain script classes that never leave the function are kept in
+// the memory of its frame, see CJITByteCode::FindFrameObjects. The results must be
+// those of the VM, also where the VM goes on with the objects after an exception or a
+// suspension, in recursive calls, and when the functions are compiled later or again.
+// The objects that are stored somewhere must be allocated, which the functions
+// executed after them see
+namespace FrameObjects
+{
+	static void Suspend() { asGetActiveContext()->Suspend(); }
+
+	static const char *script =
+		"class Vec2                                                               \n"
+		"{                                                                        \n"
+		"  float x, y;                                                            \n"
+		"  Vec2() {}                                                              \n"
+		"  Vec2(float a, float b) { x = a; y = b; }                               \n"
+		"  Vec2 opAdd(const Vec2 &in o) const { return Vec2(x + o.x, y + o.y); }  \n"
+		"  Vec2 opMul(float s) const { return Vec2(x * s, y * s); }               \n"
+		"  Vec2 div(int d) const { return Vec2(x / float(10 / d), y); }           \n"
+		"}                                                                        \n"
+		"class Bad { int v; void keep() { @g_bad = this; } }                      \n"
+		"Bad@ g_bad;                                                              \n"
+		"Vec2@ g_kept;                                                            \n"
+		"array<Vec2@> g_list;                                                     \n"
+		"float vec(int n)                                                         \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2), b(0.5f, 0.25f);                                          \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"    a = a + b * 0.5f;                                                    \n"
+		"  return a.x + a.y;                                                      \n"
+		"}                                                                        \n"
+		"float divide(int n)                                                      \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2);                                                          \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    try { a = a.div(i % 3) + a; } catch { s += 1; }                      \n"
+		"  }                                                                      \n"
+		"  return a.x + a.y + s;                                                  \n"
+		"}                                                                        \n"
+		"float suspended(int n)                                                   \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2), b(1, 1);                                                 \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    a = a + b * 2;                                                       \n"
+		"    if( i % 2 == 1 ) suspend();                                          \n"
+		"  }                                                                      \n"
+		"  return a.x + a.y;                                                      \n"
+		"}                                                                        \n"
+		"float recursive(int d)                                                   \n"
+		"{                                                                        \n"
+		"  Vec2 a(float(d), 1);                                                   \n"
+		"  if( d > 0 )                                                            \n"
+		"    a = a + Vec2(recursive(d - 1), 0) * 2;                               \n"
+		"  return a.x + a.y;                                                      \n"
+		"}                                                                        \n"
+		"float escapes()                                                          \n"
+		"{                                                                        \n"
+		"  Vec2 a(3, 4);                                                          \n"
+		"  @g_kept = a;                                                           \n"
+		"  a.x += 1;                                                              \n"
+		"  return a.x;                                                            \n"
+		"}                                                                        \n"
+		"float stored(int n)                                                      \n"
+		"{                                                                        \n"
+		"  g_list.resize(0);                                                      \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    Vec2 t(float(i), 1);                                                 \n"
+		"    g_list.insertLast(t);                                                \n"
+		"  }                                                                      \n"
+		"  return g_list[n - 1].x;                                                \n"
+		"}                                                                        \n"
+		"int thisEscape() { Bad b; b.v = 7; b.keep(); return b.v; }               \n"
+		"Vec2 returned() { Vec2 v(5, 6); return v; }                              \n"
+		"float later()                                                            \n"
+		"{                                                                        \n"
+		"  Vec2 r = returned();                                                   \n"
+		"  float s = vec(3) + r.x * 100;                                          \n"
+		"  for( uint i = 0; i < g_list.length(); i++ ) s += g_list[i].x * 10;     \n"
+		"  return s + g_kept.x * 1000 + g_kept.y * 10000 + float(g_bad.v) * 100000; \n"
+		"}                                                                        \n";
+
+	// The results of the functions, the suspended one resumed until it finishes
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterScriptArray(engine, false);
+		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
+			TEST_FAILED;
+		engine->RegisterGlobalFunction("void suspend()", asFUNCTION(Suspend), asCALL_CDECL);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		struct { const char *decl; int arg; } calls[] = {
+			{ "float vec(int)", 10 }, { "float divide(int)", 9 }, { "float suspended(int)", 7 }, { "float recursive(int)", 4 },
+			{ "float escapes()", -1 }, { "float stored(int)", 5 }, { "int thisEscape()", -1 }, { "float later()", -1 } };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(calls) / sizeof(calls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(calls[n].decl));
+				if( calls[n].arg >= 0 )
+					ctx->SetArgDWord(0, asDWORD(calls[n].arg));
+				int r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 100 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				s << calls[n].decl << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << (strstr(calls[n].decl, "int ") == calls[n].decl ? double(int(ctx->GetReturnDWord())) : double(ctx->GetReturnFloat()));
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString();
+				else
+					s << "result " << r;
+				if( suspensions )
+					s << " after " << suspensions << " suspensions";
+				s << "\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+
+	// Whether the log shows objects kept in the frame of the function
+	static bool KeepsObjects(const std::string &log, const char *decl)
+	{
+		std::string head = std::string("; ---- ") + decl + " ----";
+		for( size_t at = log.find(head); at != std::string::npos; at = log.find(head, at + 1) )
+		{
+			size_t end = log.find("; ---- ", at + head.size());
+			if( log.substr(at, end == std::string::npos ? std::string::npos : end - at).find("is kept in the frame") != std::string::npos )
+				return true;
+		}
+		return false;
+	}
+}
+
+static bool TestFrameObjects()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = FrameObjects::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("float suspended(int): 31 after 3 suspensions\n") == std::string::npos ||
+	    expected.find("float divide(int): ") == std::string::npos )
+	{
+		PRINTF("frame objects:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// Compiled first, compiled when they are executed often enough, and compiled again
+	// with the classes that their calls see
+	for( int mode = 0; mode < 3; mode++ )
+	{
+		FILE *log = tmpfile();
+		CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+		if( log )
+			jit.SetLogFile(log);
+		if( mode == 1 )
+			jit.SetCompileThresholds(2, 3);
+		if( mode == 2 )
+			jit.SetProfileThreshold(3);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = FrameObjects::Run(engine, &jit, fail);
+		engine->ShutDownAndRelease();
+		if( actual != expected )
+		{
+			PRINTF("frame objects (mode %d):\n  VM:\n%s  JIT:\n%s", mode, expected.c_str(), actual.c_str());
+			TEST_FAILED;
+		}
+		if( log )
+		{
+			std::string text;
+			char buf[4096];
+			size_t len;
+			rewind(log);
+			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+				text.append(buf, len);
+			fclose(log);
+			bool inlines = !(envFlags & (CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_AOT_ONLY));
+			const char *kept[] = { "float vec(int)", "float divide(int)", "float suspended(int)", "float recursive(int)" };
+			const char *escaped[] = { "float escapes()", "float stored(int)", "int thisEscape()", "Vec2 returned()" };
+			for( asUINT n = 0; n < sizeof(kept) / sizeof(kept[0]) && inlines && mode == 0; n++ )
+				if( !FrameObjects::KeepsObjects(text, kept[n]) )
+				{
+					PRINTF("frame objects: no object is kept in the frame of %s\n", kept[n]);
+					TEST_FAILED;
+				}
+			for( asUINT n = 0; n < sizeof(escaped) / sizeof(escaped[0]); n++ )
+				if( FrameObjects::KeepsObjects(text, escaped[n]) )
+				{
+					PRINTF("frame objects: an object leaving %s is kept in its frame\n", escaped[n]);
+					TEST_FAILED;
+				}
+		}
+	}
+	return fail;
+}
+
 // The initialization lists with nothing to destroy in them are freed without going
 // through the list, see CJITByteCode::FindListFrees. Nothing may be leaked, and the
 // values in the other lists must still be destroyed
@@ -5834,6 +6054,7 @@ bool Test()
 	fail = TestIndexers() || fail;
 	fail = TestLentRefs() || fail;
 	fail = TestInPlaceAssigns() || fail;
+	fail = TestFrameObjects() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

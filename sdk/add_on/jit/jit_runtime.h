@@ -285,6 +285,22 @@ void   JIT_ReleaseScriptObject(void *obj) noexcept;
 // are copied by copying the bytes of the members, see CJITByteCode::FindInPlaceAssigns
 bool   JIT_IsPlainScriptType(const asCObjectType *type);
 
+// Copies the header of a new object of the plain script class into header, which
+// has room for SJITObjectLayout::scriptObjectSize bytes, with a reference more than
+// a new object has, so that the VM never frees the objects kept in a frame, see
+// CJITCodeGen::EmitFrameObject
+void   JIT_GetFrameObjectHeader(asCObjectType *type, void *header);
+
+// The memory for the objects kept in the frame of the function that the context
+// executes at the depth of its call stack, with room for the bytes, or null if it
+// can't be allocated, see CJITCodeGen::EmitFrameObject. Each depth has its own, which
+// the function holds until it returns, also when the VM goes on with it, as the
+// functions at the same depth execute one after the other. The memory is released
+// with the context, for which JIT_RegisterFrameArenas must have been called with
+// the engine
+void  *JIT_GetFrameArena(asSVMRegisters *regs, asUINT bytes) noexcept;
+void   JIT_RegisterFrameArenas(asIScriptEngine *engine);
+
 // asBC_Cast. handle is the address of the handle to cast, may be null
 void   JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept;
 

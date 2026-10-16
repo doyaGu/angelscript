@@ -11,6 +11,7 @@
 #include "as_scriptobject.h"
 
 #include <algorithm>
+#include <set>
 #include <climits>
 
 BEGIN_AS_NAMESPACE
@@ -26,6 +27,9 @@ CJITByteCode::CJITByteCode()
 	m_staticStack = false;
 	m_aot = false;
 	m_inlinedLength = 0;
+	m_freshSource = -1;
+	m_freshState  = 0;
+	m_freshType   = 0;
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
 	m_bail = 0;
@@ -387,6 +391,12 @@ asCObjectType *CJITByteCode::GetInPlaceAssign(asUINT instrIdx) const
 {
 	std::map<asUINT, asCObjectType*>::const_iterator it = m_assigns.find(instrIdx);
 	return it == m_assigns.end() ? 0 : it->second;
+}
+
+int CJITByteCode::GetFreshVar(asUINT instrIdx) const
+{
+	std::map<asUINT, int>::const_iterator it = m_freshVars.find(instrIdx);
+	return it == m_freshVars.end() ? 0 : it->second;
 }
 
 int CJITByteCode::GetLentFree(asUINT instrIdx) const
@@ -953,6 +963,10 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	FindIndexers(inlining ? inlining->indexers : 0);
 	FindInPlaceAssigns();
 	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
+	m_frameObjects.clear();
+	m_freshVars.clear();
+	if( inlining && inlining->frameObjects )
+		FindFrameObjects();
 	AnalyseBody(allowRegisterCache, maxCachedSlots);
 }
 
@@ -1425,6 +1439,476 @@ void CJITByteCode::FindInPlaceAssigns()
 		instr.flags |= JIT_INSTR_ASSIGN;
 		m_assigns[n] = type;
 	}
+}
+
+// Whether the constructor called by asBC_ALLOC, which isn't compiled in place, only
+// reads and writes the members of its object, and passes it on to nothing but the
+// default assignment
+static bool IsCtorSafe(asCScriptEngine *engine, int funcId)
+{
+	asCScriptFunction *ctor = funcId > 0 && asUINT(funcId) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[funcId] : 0;
+	if( ctor == 0 || ctor->funcType != asFUNC_SCRIPT || ctor->scriptData == 0 || ctor->objectType == 0 )
+		return false;
+	CJITByteCode code;
+	if( code.Decode(ctor) < 0 )
+		return false;
+	return code.IsCtorThisSafe();
+}
+
+// The objects of the plain script classes that the function creates and that never
+// leave it can be kept in its frame instead of being allocated, see
+// CJITCodeGen::EmitFrameObject. Such an object is held by a variable of the function,
+// and only created by the calls compiled in place that return a new object, or by
+// asBC_ALLOC. Nothing but the VM may see the object otherwise: the instructions using
+// the variable may only read and write the members, check for null, release the
+// object, and pass it to the methods compiled in place and the default assignment,
+// which must do the same with it. The VM can then go on with the objects in the frame
+// like with any other, which have a reference more so that it never frees them.
+void CJITByteCode::FindFrameObjects()
+{
+	if( !m_staticStack || m_func->scriptData == 0 )
+		return;
+
+	// The variables whose declared class is the same wherever they are used
+	std::map<int, asCObjectType*> candidates;
+	std::set<int> mixed;
+	const asCArray<asSScriptVariable*> &vars = m_func->scriptData->variables;
+	for( asUINT v = 0; v < vars.GetLength(); v++ )
+	{
+		int var = vars[v]->stackOffset;
+		const asCDataType &dt = vars[v]->type;
+		asCObjectType *type = CastToObjectType(dt.GetTypeInfo());
+		if( var <= 0 || mixed.count(var) )
+			continue;
+		if( type == 0 || dt.IsObjectHandle() || dt.IsReference() || !(type->flags & asOBJ_SCRIPT_OBJECT) ||
+		    !JIT_IsPlainScriptType(type) || (candidates.count(var) && candidates[var] != type) )
+		{
+			candidates.erase(var);
+			mixed.insert(var);
+			continue;
+		}
+		candidates[var] = type;
+	}
+
+	for( std::map<int, asCObjectType*>::const_iterator it = candidates.begin(); it != candidates.end(); ++it )
+	{
+		int var = it->first;
+		asCObjectType *type = it->second;
+		std::vector<asUINT> sources;
+		bool ok = true;
+		for( asUINT n = 0; n < m_instrs.size() && ok; n++ )
+		{
+			const SJITInstr &instr = m_instrs[n];
+			if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+				continue;
+			switch( instr.op )
+			{
+			case asBC_FREE:
+			case asBC_ChkNullV:
+			case asBC_LoadRObjR:
+				break;
+			case asBC_PshVPtr:
+				ok = IsPushSafe(n, type);
+				break;
+			case asBC_VAR:
+				ok = IsRefArgSafe(n, type);
+				break;
+			case asBC_STOREOBJ:
+			{
+				// The object returned by the call before, see FindFreshReturn
+				int call = int(n) - 1;
+				while( call >= 0 && m_instrs[call].op == asBC_JitEntry )
+					call--;
+				std::vector<asCScriptFunction*> targets;
+				ok = call >= 0 && (m_instrs[call].op == asBC_CALL || m_instrs[call].op == asBC_CALLINTF) &&
+				     (m_instrs[call].flags & JIT_INSTR_INLINE) && GetCallTargets(asUINT(call), targets);
+				for( asUINT t = 0; t < targets.size() && ok; t++ )
+				{
+					CJITByteCode *callee = FindInlinee(asUINT(call), targets[t]);
+					ok = callee && callee->FindFreshReturn(type);
+				}
+				if( ok )
+					sources.push_back(asUINT(call));
+				break;
+			}
+			case asBC_PSF:
+			{
+				// The destination of the object created in place
+				int alloc = FindAllocFor(n);
+				ok = alloc >= 0 && reinterpret_cast<asCObjectType*>(asBC_PTRARG(m_instrs[alloc].bc)) == type &&
+				     IsCtorSafe(m_func->engine, asBC_INTARG(m_instrs[alloc].bc + AS_PTR_SIZE));
+				if( ok )
+					sources.push_back(asUINT(alloc));
+				break;
+			}
+			default:
+				ok = false;
+				break;
+			}
+		}
+		if( !ok || sources.empty() )
+			continue;
+		m_frameObjects[var] = type;
+		for( asUINT s = 0; s < sources.size(); s++ )
+			m_freshVars[sources[s]] = var;
+	}
+}
+
+// Whether the function compiled in place returns an object of the class that it
+// creates itself and keeps nowhere else, like the factories of the script classes,
+// and the methods returning one of their objects:
+//
+//   PSF vR; ...; ALLOC; ...; LOADOBJ vR; RET
+//   CALL; STOREOBJ vR; ChkNullV vR; LOADOBJ vR; RET
+//
+// The function may use the object before it returns it like the variables of the
+// objects kept in the frame, see FindFrameObjects.
+// Notes the instruction that creates it, see GetFreshSource
+bool CJITByteCode::FindFreshReturn(asCObjectType *type)
+{
+	if( m_freshState != 0 )
+		return m_freshState > 0 && m_freshType == type;
+	m_freshState = -1;
+	m_freshType  = type;
+	if( !m_staticStack )
+		return false;
+
+	int ret = -1;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		if( m_instrs[n].op != asBC_RET || (m_instrs[n].flags & JIT_INSTR_DEAD) )
+			continue;
+		if( ret >= 0 )
+			return false;
+		ret = int(n);
+	}
+	if( ret < 1 || m_instrs[ret - 1].op != asBC_LOADOBJ )
+		return false;
+	int var = asBC_SWORDARG0(m_instrs[ret - 1].bc);
+	if( var <= 0 )
+		return false;
+
+	int source = -1;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+			continue;
+		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR || (instr.op == asBC_LOADOBJ && int(n) == ret - 1) )
+			continue;
+		if( instr.op == asBC_PshVPtr || instr.op == asBC_VAR )
+		{
+			if( instr.op == asBC_PshVPtr ? !IsPushSafe(n, type) : !IsRefArgSafe(n, type) )
+				return false;
+			continue;
+		}
+		if( source >= 0 )
+			return false;
+		if( instr.op == asBC_STOREOBJ )
+		{
+			int call = int(n) - 1;
+			while( call >= 0 && m_instrs[call].op == asBC_JitEntry )
+				call--;
+			std::vector<asCScriptFunction*> targets;
+			if( call < 0 || (m_instrs[call].op != asBC_CALL && m_instrs[call].op != asBC_CALLINTF) ||
+			    !(m_instrs[call].flags & JIT_INSTR_INLINE) || !GetCallTargets(asUINT(call), targets) )
+				return false;
+			for( asUINT t = 0; t < targets.size(); t++ )
+			{
+				CJITByteCode *callee = FindInlinee(asUINT(call), targets[t]);
+				if( callee == 0 || !callee->FindFreshReturn(type) )
+					return false;
+			}
+			source = call;
+		}
+		else if( instr.op == asBC_PSF )
+		{
+			int alloc = FindAllocFor(n);
+			if( alloc < 0 || reinterpret_cast<asCObjectType*>(asBC_PTRARG(m_instrs[alloc].bc)) != type ||
+			    !IsCtorSafe(m_func->engine, asBC_INTARG(m_instrs[alloc].bc + AS_PTR_SIZE)) )
+				return false;
+			source = alloc;
+		}
+		else
+			return false;
+	}
+	if( source < 0 )
+		return false;
+	m_freshSource = source;
+	m_freshState  = 1;
+	return true;
+}
+
+bool CJITByteCode::IsCtorThisSafe()
+{
+	MarkUnreachable(false);
+	AnalyseStackDepth();
+	return m_staticStack && IsThisSafe(m_func->objectType);
+}
+
+// Whether the object that the method compiled in place is called on, of the class,
+// only has its members read and written, and is only passed on like this, see
+// IsPushSafe
+bool CJITByteCode::IsThisSafe(asCObjectType *type) const
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, 0) )
+			continue;
+		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR )
+			continue;
+		if( instr.op != asBC_PshVPtr || !IsPushSafe(n, type) )
+			return false;
+	}
+	return true;
+}
+
+// The same for a parameter passed as a reference to an object of the class
+bool CJITByteCode::IsRefParamSafe(int var, asCObjectType *type) const
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+			continue;
+		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR )
+			continue;
+		if( instr.op != asBC_PshVPtr || !IsPushSafe(n, type) )
+			return false;
+	}
+	return true;
+}
+
+// Whether the object pushed at the instruction, of the class, is only discarded,
+// assigned to or from with the default assignment, which keeps nothing, or called a
+// method on that is compiled in place and keeps nothing either
+bool CJITByteCode::IsPushSafe(asUINT pushIdx, asCObjectType *type) const
+{
+	int consumer = FindConsumer(pushIdx);
+	if( consumer < 0 )
+		return false;
+	const SJITInstr &instr = m_instrs[consumer];
+	int offset = m_stackDepth[consumer] - m_stackDepth[pushIdx + 1];
+	switch( instr.op )
+	{
+	case asBC_PopPtr:
+		return true;
+	case asBC_CALLSYS:
+	{
+		int id = asBC_INTARG(instr.bc);
+		asCScriptEngine *engine = m_func->engine;
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		return func && func->funcType == asFUNC_SYSTEM && func->sysFuncIntf && func->sysFuncIntf->callConv == ICC_CDECL_OBJLAST &&
+		       func->sysFuncIntf->func == reinterpret_cast<asFUNCTION_t>(ScriptObject_Assignment) &&
+		       (offset == 0 || offset == AS_PTR_SIZE);
+	}
+	case asBC_CALL:
+	case asBC_CALLINTF:
+		return offset == 0 && IsMethodSafe(asUINT(consumer), type);
+	default:
+		return false;
+	}
+}
+
+// Whether the method that the call compiled in place makes on an object of the
+// class, which is the implementation of the class, keeps the object nowhere
+bool CJITByteCode::IsMethodSafe(asUINT callIdx, asCObjectType *type) const
+{
+	const SJITInstr &instr = m_instrs[callIdx];
+	asCScriptEngine *engine = m_func->engine;
+	int id = asBC_INTARG(instr.bc);
+	asCScriptFunction *method = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	if( method == 0 || method->objectType == 0 || !(instr.flags & JIT_INSTR_INLINE) )
+		return false;
+	asCScriptFunction *impl = method;
+	if( instr.op == asBC_CALLINTF )
+		impl = (method->funcType == asFUNC_VIRTUAL || method->funcType == asFUNC_INTERFACE) ? GetImplementation(type, method) : 0;
+	CJITByteCode *callee = impl ? FindInlinee(callIdx, impl) : 0;
+	return callee && callee->IsThisSafe(type);
+}
+
+// Whether the variable put on the stack at the instruction is passed as a reference
+// to its object to a method compiled in place that keeps it nowhere:
+//
+//   VAR vX; ...; GETOBJREF; CALL
+bool CJITByteCode::IsRefArgSafe(asUINT varIdx, asCObjectType *type) const
+{
+	int top = m_stackDepth[varIdx + 1];
+	int call = FindConsumer(varIdx, true);
+	if( call < 0 || (m_instrs[call].op != asBC_CALL && m_instrs[call].op != asBC_CALLINTF) || !(m_instrs[call].flags & JIT_INSTR_INLINE) )
+		return false;
+	bool converted = false;
+	for( int n = int(varIdx) + 1; n < call; n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.op == asBC_GETOBJREF || instr.op == asBC_GETREF || instr.op == asBC_GETOBJ) &&
+		    m_stackDepth[n] - int(asBC_WORDARG0(instr.bc)) == top )
+		{
+			if( instr.op != asBC_GETOBJREF || converted )
+				return false;
+			converted = true;
+		}
+	}
+	if( !converted )
+		return false;
+
+	// The parameter that the reference is passed for
+	asCScriptEngine *engine = m_func->engine;
+	int id = asBC_INTARG(m_instrs[call].bc);
+	asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	if( func == 0 )
+		return false;
+	int offset = m_stackDepth[call] - top;
+	int head = (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
+	int at = head;
+	int param = -1;
+	for( asUINT p = 0; p < func->parameterTypes.GetLength() && param < 0; p++ )
+	{
+		if( at == offset )
+			param = int(p);
+		at += func->parameterTypes[p].GetSizeOnStackDWords();
+	}
+	if( param < 0 || !func->parameterTypes[param].IsReference() || func->parameterTypes[param].IsObjectHandle() ||
+	    !func->parameterTypes[param].IsObject() )
+		return false;
+	int var = -head;
+	for( int p = 0; p < param; p++ )
+		var -= func->parameterTypes[p].GetSizeOnStackDWords();
+
+	// Each implementation that the call may make must keep it nowhere
+	std::vector<asCScriptFunction*> targets;
+	if( !GetCallTargets(asUINT(call), targets) )
+		return false;
+	for( asUINT t = 0; t < targets.size(); t++ )
+	{
+		CJITByteCode *callee = FindInlinee(asUINT(call), targets[t]);
+		if( callee == 0 || !callee->IsRefParamSafe(var, type) )
+			return false;
+	}
+	return true;
+}
+
+// The asBC_ALLOC of a script class that stores its object in the variable whose
+// address the asBC_PSF at the instruction pushes, if it is in the same block, or -1.
+// The constructor pops its arguments, and the address stays on the stack until the
+// factory returns
+int CJITByteCode::FindAllocFor(asUINT psfIdx) const
+{
+	if( !m_staticStack || psfIdx + 1 >= m_instrs.size() )
+		return -1;
+	int top = m_stackDepth[psfIdx + 1];
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = psfIdx + 1; n + 1 < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || ((instr.flags & JIT_INSTR_BLOCK_START) && instr.op != asBC_JitEntry) ||
+		    IsBranch(instr.op) || IsTerminator(instr.op) || m_stackDepth[n] < top )
+			return -1;
+		if( instr.op != asBC_ALLOC )
+			continue;
+		int id = asBC_INTARG(instr.bc + AS_PTR_SIZE);
+		asCScriptFunction *ctor = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
+		if( ctor == 0 || !(type->flags & asOBJ_SCRIPT_OBJECT) )
+			return -1;
+		return m_stackDepth[n] - int(ctor->GetSpaceNeededForArguments()) == top ? int(n) : -1;
+	}
+	return -1;
+}
+
+// Whether the instruction reads or writes the value that was pushed when the stack
+// reached the depth, without popping it. These are the instructions that the VM
+// executes with the values on the stack that they don't pop
+static bool AccessesPushed(const SJITInstr &instr, int depth, int top)
+{
+	switch( instr.op )
+	{
+	case asBC_RDSPtr:
+	case asBC_ChkRefS:
+	case asBC_CHKREF:
+	case asBC_ADDSi:
+	case asBC_RefCpyV:
+	case asBC_Cast:
+		return depth == top;
+	case asBC_SwapPtr:
+	case asBC_REFCPY:
+	case asBC_COPY:
+		return depth == top || depth - AS_PTR_SIZE == top;
+	case asBC_ChkNullS:
+	case asBC_GETREF:
+	case asBC_GETOBJREF:
+	case asBC_GETOBJ:
+		return depth - int(asBC_WORDARG0(instr.bc)) == top;
+	default:
+		return false;
+	}
+}
+
+// The instruction that pops the value pushed by the instruction from the stack, if
+// it is in the same block and nothing reads or replaces the value before, but the
+// asBC_GETOBJREF that turns a variable into a reference to its object if allowed,
+// or -1
+int CJITByteCode::FindConsumer(asUINT pushIdx, bool allowRef) const
+{
+	if( !m_staticStack || pushIdx + 1 >= m_instrs.size() )
+		return -1;
+	int top = m_stackDepth[pushIdx + 1];
+	for( asUINT n = pushIdx + 1; n + 1 < m_instrs.size(); n++ )
+	{
+		const SJITInstr &instr = m_instrs[n];
+		if( (instr.flags & JIT_INSTR_DEAD) || ((instr.flags & JIT_INSTR_BLOCK_START) && instr.op != asBC_JitEntry) ||
+		    IsBranch(instr.op) || IsTerminator(instr.op) )
+			return -1;
+		if( m_stackDepth[n + 1] < top )
+			return int(n);
+		if( AccessesPushed(instr, m_stackDepth[n], top) && !(allowRef && instr.op == asBC_GETOBJREF) )
+			return -1;
+	}
+	return -1;
+}
+
+// The functions that the call may enter: the function of asBC_CALL, and the
+// implementations of the method of asBC_CALLINTF in the classes of the module, which
+// other modules can't derive from unless the class is shared
+bool CJITByteCode::GetCallTargets(asUINT callIdx, std::vector<asCScriptFunction*> &targets) const
+{
+	targets.clear();
+	const SJITInstr &instr = m_instrs[callIdx];
+	asCScriptEngine *engine = m_func->engine;
+	int id = asBC_INTARG(instr.bc);
+	asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	if( func == 0 )
+		return false;
+	if( instr.op == asBC_CALL )
+	{
+		targets.push_back(func);
+		return true;
+	}
+	if( instr.op != asBC_CALLINTF || m_func->module == 0 || func->objectType == 0 || (func->objectType->flags & asOBJ_SHARED) ||
+	    (func->funcType != asFUNC_VIRTUAL && func->funcType != asFUNC_INTERFACE) )
+		return false;
+	asCObjectType *receiverType = FindReceiverType(callIdx);
+	const asCArray<asCObjectType*> &classes = m_func->module->m_classTypes;
+	for( asUINT c = 0; c < classes.GetLength(); c++ )
+	{
+		if( (classes[c]->flags & asOBJ_SHARED) && CanCall(classes[c], func, receiverType) )
+			return false;
+		asCScriptFunction *impl = CanCall(classes[c], func, receiverType) ? GetImplementation(classes[c], func) : 0;
+		if( impl && std::find(targets.begin(), targets.end(), impl) == targets.end() )
+			targets.push_back(impl);
+	}
+	return !targets.empty();
+}
+
+// The code compiled in place of the call for the function, or null
+CJITByteCode *CJITByteCode::FindInlinee(asUINT callIdx, asCScriptFunction *func) const
+{
+	const std::vector<SJITInlinee> &inlinees = GetInlinees(callIdx);
+	for( asUINT k = 0; k < inlinees.size(); k++ )
+		if( inlinees[k].code->GetFunction() == func )
+			return inlinees[k].code.get();
+	return 0;
 }
 
 // The handles read from memory, e.g. from the elements of an array, that are copied

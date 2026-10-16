@@ -29,6 +29,8 @@ struct SJITCodeGenOptions
 	const void *recompile;   // int (*)(SJITProfile*), called when the profile has counted down the calls, returns non-zero if the function has new code, which the VM goes on in after the call
 	const void *exactEntry;  // int (*)(void *exactParam, asSVMRegisters*, asPWORD jitArg), called in place of the code when the VM enters it while a line callback is set or a suspension is requested, if elideSuspend is set, see CJITCodeGen::Generate
 	void       *exactParam;
+	const std::map<int, int> *frameSlots; // the variables whose objects are kept in the frame, and where they are, or null, see EmitFrameObject
+	asUINT frameObjectSize;  // the bytes of the memory for those objects
 };
 
 // Architecture-specific pieces used by the generated function wrappers too.
@@ -112,6 +114,7 @@ protected:
 		bool                      exitUsed;
 		asUINT                    borrowed; // the parameters that borrow the references of the caller, see CJITByteCode::AnalyseBorrows
 		int                       lentVar;  // the variable of the caller that holds the reference lent to the object, or 0, see CJITByteCode::FindLentRefs
+		int                       freshSlot; // where the object that the function returns is created in the frame of the outermost function, or -1, see EmitFrameObject
 		bool                      retChecked; // the suspend requests are checked before all returns, see EmitBody
 	};
 
@@ -193,6 +196,10 @@ protected:
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
 	void EmitInPlaceAssign(asUINT idx);
 	void EmitOwnLent(asUINT idx);
+	int  FrameSlot(int var) const;
+	int  FreshSlot(asUINT idx) const;
+	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);
+	void EmitFrameArena();
 
 	// A 32bit value pushed on the static stack, which is also in a register or an
 	// immediate, see EmitDirectSystemCall
@@ -373,6 +380,7 @@ protected:
 	Gp  m_callerSp; // stack pointer of a native caller
 	Gp  m_callLimit; // call stack length up to which native calls push, only if the function calls script functions
 	Gp  m_callStackLength; // length of the call stack while the function executes, see EmitNativeCall, only with m_callLimit
+	Gp  m_objectArena;     // the memory for the objects kept in the frame, or null, see EmitFrameObject
 	Gp  m_directBorrowed; // handle parameters borrowed by a non-inlined native caller
 	Gp  m_borrowState; // address of that caller's JIT_NATIVE_CALL_STATE word
 	Gp  m_inlineRoom; // words of room on the call stack for the inlined functions, only if some are called in loops, see EmitInlineRoom
