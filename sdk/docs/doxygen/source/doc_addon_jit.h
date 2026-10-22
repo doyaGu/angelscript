@@ -140,8 +140,15 @@ doubles held in vector registers are passed and copied in them. On an Apple M5 a
 loop that adds to a variable with a registered int function takes 1.4 nanoseconds
 per call instead of 2.5, one that adds to a float with a registered function 3.9
 instead of 4.2, and one that calls a math function on a double 7.6 instead of
-14.8. The same goes for the AddRef and Release
-behaviours of reference types when handles are copied or objects are freed.
+14.8. The square roots, absolute values, and roundings down and up of the C library
+(sqrt, fabs, floor, and ceil, and their float versions sqrtf and so on), registered
+by the application like the \ref doc_addon_math "math add-on" does, aren't called
+at all but computed by the instructions of the CPU, whatever their names in the
+scripts. On x86 the roundings need SSE4.1, without which the functions are called.
+A loop that adds the square roots of floats takes 0.6 nanoseconds per iteration
+instead of 1.45. The code generated ahead of time calls them. Like the registered
+functions, the AddRef and Release behaviours of reference types are called
+directly when handles are copied or objects are freed.
 The handles copied from the temporary variables that are released right after,
 for example the result of p.next in @p = p.next, are moved instead, so no
 reference is added and released for them. On x86 and AArch64 the generated code

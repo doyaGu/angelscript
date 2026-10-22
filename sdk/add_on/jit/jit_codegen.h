@@ -217,6 +217,7 @@ protected:
 	bool EmitCall(asUINT idx);
 	bool EmitDirectSystemCall(asUINT idx, int funcId);
 	void EmitIndexer(asUINT idx);
+	void EmitMathCall(asUINT idx);
 	void EmitLengthQuery(asUINT idx, const SJITIndexerCall &query);
 	void EmitInPlaceAssign(asUINT idx);
 	void EmitInPlaceConstruct(asUINT idx);
@@ -283,6 +284,7 @@ protected:
 	void StorePair(const Mem &dst, const Gp &first, const Gp &second); // two pointers, the second zero if it's invalid
 	void MoveVec(const Vec &dst, const Vec &src);
 	void MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble);
+	bool CanRoundInPlace();
 	void EmitAddRefInPlace(const Gp &obj, const Label &slow);
 	bool EmitReleaseInPlace(const Gp &obj, const Label &slow, const Label &race);
 	void EmitRefCountInc(const Gp &obj);

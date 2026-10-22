@@ -319,6 +319,13 @@ void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
 	}
 }
 
+// roundss and roundsd round down and up like floor and ceil, but came with SSE4.1.
+// The UniCompiler's emulation without them may differ for -0 and the large values
+bool CJITCodeGen::CanRoundInPlace()
+{
+	return m_uc.has_sse4_1();
+}
+
 // The reference counts of the script objects, see CJITByteCode::FindInPlaceRefCounts.
 // Like asCScriptObject::AddRef the flag of the GC is cleared. The objects that are
 // being destroyed are left to AddRef, which reports the error
@@ -690,6 +697,12 @@ void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
 	}
 }
 
+// frintm and frintp round down and up like floor and ceil
+bool CJITCodeGen::CanRoundInPlace()
+{
+	return true;
+}
+
 bool CJITCodeGen::EmitFloatCompareBranch(const Vec &a, const Vec &b, bool isDouble, asEBCInstr branch, const Label &target)
 {
 	a64::Compiler *cc = m_uc.cc;
@@ -955,6 +968,11 @@ void CJITCodeGen::MoveFloatImm(const Vec &dst, asQWORD bits, bool isDouble)
 		m_uc.mov(t, Imm(int(asDWORD(bits))));
 		m_uc.s_mov_u32(dst, t);
 	}
+}
+
+bool CJITCodeGen::CanRoundInPlace()
+{
+	return false;
 }
 
 #endif

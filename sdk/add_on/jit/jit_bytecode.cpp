@@ -11,6 +11,7 @@
 #include "as_scriptobject.h"
 
 #include <algorithm>
+#include <math.h>
 #include <string.h>
 #include <set>
 #include <climits>
@@ -373,6 +374,12 @@ const SJITIndexerCall *CJITByteCode::GetIndexer(asUINT instrIdx) const
 {
 	std::map<asUINT, SJITIndexerCall>::const_iterator it = m_indexers.find(instrIdx);
 	return it == m_indexers.end() ? 0 : &it->second;
+}
+
+const SJITMathCall *CJITByteCode::GetMathCall(asUINT instrIdx) const
+{
+	std::map<asUINT, SJITMathCall>::const_iterator it = m_mathCalls.find(instrIdx);
+	return it == m_mathCalls.end() ? 0 : &it->second;
 }
 
 asUINT CJITByteCode::GetBorrowedArgs(asUINT instrIdx) const
@@ -850,6 +857,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindInlinees(search, levels - 1, inlining.maxSize * 4);
 				search.path.pop_back();
 				callee->FindIndexers(inlining.indexers);
+				callee->FindMathCalls();
 				callee->FindInPlaceAssigns();
 				callee->FindInPlaceConstructors();
 				callee->FindForwardedObjects();
@@ -982,6 +990,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 		FindInlinees(search, 4, inlining->maxSize * 16);
 	}
 	FindIndexers(inlining ? inlining->indexers : 0);
+	FindMathCalls();
 	FindInPlaceAssigns();
 	FindInPlaceConstructors();
 	FindForwardedObjects();
@@ -1046,6 +1055,58 @@ void CJITByteCode::FindIndexers(const TJITContainerMethods *indexers)
 			continue;
 		instr.flags |= JIT_INSTR_INDEXER;
 		m_indexers[n] = call;
+	}
+}
+
+// The square roots, absolute values, and roundings down and up of the C library,
+// registered by the application, compute what the instructions of the CPU do, which
+// are emitted in place of the calls. The functions are found by their pointers, so
+// the names they are registered with don't matter, and the script types must be
+// those of the C functions. Nothing is called, so the calls aren't sync points. The
+// code generated ahead of time calls the functions, as the function that the
+// bytecode names may be another when it runs
+void CJITByteCode::FindMathCalls()
+{
+	typedef float  (*TJITMathF32)(float);
+	typedef double (*TJITMathF64)(double);
+	static const SJITMathCall functions[] =
+	{
+		{ JIT_MATH_SQRT,  reinterpret_cast<asFUNCTION_t>(TJITMathF32(sqrtf)),  false },
+		{ JIT_MATH_ABS,   reinterpret_cast<asFUNCTION_t>(TJITMathF32(fabsf)),  false },
+		{ JIT_MATH_FLOOR, reinterpret_cast<asFUNCTION_t>(TJITMathF32(floorf)), false },
+		{ JIT_MATH_CEIL,  reinterpret_cast<asFUNCTION_t>(TJITMathF32(ceilf)),  false },
+		{ JIT_MATH_SQRT,  reinterpret_cast<asFUNCTION_t>(TJITMathF64(sqrt)),   true },
+		{ JIT_MATH_ABS,   reinterpret_cast<asFUNCTION_t>(TJITMathF64(fabs)),   true },
+		{ JIT_MATH_FLOOR, reinterpret_cast<asFUNCTION_t>(TJITMathF64(floor)),  true },
+		{ JIT_MATH_CEIL,  reinterpret_cast<asFUNCTION_t>(TJITMathF64(ceil)),   true }
+	};
+
+	m_mathCalls.clear();
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		SJITInstr &instr = m_instrs[n];
+		instr.flags &= ~JIT_INSTR_MATH;
+		if( instr.op != asBC_CALLSYS || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INDEXER)) )
+			continue;
+		int id = asBC_INTARG(instr.bc);
+		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 || func->sysFuncIntf->callConv != ICC_CDECL ||
+		    func->parameterTypes.GetLength() != 1 || func->parameterTypes[0].IsReference() || func->returnType.IsReference() )
+			continue;
+		for( asUINT k = 0; k < sizeof(functions) / sizeof(functions[0]); k++ )
+		{
+			const SJITMathCall &math = functions[k];
+			if( func->sysFuncIntf->func != math.func )
+				continue;
+			if( math.f64 ? (func->returnType.IsDoubleType() && func->parameterTypes[0].IsDoubleType()) :
+			               (func->returnType.IsFloatType() && func->parameterTypes[0].IsFloatType()) )
+			{
+				instr.flags |= JIT_INSTR_MATH;
+				m_mathCalls[n] = math;
+			}
+			break;
+		}
 	}
 }
 

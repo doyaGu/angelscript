@@ -38,7 +38,8 @@ enum EJITInstrFlags
 	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, see FindLentRefs
 	JIT_INSTR_LENT        = 0x8000, // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
 	JIT_INSTR_ASSIGN      = 0x10000, // asBC_CALLSYS of the default assignment of a script class whose members are copied in place, see FindInPlaceAssigns
-	JIT_INSTR_CONSTRUCT   = 0x20000  // asBC_ALLOC of a script class whose constructor is compiled in place, see FindInPlaceConstructors
+	JIT_INSTR_CONSTRUCT   = 0x20000, // asBC_ALLOC of a script class whose constructor is compiled in place, see FindInPlaceConstructors
+	JIT_INSTR_MATH        = 0x40000  // asBC_CALLSYS of a math function of the C library that is computed in place, see FindMathCalls
 };
 
 // How the handles of a type are copied and released, see CJITByteCode::GetRefKind
@@ -415,6 +416,23 @@ struct SJITIndexerCall
 	bool indirect;    // the elements are pointers to the objects
 };
 
+// The math functions of the C library that the JIT compiler computes in place
+enum EJITMathOp
+{
+	JIT_MATH_SQRT,
+	JIT_MATH_ABS,
+	JIT_MATH_FLOOR,
+	JIT_MATH_CEIL
+};
+
+// A call of a math function that is computed in place, see CJITByteCode::FindMathCalls
+struct SJITMathCall
+{
+	EJITMathOp   op;
+	asFUNCTION_t func; // the function, for the CPUs without the instruction
+	bool         f64;  // the function takes and returns a double, else a float
+};
+
 // A member that a constructor compiled in place sets, from an argument or a constant
 struct SJITMemberInit
 {
@@ -572,6 +590,9 @@ public:
 	// Returns the indexer called by an instruction marked with JIT_INSTR_INDEXER
 	const SJITIndexerCall *GetIndexer(asUINT instrIdx) const;
 
+	// Returns the math function called by an instruction marked with JIT_INSTR_MATH
+	const SJITMathCall *GetMathCall(asUINT instrIdx) const;
+
 	// Returns true if the registered function is one of the indexers, which are
 	// compiled in place, and how
 	static bool FindIndexer(asCScriptEngine *engine, int funcId, const TJITContainerMethods *indexers, SJITIndexerCall &call);
@@ -585,9 +606,9 @@ public:
 	// Returns true if the instruction stores the cached variables, see IsSyncPoint.
 	// The copies of the references lent to the inlined calls don't, and neither do
 	// the copies of the script objects counted in place, which only store them on
-	// the rare paths, and the indexers, assignments, and constructors compiled in
-	// place, which leave those to the VM
-	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER | JIT_INSTR_ASSIGN | JIT_INSTR_CONSTRUCT)); }
+	// the rare paths, the indexers, assignments, and constructors compiled in place,
+	// which leave those to the VM, and the math functions computed in place
+	bool   IsSyncPointAt(asUINT instrIdx) const { return IsSyncPoint(m_instrs[instrIdx].op) && !(m_instrs[instrIdx].flags & (JIT_INSTR_BORROW | JIT_INSTR_REFCOUNT | JIT_INSTR_INDEXER | JIT_INSTR_ASSIGN | JIT_INSTR_CONSTRUCT | JIT_INSTR_MATH)); }
 
 	// Returns the index of the parameter in the variable, or -1
 	int    FindParam(int offset) const;
@@ -687,6 +708,7 @@ protected:
 	bool GetCallTargets(asUINT callIdx, std::vector<asCScriptFunction*> &targets) const;
 	CJITByteCode *FindInlinee(asUINT callIdx, asCScriptFunction *func) const;
 	void FindIndexers(const TJITContainerMethods *indexers);
+	void FindMathCalls();
 	void AnalyseBorrows(bool borrowCalls = false);
 	void AnalyseBorrows(bool borrowCalls, const SJITProfile *profile, bool profileCalls);
 	void ClearBorrows();
@@ -734,6 +756,7 @@ protected:
 	std::map<asUINT, std::vector<SJITInlinee> > m_inlinees; // by instruction, see GetInlinees
 	asUINT                  m_inlinedLength; // dwords of the functions inlined at the calls and into them
 	std::map<asUINT, SJITIndexerCall> m_indexers; // by instruction, see GetIndexer
+	std::map<asUINT, SJITMathCall>    m_mathCalls; // by instruction, see GetMathCall
 	asUINT                  m_borrowableParams; // see GetBorrowableParams
 	asUINT                  m_releasedParams;   // the borrowable parameters that the function releases
 	std::map<asUINT, asUINT> m_borrowedArgs;    // by call instruction

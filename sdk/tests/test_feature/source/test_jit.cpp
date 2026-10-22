@@ -18,6 +18,8 @@
 #include <chrono>
 #include <mutex>
 #include <cstddef>
+#include <math.h>
+#include <string.h>
 
 namespace TestJIT
 {
@@ -6695,6 +6697,190 @@ static bool TestCasts()
 	return fail;
 }
 
+// The math functions of the C library are computed in place, see
+// CJITByteCode::FindMathCalls, whatever their names in the scripts. The results must
+// be the same bits as those of the functions, also for -0, the infinities, and the
+// values too large to have a fraction, and the NaNs must be NaNs. The arguments are
+// taken from the registers they were pushed from, also when the variable is changed
+// after the push, and the results are used directly or after a conversion, or not at
+// all, also in the functions compiled in place
+namespace MathCalls
+{
+	static const char *script =
+		"uint64 g_sum = 0;                                                        \n"
+		"void mixF(float r) { g_sum = g_sum * 31 + (r != r ? 1 : fbits(r)); }      \n"
+		"void mixD(double r) { g_sum = g_sum * 31 + (r != r ? 1 : dbits(r)); }     \n"
+		"float valueF(int i)                                                      \n"
+		"{                                                                        \n"
+		"  float big = 1e30f;                                                     \n"
+		"  float inf = big * big;                                                 \n"
+		"  switch( i )                                                            \n"
+		"  {                                                                      \n"
+		"  case 0: return 0.0f;    case 1: return -0.0f;  case 2: return 2.25f;   \n"
+		"  case 3: return -2.5f;   case 4: return 0.5f;   case 5: return -0.5f;   \n"
+		"  case 6: return 8388609; case 7: return -big;   case 8: return inf;     \n"
+		"  case 9: return -inf;    case 10: return inf - inf;                     \n"
+		"  }                                                                      \n"
+		"  return 1.0f / 3;                                                       \n"
+		"}                                                                        \n"
+		"double valueD(int i)                                                     \n"
+		"{                                                                        \n"
+		"  double big = 1e300;                                                    \n"
+		"  double inf = big * big;                                                \n"
+		"  switch( i )                                                            \n"
+		"  {                                                                      \n"
+		"  case 0: return 0.0;     case 1: return -0.0;   case 2: return 2.25;    \n"
+		"  case 3: return -2.5;    case 4: return 0.5;    case 5: return -0.5;    \n"
+		"  case 6: return 4503599627370497.0; case 7: return -big; case 8: return inf; \n"
+		"  case 9: return -inf;    case 10: return inf - inf;                     \n"
+		"  }                                                                      \n"
+		"  return 1.0 / 3;                                                        \n"
+		"}                                                                        \n"
+		"float lengthOf(float x, float y) { return root(x * x + y * y); }        \n"
+		"double weigh(double a, double b, double c) { return a * 0.001 + b * 2 + c; } \n"
+		"float weighF(float a, float b, float c) { return a * 0.001f + b * 2 + c; } \n"
+		"uint64 values()                                                          \n"
+		"{                                                                        \n"
+		"  g_sum = 0;                                                             \n"
+		"  for( int i = 0; i < 12; i++ )                                          \n"
+		"  {                                                                      \n"
+		"    float f = valueF(i);                                                 \n"
+		"    mixF(root(f)); mixF(magnitude(f)); mixF(down(f)); mixF(up(f));       \n"
+		"    double d = valueD(i);                                                \n"
+		"    mixD(root(d)); mixD(magnitude(d)); mixD(down(d)); mixD(up(d));       \n"
+		"  }                                                                      \n"
+		"  return g_sum;                                                          \n"
+		"}                                                                        \n"
+		"uint64 loops()                                                           \n"
+		"{                                                                        \n"
+		"  g_sum = 0;                                                             \n"
+		"  float s = 0, k = 0.25f;                                                \n"
+		"  double t = 0;                                                          \n"
+		"  for( int i = 0; i < 100; i++ )                                         \n"
+		"  {                                                                      \n"
+		"    s += root(float(i)) + down(k += 0.5f) * k;                           \n"
+		"    t += up(double(i) / 7) - magnitude(t - 100);                         \n"
+		"    s += lengthOf(float(i), 2);                                          \n"
+		"    root(s);                                                             \n"
+		"    double w = root(s);                                                  \n"
+		"    t += w;                                                              \n"
+		"    t = weigh(t, up(double(i) / 7), magnitude(t - 3));                   \n"
+		"    s = weighF(s, down(k * 3), root(s));                                 \n"
+		"  }                                                                      \n"
+		"  mixF(s); mixF(k); mixD(t);                                             \n"
+		"  return g_sum;                                                          \n"
+		"}                                                                        \n";
+
+	static asDWORD FloatBits(float f) { asDWORD b; memcpy(&b, &f, sizeof(b)); return b; }
+	static asQWORD DoubleBits(double d) { asQWORD b; memcpy(&b, &d, sizeof(b)); return b; }
+
+	// The results of the functions, executed twice so that the deferred functions
+	// are compiled for the second time
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r;
+		r = engine->RegisterGlobalFunction("uint fbits(float)", asFUNCTION(FloatBits), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("uint64 dbits(double)", asFUNCTION(DoubleBits), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float root(float)", asFUNCTIONPR(sqrtf, (float), float), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float magnitude(float)", asFUNCTIONPR(fabsf, (float), float), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float down(float)", asFUNCTIONPR(floorf, (float), float), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float up(float)", asFUNCTIONPR(ceilf, (float), float), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double root(double)", asFUNCTIONPR(sqrt, (double), double), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double magnitude(double)", asFUNCTIONPR(fabs, (double), double), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double down(double)", asFUNCTIONPR(floor, (double), double), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double up(double)", asFUNCTIONPR(ceil, (double), double), asCALL_CDECL); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "uint64 values()", "uint64 loops()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				r = ctx->Execute();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << ctx->GetReturnQWord();
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString();
+				else
+					s << "result " << r;
+				s << "\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestMathCalls()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = MathCalls::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("uint64 values(): ") == std::string::npos || expected.find("Exception") != std::string::npos ||
+	    expected.find("result") != std::string::npos )
+	{
+		PRINTF("math calls:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows the calls computed in place
+	FILE *log = tmpfile();
+	CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "uint64 ");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = MathCalls::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	std::string text;
+	if( log )
+	{
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+	}
+
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("math calls: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("math calls:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log && !(envFlags & CJITCompiler::JIT_AOT_ONLY) && text.find("; computed in place") == std::string::npos )
+	{
+		PRINTF("math calls: nothing computed in place\n");
+		TEST_FAILED;
+	}
+	return fail;
+}
+
 static bool TestGenericCalls()
 {
 	bool fail = false;
@@ -6813,6 +6999,7 @@ bool Test()
 	fail = TestFrameObjects() || fail;
 	fail = TestGenericCalls() || fail;
 	fail = TestCasts() || fail;
+	fail = TestMathCalls() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

@@ -1245,6 +1245,11 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 			EmitIndexer(idx);
 			break;
 		}
+		if( instr.flags & JIT_INSTR_MATH )
+		{
+			EmitMathCall(idx);
+			break;
+		}
 		if( m_options.directSystemCalls && EmitDirectSystemCall(idx, asBC_INTARG(bc)) )
 			break;
 		{
@@ -1475,6 +1480,69 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 // CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
 // left to the VM, which calls the method to raise the exception. Nothing else can
 // see the variables, so they aren't stored, see CJITByteCode::IsSyncPointAt
+// Computes the math function of the C library in place, see
+// CJITByteCode::FindMathCalls. The argument is taken from the register it was pushed
+// from, like for the direct calls, and so is the result set to the value register.
+// Without the instructions to round the function is called, which doesn't look at
+// the context
+void CJITCodeGen::EmitMathCall(asUINT idx)
+{
+	const SJITMathCall &math = *m_code->GetMathCall(idx);
+	Vec arg = math.f64 ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
+	std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset) : m_pushed.end();
+	if( math.f64 )
+	{
+		if( pushed != m_pushed.end() && pushed->second.kind == SPushedValue::F64 )
+			MoveVec(arg, pushed->second.vec);
+		else
+			m_uc.v_loadu64_f64(arg, Stack(0));
+	}
+	else if( pushed == m_pushed.end() || !MovePushedF32(arg, pushed->second) )
+		m_uc.v_loadu32_f32(arg, Stack(0));
+
+	Vec ret = math.f64 ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
+	bool rounding = math.op == JIT_MATH_FLOOR || math.op == JIT_MATH_CEIL;
+	if( rounding && !CanRoundInPlace() )
+	{
+		InvokeNode *call = Invoke((const void*)math.func, math.f64 ? FuncSignature::build<double, double>() : FuncSignature::build<float, float>());
+		call->set_arg(0, arg);
+		call->set_ret(0, ret);
+	}
+	else switch( math.op )
+	{
+	case JIT_MATH_SQRT:
+		if( math.f64 ) m_uc.s_sqrt_f64(ret, arg); else m_uc.s_sqrt_f32(ret, arg);
+		break;
+	case JIT_MATH_ABS:
+		if( math.f64 ) m_uc.s_abs_f64(ret, arg); else m_uc.s_abs_f32(ret, arg);
+		break;
+	case JIT_MATH_FLOOR:
+		if( math.f64 ) m_uc.s_floor_f64(ret, arg); else m_uc.s_floor_f32(ret, arg);
+		break;
+	case JIT_MATH_CEIL:
+		if( math.f64 ) m_uc.s_ceil_f64(ret, arg); else m_uc.s_ceil_f32(ret, arg);
+		break;
+	}
+	PopStack(math.f64 ? 8 : 4);
+
+	if( !m_code->IsVRLiveAfter(idx) )
+		return;
+	if( !math.f64 )
+	{
+		Gp bits = m_uc.new_gp32();
+		m_uc.s_mov_u32(bits, ret);
+		StoreVR32(bits);
+	}
+	else if( Is64Bit() )
+	{
+		Gp bits = m_uc.new_gp64();
+		m_uc.s_mov_u64(bits, ret);
+		StoreVR64(bits);
+	}
+	else
+		StoreVRF64(ret);
+}
+
 void CJITCodeGen::EmitIndexer(asUINT idx)
 {
 	const SJITIndexerCall &indexer = *m_code->GetIndexer(idx);

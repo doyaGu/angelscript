@@ -450,6 +450,8 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 			fprintf(file, "   ; inlined");
 		if( instr.flags & JIT_INSTR_INDEXER )
 			fprintf(file, code.GetIndexer(n)->op == JIT_CONTAINER_INDEX ? "   ; indexer" : "   ; length query");
+		if( instr.flags & JIT_INSTR_MATH )
+			fprintf(file, "   ; computed in place");
 		if( instr.flags & JIT_INSTR_PROFILE )
 			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? " for the class seen" :
 			              (instr.op == asBC_CallPtr ? "   ; targets noted" : "   ; classes noted"));
