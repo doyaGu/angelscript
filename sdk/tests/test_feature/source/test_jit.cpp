@@ -6543,6 +6543,158 @@ namespace GenericCalls
 	}
 }
 
+// The casts add the reference to the objects of the class cast to in place, and
+// call JIT_Cast for the others, see CJITByteCode::FindInPlaceRefCounts. The objects
+// must be destroyed as often as with the VM, and the casts to the base classes and
+// the interfaces must find the same classes, also in the methods compiled in place,
+// and in the destructors, where the object casts a handle of itself
+namespace Casts
+{
+	static const char *script =
+		"int g_destroyed = 0;                                                     \n"
+		"interface IShape { int kind(); }                                         \n"
+		"interface IOther {}                                                      \n"
+		"class Shape : IShape                                                     \n"
+		"{                                                                        \n"
+		"  int v = 1;                                                             \n"
+		"  ~Shape() { g_destroyed++; }                                            \n"
+		"  int kind() { return 1; }                                               \n"
+		"}                                                                        \n"
+		"class Circle : Shape { int kind() override { return 2; } }               \n"
+		"class Square : Shape, IOther { int kind() override { return 3; } }       \n"
+		"class Dying : IShape                                                     \n"
+		"{                                                                        \n"
+		"  ~Dying() { IShape@ s = this; Dying@ d = cast<Dying>(s); if( d !is null ) g_destroyed += 10; } \n"
+		"  int kind() { return 4; }                                               \n"
+		"}                                                                        \n"
+		"int count(IShape@ s)                                                     \n"
+		"{                                                                        \n"
+		"  int n = 0;                                                             \n"
+		"  if( cast<Shape>(s) !is null ) n += 1;                                  \n"
+		"  if( cast<Circle>(s) !is null ) n += 10;                                \n"
+		"  if( cast<Square>(s) !is null ) n += 100;                               \n"
+		"  if( cast<IOther>(s) !is null ) n += 1000;                              \n"
+		"  return n;                                                              \n"
+		"}                                                                        \n"
+		"int classes()                                                            \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  array<IShape@> list = { Shape(), Circle(), Square(), null, Dying() };  \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 50; k++ )                                          \n"
+		"    for( uint i = 0; i < list.length(); i++ )                           \n"
+		"      s += count(list[i]) * (i + 1);                                     \n"
+		"  list.resize(0);                                                        \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int kept()                                                               \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  Circle@ last;                                                          \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 100; k++ )                                         \n"
+		"  {                                                                      \n"
+		"    IShape@ shape = (k % 3 == 0) ? cast<IShape>(Circle()) : cast<IShape>(Square()); \n"
+		"    Circle@ c = cast<Circle>(shape);                                     \n"
+		"    if( c !is null ) { c.v += k; @last = c; }                            \n"
+		"    @shape = null;                                                       \n"
+		"    if( c !is null ) s += c.v;                                           \n"
+		"  }                                                                      \n"
+		"  s += last.v;                                                           \n"
+		"  @last = null;                                                          \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int nullHandle()                                                         \n"
+		"{                                                                        \n"
+		"  IShape@ none;                                                          \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 10; k++ ) s += count(none) + (cast<Circle>(none) is null ? 1 : 0); \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	static CBufferedOutStream msgs;
+
+	// The results of the functions, executed twice so that the deferred functions
+	// are compiled for the second time, and the messages
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		msgs.buffer.clear();
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterScriptArray(engine, false);
+		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
+			TEST_FAILED;
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "int classes()", "int kept()", "int nullHandle()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				int r = ctx->Execute();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << int(ctx->GetReturnDWord());
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString();
+				else
+					s << "result " << r;
+				s << "\n";
+			}
+		ctx->Release();
+		s << msgs.buffer;
+		return s.str();
+	}
+}
+
+static bool TestCasts()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Casts::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("int classes(): 166300013\n") == std::string::npos || expected.find("int nullHandle(): 10\n") == std::string::npos )
+	{
+		PRINTF("casts:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine
+	CJITCompiler jit(envFlags);
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = Casts::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("casts: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("casts:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	return fail;
+}
+
 static bool TestGenericCalls()
 {
 	bool fail = false;
@@ -6660,6 +6812,7 @@ bool Test()
 	fail = TestForwardedValues() || fail;
 	fail = TestFrameObjects() || fail;
 	fail = TestGenericCalls() || fail;
+	fail = TestCasts() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

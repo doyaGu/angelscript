@@ -1399,7 +1399,10 @@ void CJITByteCode::FindMovedRefs()
 // for the objects that are being destroyed, to report the error, and Release for
 // the last reference, which destroys the object. The copies of the handles aren't
 // sync points then, as the cached variables are only stored on the rare paths. The
-// code generated ahead of time counts them in place on every host, see AOT_AddRef
+// code generated ahead of time counts them in place on every host, see AOT_AddRef.
+// The casts, which are only made between script classes and interfaces, add the
+// reference to the object of the class cast to in place too, and leave the others
+// to JIT_Cast, which calls nothing else
 void CJITByteCode::FindInPlaceRefCounts()
 {
 #ifndef JIT_INPLACE_REFCOUNT
@@ -1410,10 +1413,10 @@ void CJITByteCode::FindInPlaceRefCounts()
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
-		if( (instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV) ||
+		if( (instr.op != asBC_FREE && instr.op != asBC_REFCPY && instr.op != asBC_RefCpyV && instr.op != asBC_Cast) ||
 		    (instr.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_BORROW | JIT_INSTR_MOVED)) )
 			continue;
-		if( GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_SCRIPT_OBJECT )
+		if( instr.op == asBC_Cast || GetRefKind(engine, reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr.bc))) == JIT_REF_SCRIPT_OBJECT )
 			instr.flags |= JIT_INSTR_REFCOUNT;
 	}
 }

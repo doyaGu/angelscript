@@ -31,7 +31,7 @@ enum EJITInstrFlags
 	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to a native script call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
-	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, or asBC_RefCpyV of script objects whose references are counted in place, see FindInPlaceRefCounts
+	JIT_INSTR_REFCOUNT    = 0x400, // asBC_FREE, asBC_REFCPY, asBC_RefCpyV, or asBC_Cast of script objects whose references are counted in place, see FindInPlaceRefCounts
 	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
 	JIT_INSTR_PROFILE     = 0x1000, // call whose receiver class or function-pointer target is noted in the profile, see SJITProfile
 	JIT_INSTR_INDEXER     = 0x2000, // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer

@@ -3385,12 +3385,39 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_Cast:
 		{
+			// The object of the class cast to gets its reference in place, see
+			// CJITByteCode::FindInPlaceRefCounts. The class is looked up here, and
+			// JIT_Cast looks at the interfaces and the base classes of the others
+			asCObjectType *to = 0;
+			if( instr.flags & JIT_INSTR_REFCOUNT )
+				to = m_code->GetFunction()->engine->GetObjectTypeFromTypeId(int(asBC_DWORDARG(bc)));
 			Gp a = m_uc.new_gp_ptr();
 			m_uc.load(a, Stack(0));
+			Label done = m_uc.new_label();
+			BaseNode *cold = 0;
+			if( to && !to->IsInterface() )
+			{
+				const SJITObjectLayout &layout = JIT_GetObjectLayout();
+				Gp obj  = m_uc.new_gp_ptr();
+				Gp type = m_uc.new_gp_ptr();
+				Label other = m_uc.new_label();
+				m_uc.j(done, test_z(a));
+				m_uc.load(obj, mem_ptr(a));
+				m_uc.j(done, test_z(obj));
+				m_uc.load(type, Addr(obj, layout.objectType));
+				m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(to))));
+				EmitScriptAddRef(idx, obj);
+				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
+				m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
+				cold = BeginCold(other);
+			}
 			InvokeNode *call = Invoke((const void*)JIT_Cast, FuncSignature::build<void, asSVMRegisters*, void*, asDWORD>());
 			SetRegsArg(call, 0);
 			call->set_arg(1, a);
 			call->set_arg(2, Imm(int(asBC_DWORDARG(bc))));
+			if( cold )
+				EndCold(cold, done);
+			m_uc.bind(done);
 			PopStack(PTR_BYTES);
 		}
 		break;
