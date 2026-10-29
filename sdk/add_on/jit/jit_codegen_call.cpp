@@ -229,7 +229,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			Gp func = LoadPtr(int(extra));
 			Gp type = m_uc.new_gp32();
 			m_uc.j(slow, test_z(func));
-			SJITSeenFunctions *seen = FunctionProfileCell(idx);
+			SJITSeenFunctions *seen = (instr.flags & JIT_INSTR_INLINE) ? 0 : FunctionProfileCell(idx);
 			if( seen )
 				EmitNoteFunction(seen, func);
 			if( borrowed )
@@ -388,7 +388,9 @@ void CJITCodeGen::EmitDelegateCall(asUINT idx, int funcVar, const Label &delegat
 // way, or that the call has seen, each checked for and emitted once per
 // implementation, or of the classes that inherit the method, and the others call the
 // method. The objects of other classes than those seen are noted in the profile, and
-// count down its calls. The calls in the inlined functions only check the class, as
+// count down its calls. A call through asBC_CallPtr is inlined for the functions that
+// the pointer may hold, see CJITByteCode::FindPointerTargets, each checked for, and
+// the other functions are called, and noted like the classes. The calls in the inlined functions only check the class, as
 // the outermost call has checked the room for them, and that the VM has nothing to
 // do if the functions called before may have given it something. The VM makes the
 // call otherwise
@@ -397,6 +399,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	const std::vector<SJITInlinee> &inlinees = m_code->GetInlinees(idx);
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
 	bool virtualCall = instr.op == asBC_CALLINTF;
+	bool pointerCall = instr.op == asBC_CallPtr;
 	// The implementations of a method take the same arguments, which is all that is
 	// needed of the function until one is chosen
 	asCScriptFunction *func = inlinees[0].code->GetFunction();
@@ -426,7 +429,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	Label call;
 	if( caller == 0 )
 		call = m_uc.new_label();
-	else if( virtualCall || checkVM )
+	else if( virtualCall || pointerCall || checkVM )
 		call = BailLabel(idx);
 
 	// The function called instead gets its own references for the arguments that
@@ -435,6 +438,9 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	Label own = ownArgs ? m_uc.new_label() : call;
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
 	Gp type;
+	Gp target;
+	if( pointerCall )
+		target = LoadPtr(asBC_SWORDARG1(instr.bc));
 	if( virtualCall )
 	{
 		// The call raises the exception for a null object
@@ -518,6 +524,32 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			EndCold(cold, own);
 		}
 	}
+	else if( pointerCall )
+	{
+		// Which function the pointer holds. Any other is called, after it is noted if
+		// the call keeps a profile, which counts down its calls then. The VM raises the
+		// exception for a null pointer
+		for( asUINT k = 1; k < inlinees.size(); k++ )
+		{
+			bodies[k] = m_uc.new_label();
+			m_uc.j(bodies[k], cmp_eq(target, PtrConst(asPWORD(inlinees[k].code->GetFunction()))));
+		}
+		SJITSeenFunctions *seen = FunctionProfileCell(idx);
+		if( seen )
+		{
+			Label other = m_uc.new_label();
+			m_uc.j(other, cmp_ne(target, PtrConst(asPWORD(func))));
+			BaseNode *cold = BeginCold(other);
+			m_uc.j(own, test_z(target));
+			EmitNoteFunction(seen, target);
+			m_uc.j(own, scmp_gt(EmitCountDown(), Imm(0)));
+			EmitRecompile(idx);
+			m_callsProfiled++;
+			EndCold(cold, own);
+		}
+		else
+			m_uc.j(own, cmp_ne(target, PtrConst(asPWORD(func))));
+	}
 	if( ownArgs )
 	{
 		BaseNode *cold = BeginCold(own);
@@ -596,6 +628,8 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			OwnLentRef(asUINT(lentFree));
 		if( virtualCall )
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0);
+		else if( pointerCall )
+			EmitScriptCall(idx, JIT_CALL_PTR, 0, asBC_SWORDARG1(instr.bc));
 		else
 			EmitScriptCall(idx, JIT_CALL_SCRIPT, func->GetId(), 0);
 		if( returnedObj.is_valid() )
@@ -971,14 +1005,33 @@ CJITCodeGen::Gp CJITCodeGen::EmitCountDown()
 
 // Compiles the function again when the profile has counted down the calls, and leaves
 // the call to the VM if the function has new code then, which the VM goes on in after
-// the call. The call is made here otherwise
+// the call. The call is made here otherwise. The function that the VM calls releases
+// its handle arguments, so those lent to the call get references of their own first
 void CJITCodeGen::EmitRecompile(asUINT idx)
 {
 	InvokeNode *call = Invoke(m_options.recompile, FuncSignature::build<int, SJITProfile*>());
 	Gp r = m_uc.new_gp32();
 	call->set_arg(0, Imm(int64_t(asPWORD(m_options.profile))));
 	call->set_ret(0, r);
-	m_uc.j(BailLabel(idx), test_nz(r));
+	asUINT borrowed = m_code->GetBorrowedArgs(idx);
+	if( borrowed == 0 )
+	{
+		m_uc.j(BailLabel(idx), test_nz(r));
+		return;
+	}
+
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	asCScriptFunction *func = m_code->GetFunction();
+	asCScriptFunction *callee = instr.op == asBC_CallPtr ? func->GetCalledFunction(instr.pos) : func->engine->scriptFunctions[asBC_INTARG(instr.bc)];
+	Label cont = m_uc.new_label();
+	m_uc.j(cont, test_z(r));
+	Gp frame = FramePointer(-StackOffset(idx) / 4);
+	InvokeNode *own = Invoke((const void*)JIT_OwnParams, FuncSignature::build<void, asCScriptFunction*, asDWORD*, asUINT>());
+	own->set_arg(0, Imm(int64_t(asPWORD(callee))));
+	own->set_arg(1, frame);
+	own->set_arg(2, Imm(int(borrowed)));
+	m_uc.j(BailLabel(idx));
+	m_uc.bind(cont);
 }
 
 // Pushes the call state like asCContext::PushCallState and calls the native code
@@ -1332,6 +1385,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	case asBC_CallPtr:
 		if( m_options.noScriptCalls )
 			Bail(idx);
+		else if( instr.flags & JIT_INSTR_INLINE )
+			EmitInlineCall(idx);
 		else
 		{
 			if( FunctionProfileCell(idx) )

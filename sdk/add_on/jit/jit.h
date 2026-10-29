@@ -178,11 +178,13 @@ public:
 	int CompileDeferred(asIScriptModule *module);
 
 	// Profiles. Virtual and interface calls note up to three receiver classes, and
-	// function-pointer calls with borrowable handle arguments note up to three targets.
-	// When the calls of a function have been made that many times, the function is
-	// compiled again if a call has seen a new module target. Methods are compiled in
-	// place for the receiver classes seen, and profiled script functions may borrow
-	// handle arguments after their identity is checked. Deferred functions note targets
+	// function-pointer calls up to three targets, if a small module function could be
+	// compiled in place for them or they have borrowable handle arguments. When the
+	// calls of a function have been made that many times, the function is compiled
+	// again if a call has seen a new module target. Methods are compiled in place for
+	// the receiver classes seen, script functions for the function pointers that hold
+	// them, and profiled script functions may borrow handle arguments after their
+	// identity is checked. Deferred functions note targets
 	// while the VM executes them too, so their first generated code can use them. The
 	// calls not made yet go on profiling, so a function is compiled at most 3 times.
 	// The call that has counted down goes on in the new code, and so do the next calls

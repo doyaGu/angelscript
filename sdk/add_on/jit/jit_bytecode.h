@@ -27,7 +27,7 @@ enum EJITInstrFlags
 	JIT_INSTR_BAIL        = 0x08, // the instruction must always return control to the VM
 	JIT_INSTR_SKIP        = 0x10, // the instruction has no effect and produces no code
 	JIT_INSTR_DEAD        = 0x20, // the instruction can never be reached, no code is generated for it
-	JIT_INSTR_INLINE      = 0x40, // asBC_CALL or asBC_CALLINTF whose function is emitted in place, see GetInlinees
+	JIT_INSTR_INLINE      = 0x40, // asBC_CALL, asBC_CALLINTF, or asBC_CallPtr whose function is emitted in place, see GetInlinees
 	JIT_INSTR_BORROW      = 0x80, // asBC_RefCpyV whose reference is lent to a native script call, see AnalyseBorrows
 	JIT_INSTR_MOVE        = 0x100, // asBC_RefCpyV that takes over the reference of the variable it copies, see FindMovedRefs
 	JIT_INSTR_MOVED       = 0x200, // asBC_FREE of the variable whose reference has been taken over, which only clears it
@@ -398,8 +398,9 @@ class CJITByteCode;
 
 // A function emitted in place of a call, see CJITByteCode::GetInlinees, and the
 // classes that the object of an asBC_CALLINTF must be of for it. Empty for asBC_CALL,
-// and for the virtual methods that several classes inherit, for which the class of
-// the object must have the inlined method in its table
+// for asBC_CallPtr, whose pointer must hold the function, and for the virtual methods
+// that several classes inherit, for which the class of the object must have the
+// inlined method in its table
 struct SJITInlinee
 {
 	std::shared_ptr<CJITByteCode> code;
@@ -577,10 +578,11 @@ public:
 	const std::vector<int> &GetSwitchTargets(asUINT instrIdx) const;
 
 	// Returns the functions emitted in place of an instruction marked with
-	// JIT_INSTR_INLINE: one for asBC_CALL, and for asBC_CALLINTF one for each
+	// JIT_INSTR_INLINE: one for asBC_CALL, for asBC_CALLINTF one for each
 	// implementation of the method among the classes that the object is checked for,
 	// which are the only class of the module that can call it, or those that the
-	// profile has seen
+	// profile has seen, and for asBC_CallPtr one for each function that the pointer
+	// is checked for, see FindPointerTargets
 	const std::vector<SJITInlinee> &GetInlinees(asUINT instrIdx) const;
 
 	// True if one of the functions emitted in place of the instruction has sync points
@@ -625,9 +627,10 @@ public:
 	// to. The generated code checks the resolved function against every one
 	const std::vector<asCScriptFunction*> &GetBorrowedTargets(asUINT instrIdx) const;
 
-	// Returns the dynamic targets whose addresses are embedded in the generated
-	// code. The compiler keeps them alive until all code of this function is gone
-	const std::vector<asCScriptFunction*> &GetBorrowedDependencies() const { return m_borrowedDependencies; }
+	// Adds the dynamic targets whose addresses are embedded in the generated code,
+	// also by the functions inlined into this one. The compiler keeps them alive
+	// until all code of this function is gone
+	void GetDependencies(std::vector<asCScriptFunction*> &targets) const;
 
 	// Returns the variables that must be null for the copies of the references lent
 	// to a native script call not to release anything, which the first of the copies
@@ -726,6 +729,7 @@ protected:
 	int  FindVarConsumer(asUINT idx) const;
 	int  FindPush(asUINT idx, int top) const;
 	asCObjectType *FindReceiverType(asUINT call) const;
+	void FindPointerTargets(asCScriptFunction *funcdef, const SJITSeenFunctions *seen, std::vector<asCScriptFunction*> &targets) const;
 	bool HoldsReference(int var) const;
 	bool LeavesFrameDirty(asUINT instrIdx) const;
 	bool GetStackInc(const SJITInstr &instr, int &inc) const;

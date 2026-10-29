@@ -160,7 +160,7 @@ struct CJITCompiler::SImpl
 	void Release(asJITFunction code);
 	int  CreateEntry(asCScriptFunction *func, asJITFunction code, const std::vector<asUINT> &counts, asJITFunction *output, const CJITByteCode *byteCode = 0);
 	SEntry *FindEntry(asCScriptFunction *func);
-	void RetainBorrowedTargets(SEntry *entry, const CJITByteCode &code);
+	void RetainTargets(SEntry *entry, const CJITByteCode &code);
 	void PrepareVMProfile(SEntry *entry, const CJITByteCode &code);
 	void FinishVMProfile(SEntry *entry);
 	void NoteVMCall(asSVMRegisters *regs);
@@ -453,7 +453,7 @@ static void DumpByteCode(FILE *file, const CJITByteCode &code)
 		if( instr.flags & JIT_INSTR_MATH )
 			fprintf(file, "   ; computed in place");
 		if( instr.flags & JIT_INSTR_PROFILE )
-			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? " for the class seen" :
+			fprintf(file, (instr.flags & JIT_INSTR_INLINE) ? (instr.op == asBC_CallPtr ? "   ; others noted" : " for the class seen") :
 			              (instr.op == asBC_CallPtr ? "   ; targets noted" : "   ; classes noted"));
 		if( instr.flags & JIT_INSTR_BORROW )
 			fprintf(file, "   ; borrowed");
@@ -513,15 +513,18 @@ CJITCompiler::SImpl::SEntry *CJITCompiler::SImpl::FindEntry(asCScriptFunction *f
 	return it != functionEntries.end() ? it->second : 0;
 }
 
-// Keeps bound functions whose addresses are embedded in an entry's current or
-// retired code alive. Recompilation may add targets after an import is rebound;
-// each distinct function is retained once until the immutable entry is released.
-// Must be called with the lock held.
-void CJITCompiler::SImpl::RetainBorrowedTargets(SEntry *entry, const CJITByteCode &code)
+// Keeps the functions whose addresses are embedded in an entry's current or retired
+// code alive: the bound functions and the targets of function pointers that the code
+// lends arguments to, and those it has inlined. Recompilation may add targets after
+// an import is rebound or a call has seen new ones; each distinct function is
+// retained once until the immutable entry is released. Must be called with the lock
+// held.
+void CJITCompiler::SImpl::RetainTargets(SEntry *entry, const CJITByteCode &code)
 {
 	if( entry == 0 )
 		return;
-	const std::vector<asCScriptFunction*> &targets = code.GetBorrowedDependencies();
+	std::vector<asCScriptFunction*> targets;
+	code.GetDependencies(targets);
 	for( size_t n = 0; n < targets.size(); n++ )
 	{
 		if( std::find(entry->borrowedTargets.begin(), entry->borrowedTargets.end(), targets[n]) != entry->borrowedTargets.end() )
@@ -766,7 +769,7 @@ int CJITCompiler::SImpl::CreateEntry(asCScriptFunction *func, asJITFunction code
 		if( ok )
 		{
 			if( byteCode )
-				RetainBorrowedTargets(entry, *byteCode);
+				RetainTargets(entry, *byteCode);
 			Publish(entry, reinterpret_cast<JITFunction>(code));
 			wrapper = reinterpret_cast<asJITFunction>(reinterpret_cast<char*>(base) + JIT_WRAPPER_PREFIX);
 			entry->wrapper = wrapper;
@@ -1254,7 +1257,7 @@ JITFunction CJITCompiler::SImpl::TierUp(SEntry *entry, bool exact)
 			entry->counts[n].store(0, std::memory_order_relaxed);
 		return 0;
 	}
-	RetainBorrowedTargets(entry, code);
+	RetainTargets(entry, code);
 	Publish(entry, reinterpret_cast<JITFunction>(jitFunc));
 	FinishVMProfile(entry);
 	return reinterpret_cast<JITFunction>(jitFunc);
@@ -1300,7 +1303,7 @@ int CJITCompiler::SImpl::Recompile(SJITProfile *jitProfile)
 	impl->compiling.erase(func);
 	if( !ok )
 		return 0;
-	impl->RetainBorrowedTargets(impl->FindEntry(func), code);
+	impl->RetainTargets(impl->FindEntry(func), code);
 	impl->Replace(func, jitFunc);
 	return 1;
 }
@@ -1337,7 +1340,7 @@ JITFunction CJITCompiler::SImpl::CompileExact(asCScriptFunction *func)
 	compiling.erase(func);
 	if( !ok )
 		return 0;
-	RetainBorrowedTargets(FindEntry(func), code);
+	RetainTargets(FindEntry(func), code);
 	Replace(func, jitFunc);
 	return reinterpret_cast<JITFunction>(jitFunc);
 }

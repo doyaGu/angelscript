@@ -415,6 +415,20 @@ other tests of the test_performance project make such calls, so their times don'
 change, and with the threshold 2 the feature tests of the library compile 6 of their
 8820 functions again.
 
+The calls through function pointers are compiled in place the same way for the
+script functions that the pointer may hold: right away for those named by the
+function-pointer literals of the calling function, and for those that the call has
+seen once the function is compiled again. The code compares the pointer with each of
+them, and calls any other function, delegate, or null pointer as usual, noting the
+functions that it sees and counting down. The calls that know no function note those
+they see if a function of the module with the signature of the funcdef is small
+enough to be compiled in place. The functions compiled in place are kept alive as
+long as the code that compares with them. Calling a function 20 million times
+through a local function pointer set to it took 1.42 nanoseconds per call instead of
+2.9 on an Apple M5 Pro, the same as calling it directly, and through a function
+pointer parameter that is set to one of two functions in turn 1.39 nanoseconds
+instead of 4.2.
+
 \section doc_addon_jit_indexers Indexers
 
 The scripts index the arrays and the other containers through methods that are
@@ -787,7 +801,9 @@ and notes the class if there is room, and counts down the count that all the cal
 of the code share. The call compiled in place for the classes compares the class of
 the object with each of them, and only the objects of other classes are noted and
 count down. The function is compiled again by a call
-of the add-on, which the code makes when the count runs out. Recursive
+of the add-on, which the code makes when the count runs out. The calls through
+function pointers are compiled in place for the script functions that the pointer
+is compared with, see \ref doc_addon_jit_profiles "Profiles". Recursive
 functions and functions with catch blocks are always called. The code
 compiled in place works on the stack frame that the function would have if it was
 called, so when the VM is needed there, for example to raise an exception, and

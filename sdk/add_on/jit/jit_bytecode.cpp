@@ -763,6 +763,50 @@ static bool HasSmallImplementation(asCScriptFunction *caller, asCScriptFunction 
 	return false;
 }
 
+// Returns true if a script function of the module of the caller that a pointer of the
+// funcdef can hold is small enough to be inlined, so that the functions that a call
+// through the pointer sees are worth noting
+static bool HasSmallFunction(asCScriptFunction *caller, asCScriptFunction *funcdef, asUINT maxSize)
+{
+	if( caller->module == 0 )
+		return false;
+
+	const asCArray<asCScriptFunction*> &functions = caller->module->m_scriptFunctions;
+	for( asUINT n = 0; n < functions.GetLength(); n++ )
+	{
+		asCScriptFunction *func = functions[n];
+		if( func->funcType == asFUNC_SCRIPT && func->scriptData && func->scriptData->byteCode.GetLength() <= maxSize &&
+		    funcdef->IsSignatureExceptNameEqual(func) )
+			return true;
+	}
+	return false;
+}
+
+// The script functions that a pointer of the funcdef may hold where asBC_CallPtr
+// calls it: those named by the function-pointer literals of the function, whose
+// bytecode keeps them alive, and the functions of its module that the call has seen
+void CJITByteCode::FindPointerTargets(asCScriptFunction *funcdef, const SJITSeenFunctions *seen, std::vector<asCScriptFunction*> &targets) const
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		if( m_instrs[n].op != asBC_FuncPtr )
+			continue;
+		asCScriptFunction *target = reinterpret_cast<asCScriptFunction*>(asBC_PTRARG(m_instrs[n].bc));
+		if( target && target->funcType == asFUNC_SCRIPT && target->scriptData &&
+		    funcdef->IsSignatureExceptNameEqual(target) &&
+		    std::find(targets.begin(), targets.end(), target) == targets.end() )
+			targets.push_back(target);
+	}
+	for( asUINT n = 0; seen && n < JIT_PROFILE_FUNCTIONS && seen->functions[n]; n++ )
+	{
+		asCScriptFunction *target = seen->functions[n];
+		if( IsModuleFunction(m_func, target) && target->funcType == asFUNC_SCRIPT && target->scriptData &&
+		    funcdef->IsSignatureExceptNameEqual(target) &&
+		    std::find(targets.begin(), targets.end(), target) == targets.end() )
+			targets.push_back(target);
+	}
+}
+
 const SJITSeenClasses *SJITProfile::Find(asCScriptFunction *func, asUINT instrIdx) const
 {
 	std::map<std::pair<asCScriptFunction*, asUINT>, SJITSeenClasses>::const_iterator it = classes.find(std::make_pair(func, instrIdx));
@@ -882,7 +926,10 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 // Otherwise the calls note the classes that they see in the profile, and the methods
 // are inlined for the classes that a call has seen when the function is compiled
 // again with it, each checked for, where the call notes the others then. The classes
-// that share an implementation share its code
+// that share an implementation share its code. The calls through function pointers
+// are inlined for the functions that the pointer may hold, see FindPointerTargets,
+// each checked for, and note the others, or note those that they see if none is
+// known and a function of the module is small enough to be inlined
 void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT budget)
 {
 	m_inlinees.clear();
@@ -895,7 +942,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		SJITInstr &instr = m_instrs[n];
-		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF) || (instr.flags & JIT_INSTR_DEAD) )
+		if( (instr.op != asBC_CALL && instr.op != asBC_CALLINTF && instr.op != asBC_CallPtr) || (instr.flags & JIT_INSTR_DEAD) )
 			continue;
 
 		// The implementations to emit, and the class whose objects call each, or null
@@ -903,7 +950,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 		std::vector<std::pair<asCScriptFunction*, asCObjectType*> > impls;
 		bool profiled = false;
 		int id = asBC_INTARG(instr.bc);
-		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = instr.op != asBC_CallPtr && id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
 		if( func && instr.op == asBC_CALLINTF )
 		{
 			asCScriptFunction *method = func;
@@ -929,6 +976,19 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 						instr.flags |= JIT_INSTR_PROFILE;
 				}
 			}
+		}
+		else if( instr.op == asBC_CallPtr )
+		{
+			asCScriptFunction *funcdef = FindFuncdef(m_func, asBC_SWORDARG1(instr.bc));
+			std::vector<asCScriptFunction*> targets;
+			if( funcdef )
+				FindPointerTargets(funcdef, inlining.classes ? inlining.classes->FindFunctions(m_func, n) : 0, targets);
+			for( asUINT t = 0; t < targets.size(); t++ )
+				impls.push_back(std::make_pair(targets[t], (asCObjectType*)0));
+			if( !impls.empty() )
+				profiled = inlining.profile;
+			else if( inlining.profile && funcdef && HasSmallFunction(m_func, funcdef, inlining.maxSize) )
+				instr.flags |= JIT_INSTR_PROFILE;
 		}
 		else if( func )
 			impls.push_back(std::make_pair(func, (asCObjectType*)0));
@@ -1319,25 +1379,8 @@ void CJITByteCode::FindCalledBorrowedArgs(const SJITProfile *profile, bool profi
 			func = FindFuncdef(m_func, asBC_SWORDARG1(instr.bc));
 			if( func && profileCalls && HasBorrowableArgument(func) )
 				instr.flags |= JIT_INSTR_PROFILE;
-			for( asUINT i = 0; func && i < m_instrs.size(); i++ )
-			{
-				if( m_instrs[i].op != asBC_FuncPtr )
-					continue;
-				asCScriptFunction *target = reinterpret_cast<asCScriptFunction*>(asBC_PTRARG(m_instrs[i].bc));
-				if( target && target->funcType == asFUNC_SCRIPT && target->scriptData &&
-				    func->IsSignatureExceptNameEqual(target) &&
-				    std::find(targets.begin(), targets.end(), target) == targets.end() )
-					targets.push_back(target);
-			}
-			const SJITSeenFunctions *seen = func && profile ? profile->FindFunctions(m_func, n) : 0;
-			for( asUINT i = 0; seen && i < JIT_PROFILE_FUNCTIONS && seen->functions[i]; i++ )
-			{
-				asCScriptFunction *target = seen->functions[i];
-				if( IsModuleFunction(m_func, target) && target->funcType == asFUNC_SCRIPT && target->scriptData &&
-				    func->IsSignatureExceptNameEqual(target) &&
-				    std::find(targets.begin(), targets.end(), target) == targets.end() )
-					targets.push_back(target);
-			}
+			if( func )
+				FindPointerTargets(func, profile ? profile->FindFunctions(m_func, n) : 0, targets);
 		}
 		else if( func && instr.op == asBC_CALLINTF && m_func->module )
 		{
@@ -1393,6 +1436,25 @@ void CJITByteCode::FindCalledBorrowedArgs(const SJITProfile *profile, bool profi
 			if( std::find(m_borrowedDependencies.begin(), m_borrowedDependencies.end(), it->second[t]) == m_borrowedDependencies.end() )
 				m_borrowedDependencies.push_back(it->second[t]);
 	}
+}
+
+// The dynamic targets whose addresses the generated code compares with, of the
+// function and of those inlined into it: the functions that the borrowing calls
+// check for, and those inlined at the calls through function pointers
+void CJITByteCode::GetDependencies(std::vector<asCScriptFunction*> &targets) const
+{
+	for( asUINT n = 0; n < m_borrowedDependencies.size(); n++ )
+		if( std::find(targets.begin(), targets.end(), m_borrowedDependencies[n]) == targets.end() )
+			targets.push_back(m_borrowedDependencies[n]);
+	for( std::map<asUINT, std::vector<SJITInlinee> >::const_iterator it = m_inlinees.begin(); it != m_inlinees.end(); ++it )
+		for( asUINT k = 0; k < it->second.size(); k++ )
+		{
+			const CJITByteCode *code = it->second[k].code.get();
+			if( m_instrs[it->first].op == asBC_CallPtr &&
+			    std::find(targets.begin(), targets.end(), code->GetFunction()) == targets.end() )
+				targets.push_back(code->GetFunction());
+			code->GetDependencies(targets);
+		}
 }
 
 void CJITByteCode::ClearBorrows()

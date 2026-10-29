@@ -6986,6 +6986,327 @@ static bool TestMathCalls()
 	return fail;
 }
 
+// The calls through function pointers are compiled in place for the functions that
+// the pointer is checked to hold, see CJITByteCode::FindPointerTargets: those of the
+// function-pointer literals of the function, and those that the profile has seen,
+// which may be more than it notes. The pointers may hold other functions, lambdas,
+// delegates, or null, and change in a loop. The functions compiled in place may raise
+// exceptions, take handles, be recursive, and be suspended, also when they are
+// compiled into a function compiled in place themselves. The handles lent to the calls
+// through pointers and of interface methods that note their targets get references
+// of their own when the function is compiled again and the VM makes the call
+namespace FunctionPointers
+{
+	static int lines = 0;
+	static void LineCallback(asIScriptContext *ctx, void *)
+	{
+		if( ++lines % 5 == 0 )
+			ctx->Suspend();
+	}
+
+	static const char *script =
+		"funcdef int BinOp(int, int);                                             \n"
+		"funcdef int ObjOp(Obj@);                                                 \n"
+		"int g_destroyed = 0;                                                     \n"
+		"class Obj                                                                \n"
+		"{                                                                        \n"
+		"  int v;                                                                 \n"
+		"  Obj(int a) { v = a; }                                                  \n"
+		"  ~Obj() { g_destroyed++; }                                              \n"
+		"  int scaled(int a, int b) { return a * v + b; }                         \n"
+		"}                                                                        \n"
+		"int add(int a, int b) { return a + b; }                                  \n"
+		"int mul(int a, int b) { return a * b % 1000; }                           \n"
+		"int sub(int a, int b) { return a - b; }                                  \n"
+		"int bxor(int a, int b) { return a ^ b; }                                 \n"
+		"int quot(int a, int b) { return a / b; }                                 \n"
+		"int value(Obj@ o) { return o is null ? -1 : o.v; }                       \n"
+		"int down(int a, int b) { BinOp@ f = down; return a <= 0 ? b : f(a - 1, b + a); } \n"
+		"int apply(BinOp@ f, int n)                                               \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < n; i++ ) s = f(s, i);                              \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int literal()                                                            \n"
+		"{                                                                        \n"
+		"  BinOp@ f = add;                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 200; i++ ) s = f(s, i);                            \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int callbacks()                                                          \n"
+		"{                                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 20; k++ )                                          \n"
+		"    s += apply(add, k) + apply(sub, k) * 3 + apply(mul, k) * 7 + apply(bxor, k) * 11; \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int changing()                                                           \n"
+		"{                                                                        \n"
+		"  BinOp@ a = add, b = mul, c = function(x, y) { return x - y * 2; };     \n"
+		"  Obj o(3);                                                              \n"
+		"  BinOp@ d = BinOp(o.scaled);                                            \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 200; i++ )                                         \n"
+		"  {                                                                      \n"
+		"    BinOp@ f = i % 4 == 0 ? a : i % 4 == 1 ? b : i % 4 == 2 ? c : d;     \n"
+		"    s = f(s, i) % 100000;                                                \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"BinOp@ g_op = sub;                                                       \n"
+		"int turn()                                                               \n"
+		"{                                                                        \n"
+		"  BinOp@ f = add;                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 200; i++ )                                         \n"
+		"  {                                                                      \n"
+		"    if( i == 100 ) @f = g_op;                                            \n"
+		"    s = f(s, i);                                                         \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int nullPointer()                                                        \n"
+		"{                                                                        \n"
+		"  BinOp@ f = add;                                                        \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 100; i++ )                                         \n"
+		"  {                                                                      \n"
+		"    if( i == 99 ) @f = null;                                             \n"
+		"    s = f(s, i);                                                         \n"
+		"  }                                                                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int exception()                                                          \n"
+		"{                                                                        \n"
+		"  BinOp@ f = quot;                                                       \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 100; i++ ) s += f(1000, 99 - i);                   \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int handles()                                                            \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  ObjOp@ f = value;                                                      \n"
+		"  Obj@ kept = Obj(5);                                                    \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 100; i++ ) s += f(Obj(i)) + f(kept) + f(null);     \n"
+		"  @kept = null;                                                          \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int twice(Obj@ o) { return o.v * 2; }                                    \n"
+		"int thrice(Obj@ o) { return o.v * 3; }                                   \n"
+		"int applyObj(ObjOp@ f)                                                   \n"
+		"{                                                                        \n"
+		"  Obj@ kept = Obj(7);                                                    \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 100; i++ ) s += f(kept);                           \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"interface IGet { int get(Obj@ o); }                                      \n"
+		"class Once : IGet { int get(Obj@ o) { return o.v; } }                    \n"
+		"class Twice : IGet { int get(Obj@ o) { return o.v * 2; } }               \n"
+		"class Thrice : IGet { int get(Obj@ o) { return o.v * 3; } }              \n"
+		"int applyGet(IGet@ g)                                                    \n"
+		"{                                                                        \n"
+		"  Obj@ kept = Obj(7);                                                    \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 100; i++ ) s += g.get(kept);                       \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"int lent()                                                               \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 6; k++ )                                           \n"
+		"  {                                                                      \n"
+		"    s += applyObj(k % 3 == 0 ? @value : k % 3 == 1 ? @twice : @thrice);  \n"
+		"    IGet@ g = k % 3 == 0 ? cast<IGet>(Once()) : k % 3 == 1 ? cast<IGet>(Twice()) : cast<IGet>(Thrice()); \n"
+		"    s += applyGet(g);                                                    \n"
+		"  }                                                                      \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int recursive()                                                          \n"
+		"{                                                                        \n"
+		"  BinOp@ f = down;                                                       \n"
+		"  int s = 0;                                                             \n"
+		"  for( int i = 0; i < 20; i++ ) s += f(i, 0);                            \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	static CBufferedOutStream msgs;
+
+	// The results of the functions, executed twice so that the profiled functions are
+	// compiled again, then twice with a line callback that suspends them, and the
+	// messages
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		msgs.buffer.clear();
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "int literal()", "int callbacks()", "int changing()", "int turn()", "int nullPointer()", "int exception()", "int handles()", "int lent()", "int recursive()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 4; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				lines = 0;
+				if( pass >= 2 )
+					ctx->SetLineCallback(asFUNCTION(LineCallback), 0, asCALL_CDECL);
+				int r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 100000 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				ctx->ClearLineCallback();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << int(ctx->GetReturnDWord());
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" << ctx->GetExceptionLineNumber();
+				else
+					s << "result " << r;
+				s << ", " << lines << " lines, " << suspensions << " suspensions\n";
+			}
+		ctx->Release();
+		s << msgs.buffer;
+		return s.str();
+	}
+
+	// The part of the log for the compilations of the function
+	static std::string Section(const std::string &text, const char *decl, size_t &at)
+	{
+		std::string head = std::string("; ---- ") + decl + " ----";
+		at = text.find(head, at);
+		if( at == std::string::npos )
+			return "";
+		size_t end = text.find("; ---- ", at + head.size());
+		std::string section = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+		at += head.size();
+		return section;
+	}
+
+	// The number of compilations of the function, and of those that compile its call
+	// through a pointer in place
+	static int Compilations(const std::string &text, const char *decl, int &inlining)
+	{
+		size_t at = 0;
+		int count = 0;
+		inlining = 0;
+		for( std::string section = Section(text, decl, at); at != std::string::npos; section = Section(text, decl, at) )
+		{
+			count++;
+			std::stringstream lines(section);
+			std::string line;
+			bool inlined = false;
+			while( std::getline(lines, line) )
+				inlined = inlined || (line.find("CallPtr") != std::string::npos && line.find("; inlined") != std::string::npos);
+			if( inlined )
+				inlining++;
+		}
+		return count;
+	}
+}
+
+static bool TestFunctionPointers()
+{
+	using namespace FunctionPointers;
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+	bool inlining = (envFlags & (CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR | CJITCompiler::JIT_AOT_ONLY)) == 0;
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("int nullPointer(): Unbound function called in nullPointer:") == std::string::npos ||
+	    expected.find("int exception(): Divide by zero in quot:") == std::string::npos ||
+	    expected.find("int handles(): 5350101, 0 lines") == std::string::npos || expected.find("int lent(): 16800012, 0 lines") == std::string::npos ||
+	    expected.find("lines, 0 suspensions") == std::string::npos )
+	{
+		PRINTF("function pointers:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows the calls compiled in
+	// place, with the functions that the calls see, and without. The line callback
+	// must be called like by the VM
+	asUINT thresholds[] = { 50, 0 };
+	for( asUINT t = 0; t < sizeof(thresholds) / sizeof(thresholds[0]); t++ )
+	{
+		FILE *log = tmpfile();
+		CJITCompiler jit((envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND)) | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+		if( log )
+			jit.SetLogFile(log, "int ");
+		jit.SetProfileThreshold(thresholds[t]);
+		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+		std::string actual = Run(engine, &jit, fail);
+		engine->ShutDownAndRelease();
+		std::string text;
+		if( log )
+		{
+			char buf[4096];
+			size_t len;
+			rewind(log);
+			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+				text.append(buf, len);
+			fclose(log);
+		}
+
+		SJITStatistics stats = jit.GetStatistics();
+		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 || stats.codeSize != 0 )
+		{
+			PRINTF("function pointers %u: %u functions compiled, %u failed, %zu bytes remain\n", thresholds[t], stats.functionsCompiled, stats.functionsFailed, stats.codeSize);
+			TEST_FAILED;
+		}
+		if( actual != expected )
+		{
+			PRINTF("function pointers %u:\n  VM:\n%s  JIT:\n%s", thresholds[t], expected.c_str(), actual.c_str());
+			TEST_FAILED;
+		}
+		if( !log || !inlining )
+			continue;
+
+		// The literals are compiled in place right away, and the callbacks of apply after
+		// the call has seen them. The function that apply is compiled into is compiled
+		// again for those that the call in apply has seen there, and turn for the
+		// function that its call sees after the literal. Each function is compiled once
+		// more for the line callback, with the profile of its last code
+		bool profiled = thresholds[t] != 0;
+		struct { const char *decl; int compilations, inlining; } checks[] = {
+			{ "int literal()", 2, 2 }, { "int changing()", 2, 2 }, { "int apply(BinOp@, int)", profiled ? 3 : 2, profiled ? 2 : 0 },
+			{ "int callbacks()", profiled ? 3 : 2, -1 }, { "int turn()", profiled ? 3 : 2, profiled ? 3 : 2 } };
+		for( asUINT n = 0; n < sizeof(checks) / sizeof(checks[0]); n++ )
+		{
+			int inlined = 0;
+			int count = Compilations(text, checks[n].decl, inlined);
+			if( count != checks[n].compilations || (checks[n].inlining >= 0 && inlined != checks[n].inlining) )
+			{
+				PRINTF("function pointers %u: %s compiled %d times, %d with its call in place\n", thresholds[t], checks[n].decl, count, inlined);
+				TEST_FAILED;
+			}
+		}
+	}
+	return fail;
+}
+
 static bool TestGenericCalls()
 {
 	bool fail = false;
@@ -7105,6 +7426,7 @@ bool Test()
 	fail = TestGenericCalls() || fail;
 	fail = TestCasts() || fail;
 	fail = TestMathCalls() || fail;
+	fail = TestFunctionPointers() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;
