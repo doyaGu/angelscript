@@ -35,7 +35,7 @@ enum EJITInstrFlags
 	JIT_INSTR_FREE_LIST   = 0x800, // asBC_FREE of an initialization list with nothing to destroy, which only frees the memory, see FindListFrees
 	JIT_INSTR_PROFILE     = 0x1000, // call whose receiver class or function-pointer target is noted in the profile, see SJITProfile
 	JIT_INSTR_INDEXER     = 0x2000, // asBC_CALLSYS or asBC_Thiscall1 of an indexer that is compiled in place, see GetIndexer
-	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, see FindLentRefs
+	JIT_INSTR_LEND        = 0x4000, // asBC_RefCpyV of a handle read from memory whose reference is lent to an inlined method, or asBC_Cast of a variable that lends its reference, see FindLentRefs and FindLentCasts
 	JIT_INSTR_LENT        = 0x8000, // asBC_FREE of the variable that holds the lent reference, which only clears it, see FindLentRefs
 	JIT_INSTR_ASSIGN      = 0x10000, // asBC_CALLSYS of the default assignment of a script class whose members are copied in place, see FindInPlaceAssigns
 	JIT_INSTR_CONSTRUCT   = 0x20000, // asBC_ALLOC of a script class whose constructor is compiled in place, see FindInPlaceConstructors
@@ -636,7 +636,9 @@ public:
 
 	// The asBC_FREE that releases the variable whose reference the asBC_RefCpyV marked
 	// with JIT_INSTR_LEND lends to the call after it, for the copy, the call, and the
-	// entry points between the call and the release, or -1, see FindLentRefs
+	// entry points between the call and the release, or that the asBC_Cast marked with
+	// it lends to, for the instructions up to the release, or -1, see FindLentRefs and
+	// FindLentCasts
 	int GetLentFree(asUINT instrIdx) const;
 
 	// The class whose members the instruction marked with JIT_INSTR_ASSIGN copies, see
@@ -692,6 +694,8 @@ protected:
 	std::shared_ptr<CJITByteCode> AnalyseInlinee(SInlineSearch &search, asCScriptFunction *func, asUINT levels);
 	bool CanBeInlined() const;
 	void FindLentRefs();
+	void FindLentCasts();
+	bool InlineesArePlain(asUINT instrIdx) const;
 	void FindInPlaceAssigns();
 	void FindInPlaceConstructors();
 	void FindForwardedObjects();

@@ -550,7 +550,7 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		frame.exit     = m_uc.new_label();
 		frame.exitUsed = false;
 		frame.borrowed = borrowed;
-		frame.lentVar  = lentFree >= 0 ? asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc) : 0;
+		frame.lentFree = lentFree;
 		frame.freshSlot = freshSlot;
 		frame.retChecked = true;
 		frame.returnedObj = returnedObj;
@@ -590,17 +590,10 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 		Label cont = m_uc.new_label();
 		BaseNode *cold = BeginCold(call);
 		m_spOffset = StackOffset(idx);
+		// The method called instead may release anything, so the variable gets a
+		// reference of its own, which the FREE after the call releases then
 		if( lentFree >= 0 )
-		{
-			// The method called instead may release anything, so the variable gets
-			// a reference of its own, which the FREE after the call releases then
-			Gp obj = LoadPtr(asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc));
-			Label none = m_uc.new_label();
-			m_uc.j(none, test_z(obj));
-			EmitScriptAddRef(idx, obj);
-			m_uc.bind(none);
-			m_uc.mov(m_lentOwned[asUINT(lentFree)], Imm(1));
-		}
+			OwnLentRef(asUINT(lentFree));
 		if( virtualCall )
 			EmitScriptCall(idx, JIT_CALL_INTERFACE, asBC_INTARG(instr.bc), 0);
 		else
@@ -722,18 +715,10 @@ void CJITCodeGen::EmitInlineExit(int frame)
 		inlined.insert(inlined.begin(), f);
 	}
 
-	// The variable of the outermost function that lends its reference to the object
-	// gets one of its own, which the VM releases, see CJITByteCode::FindLentRefs
-	int lentVar = m_frames[inlined[0]].lentVar;
-	if( lentVar )
-	{
-		Gp obj = LoadPtr(lentVar);
-		Label none = m_uc.new_label();
-		m_uc.j(none, test_z(obj));
-		InvokeNode *addRef = Invoke((const void*)JIT_AddRefScriptObject, FuncSignature::build<void, void*>());
-		addRef->set_arg(0, obj);
-		m_uc.bind(none);
-	}
+	// The variable of the outermost function that holds a lent reference gets one of
+	// its own, which the VM releases, see CJITByteCode::FindLentRefs
+	if( m_frames[inlined[0]].lentFree >= 0 )
+		OwnLentRef(asUINT(m_frames[inlined[0]].lentFree));
 	StoreFrame();
 	m_uc.store(RegsField(offsetof(asSVMRegisters, programPointer)), m_bailPC);
 
@@ -3454,35 +3439,63 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 	case asBC_Cast:
 		{
 			// The object of the class cast to gets its reference in place, see
-			// CJITByteCode::FindInPlaceRefCounts. The class is looked up here, and
-			// JIT_Cast looks at the interfaces and the base classes of the others
+			// CJITByteCode::FindInPlaceRefCounts, or is lent the reference of the
+			// variable cast from, see CJITByteCode::FindLentCasts. The class is looked
+			// up here, and JIT_Cast looks at the interfaces and the base classes of the
+			// others, or JIT_CastObject where the reference is lent
 			asCObjectType *to = 0;
 			if( instr.flags & JIT_INSTR_REFCOUNT )
 				to = m_code->GetFunction()->engine->GetObjectTypeFromTypeId(int(asBC_DWORDARG(bc)));
-			Gp a = m_uc.new_gp_ptr();
-			m_uc.load(a, Stack(0));
+			bool inPlace = to && !to->IsInterface();
+			bool lent = (instr.flags & JIT_INSTR_LEND) && m_frame == 0;
+			if( lent )
+				m_uc.mov(m_lentOwned[asUINT(m_code->GetLentFree(idx))], Imm(0));
+			Gp a   = m_uc.new_gp_ptr();
+			Gp obj = m_uc.new_gp_ptr();
 			Label done = m_uc.new_label();
 			BaseNode *cold = 0;
-			if( to && !to->IsInterface() )
+			m_uc.load(a, Stack(0));
+			if( inPlace || lent )
 			{
-				const SJITObjectLayout &layout = JIT_GetObjectLayout();
-				Gp obj  = m_uc.new_gp_ptr();
-				Gp type = m_uc.new_gp_ptr();
-				Label other = m_uc.new_label();
 				m_uc.j(done, test_z(a));
 				m_uc.load(obj, mem_ptr(a));
 				m_uc.j(done, test_z(obj));
+			}
+			if( inPlace )
+			{
+				const SJITObjectLayout &layout = JIT_GetObjectLayout();
+				Gp type = m_uc.new_gp_ptr();
+				Label other = m_uc.new_label();
 				m_uc.load(type, Addr(obj, layout.objectType));
 				m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(to))));
-				EmitScriptAddRef(idx, obj);
+				if( !lent )
+					EmitScriptAddRef(idx, obj);
 				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
 				m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
 				cold = BeginCold(other);
 			}
-			InvokeNode *call = Invoke((const void*)JIT_Cast, FuncSignature::build<void, asSVMRegisters*, void*, asDWORD>());
-			SetRegsArg(call, 0);
-			call->set_arg(1, a);
-			call->set_arg(2, Imm(int(asBC_DWORDARG(bc))));
+			if( lent )
+			{
+				// The object is read again, as the register allocator keeps it on the
+				// stack in the code before otherwise, and returned
+				Gp again = m_uc.new_gp_ptr();
+				Gp cast  = m_uc.new_gp_ptr();
+				m_uc.load(again, mem_ptr(a));
+				InvokeNode *call = Invoke((const void*)JIT_CastObject, FuncSignature::build<void*, void*, asDWORD>());
+				call->set_arg(0, again);
+				call->set_arg(1, Imm(int(asBC_DWORDARG(bc))));
+				call->set_ret(0, cast);
+				m_uc.j(done, test_z(cast));
+				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
+				m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), cast);
+			}
+			else
+			{
+				InvokeNode *call = Invoke((const void*)JIT_Cast, FuncSignature::build<void, asSVMRegisters*, void*, asDWORD>());
+				SetRegsArg(call, 0);
+				call->set_arg(1, a);
+				call->set_arg(2, Imm(int(asBC_DWORDARG(bc))));
+			}
 			if( cold )
 				EndCold(cold, done);
 			m_uc.bind(done);

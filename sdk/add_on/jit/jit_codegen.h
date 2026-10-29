@@ -135,7 +135,7 @@ protected:
 		Label                     exit;     // hands the function to the VM, see EmitInlineExit
 		bool                      exitUsed;
 		asUINT                    borrowed; // the parameters that borrow the references of the caller, see CJITByteCode::AnalyseBorrows
-		int                       lentVar;  // the variable of the caller that holds the reference lent to the object, or 0, see CJITByteCode::FindLentRefs
+		int                       lentFree; // the asBC_FREE of the variable of the outermost function that holds a lent reference, or -1, see CJITByteCode::FindLentRefs
 		int                       freshSlot; // where the object that the function returns is created in the frame of the outermost function, or -1, see EmitFrameObject
 		bool                      retChecked; // the suspend requests are checked before all returns, see EmitBody
 		Gp                        returnedObj; // the register that the object returned is passed in too, if valid, see ForwardedObject
@@ -222,6 +222,7 @@ protected:
 	void EmitInPlaceAssign(asUINT idx);
 	void EmitInPlaceConstruct(asUINT idx);
 	void EmitOwnLent(asUINT idx);
+	void OwnLentRef(asUINT lentFree);
 	int  FrameSlot(int var) const;
 	int  FreshSlot(asUINT idx) const;
 	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);

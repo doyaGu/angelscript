@@ -26,7 +26,7 @@ CJITCodeGen::CJITCodeGen(UniCompiler &uc, const CJITByteCode &code, const SJITCo
 	frame.callIdx  = 0;
 	frame.exitUsed = false;
 	frame.borrowed = 0;
-	frame.lentVar  = 0;
+	frame.lentFree = -1;
 	frame.freshSlot = -1;
 	frame.retChecked = true;
 	m_frames.push_back(frame);
@@ -1248,12 +1248,23 @@ void CJITCodeGen::EmitOwnLent(asUINT idx)
 	int lentFree = m_code->GetLentFree(idx);
 	if( lentFree < 0 || (m_code->GetInstructions()[idx].flags & JIT_INSTR_LEND) )
 		return;
+	OwnLentRef(asUINT(lentFree));
+}
+
+// Gives the variable that holds a lent reference one of its own, unless it has one
+// already, which the FREE releases then, see CJITByteCode::FindLentRefs
+void CJITCodeGen::OwnLentRef(asUINT lentFree)
+{
+	Gp owned = m_lentOwned[lentFree];
 	Label done = m_uc.new_label();
-	m_uc.j(done, test_nz(m_lentOwned[asUINT(lentFree)]));
+	m_uc.j(done, test_nz(owned));
 	Gp obj = LoadPtr(asBC_SWORDARG0(m_code->GetInstructions()[lentFree].bc));
-	m_uc.j(done, test_z(obj));
+	Label none = m_uc.new_label();
+	m_uc.j(none, test_z(obj));
 	InvokeNode *addRef = Invoke((const void*)JIT_AddRefScriptObject, FuncSignature::build<void, void*>());
 	addRef->set_arg(0, obj);
+	m_uc.bind(none);
+	m_uc.mov(owned, Imm(1));
 	m_uc.bind(done);
 }
 
@@ -3070,6 +3081,11 @@ bool CJITCodeGen::EmitMisc(asUINT idx)
 			m_uc.j(suspend, test_nz(t));
 
 			BaseNode *cold = BeginCold(suspend);
+			// The VM may see the variable that holds a lent reference, see
+			// CJITByteCode::FindLentCasts
+			int lentFree = m_code->GetLentFree(idx);
+			if( lentFree >= 0 )
+				OwnLentRef(asUINT(lentFree));
 			SyncAll(idx);
 			InvokeNode *call = Invoke((const void*)JIT_Suspend, FuncSignature::build<int, asSVMRegisters*>());
 			Gp r = m_uc.new_gp32();

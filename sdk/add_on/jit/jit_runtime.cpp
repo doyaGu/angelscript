@@ -1219,27 +1219,31 @@ void JIT_ReleaseScriptObject(void *obj) noexcept
 	o->Release();
 }
 
-// Like the VM, but the types are compared by their ids, instead of looking up the
-// type of the id in the engine, which takes a lock. The type cast to got its id when
-// the cast was compiled, and the ids of the other types differ from it, also those
-// that get theirs in the meantime
+// Like asCObjectType::Implements and DerivesFrom, but the types are compared by their
+// ids, instead of looking up the type of the id in the engine, which takes a lock. The
+// type cast to got its id when the cast was compiled, and the ids of the other types
+// differ from it, also those that get theirs in the meantime
+void *JIT_CastObject(void *obj, asDWORD typeId) noexcept
+{
+	asCObjectType *objType = ((asCScriptObject*)obj)->objType;
+	int id = int(typeId & (asTYPEID_MASK_OBJECT | asTYPEID_MASK_SEQNBR));
+	for( asCObjectType *type = objType; type; type = type->derivedFrom )
+		if( type->typeId == id )
+			return obj;
+	for( asUINT n = 0; n < objType->interfaces.GetLength(); n++ )
+		if( objType->interfaces[n]->typeId == id )
+			return obj;
+	return 0;
+}
+
+// Like the VM, see JIT_CastObject
 void JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept
 {
 	if( handle == 0 || *handle == 0 )
 		return;
 
-	asCScriptObject *obj = (asCScriptObject*)*handle;
-	asCObjectType *objType = obj->objType;
-	int id = int(typeId & (asTYPEID_MASK_OBJECT | asTYPEID_MASK_SEQNBR));
-
-	// Like asCObjectType::Implements and DerivesFrom
-	bool castable = false;
-	for( asCObjectType *type = objType; type && !castable; type = type->derivedFrom )
-		castable = type->typeId == id;
-	for( asUINT n = 0; n < objType->interfaces.GetLength() && !castable; n++ )
-		castable = objType->interfaces[n]->typeId == id;
-
-	if( castable )
+	asCScriptObject *obj = (asCScriptObject*)JIT_CastObject(*handle, typeId);
+	if( obj )
 	{
 		regs->objectType = 0;
 		regs->objectRegister = obj;

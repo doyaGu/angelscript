@@ -330,6 +330,7 @@ void   JIT_RegisterFrameArenas(asIScriptEngine *engine);
 
 // asBC_Cast. handle is the address of the handle to cast, may be null
 void   JIT_Cast(asSVMRegisters *regs, void **handle, asDWORD typeId) noexcept;
+void  *JIT_CastObject(void *obj, asDWORD typeId) noexcept; // the script object if it is of the type, derives from it, or implements it, else null
 
 // asBC_AllocMem
 void  *JIT_AllocMem(asUINT size) noexcept;

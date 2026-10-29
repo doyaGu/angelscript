@@ -6549,9 +6549,20 @@ namespace GenericCalls
 // call JIT_Cast for the others, see CJITByteCode::FindInPlaceRefCounts. The objects
 // must be destroyed as often as with the VM, and the casts to the base classes and
 // the interfaces must find the same classes, also in the methods compiled in place,
-// and in the destructors, where the object casts a handle of itself
+// and in the destructors, where the object casts a handle of itself. The casts from
+// local variables lend their references, see CJITByteCode::FindLentCasts, unless the
+// variable is written before the result is released, and the result must get a
+// reference of its own where the VM sees it, at the suspensions, the exceptions, and
+// the calls made in place of the methods compiled in place
 namespace Casts
 {
+	static int lines = 0;
+	static void LineCallback(asIScriptContext *ctx, void *)
+	{
+		if( ++lines % 5 == 0 )
+			ctx->Suspend();
+	}
+
 	static const char *script =
 		"int g_destroyed = 0;                                                     \n"
 		"interface IShape { int kind(); }                                         \n"
@@ -6561,6 +6572,7 @@ namespace Casts
 		"  int v = 1;                                                             \n"
 		"  ~Shape() { g_destroyed++; }                                            \n"
 		"  int kind() { return 1; }                                               \n"
+		"  int get() { return v; }                                                \n"
 		"}                                                                        \n"
 		"class Circle : Shape { int kind() override { return 2; } }               \n"
 		"class Square : Shape, IOther { int kind() override { return 3; } }       \n"
@@ -6606,6 +6618,59 @@ namespace Casts
 		"  @last = null;                                                          \n"
 		"  return s * 1000 + g_destroyed;                                         \n"
 		"}                                                                        \n"
+		"int lentLoop()                                                           \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int n = 0;                                                             \n"
+		"  {                                                                      \n"
+		"    IShape@ s = Circle();                                                \n"
+		"    IShape@ q = Square();                                                \n"
+		"    for( int i = 0; i < 40; i++ )                                        \n"
+		"    {                                                                    \n"
+		"      Circle@ c = cast<Circle>(s);                                       \n"
+		"      if( c !is null ) n += c.get() + g_destroyed;                       \n"
+		"      Shape@ b = cast<Shape>(q);                                         \n"
+		"      if( b !is null ) n += b.v * 2;                                     \n"
+		"      IOther@ o = cast<IOther>(q);                                       \n"
+		"      if( o !is null ) n += 1000;                                        \n"
+		"      Circle@ none = cast<Circle>(q);                                    \n"
+		"      if( none is null ) n += 7;                                         \n"
+		"    }                                                                    \n"
+		"  }                                                                      \n"
+		"  return n * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int lentWritten()                                                        \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int n = 0;                                                             \n"
+		"  for( int i = 0; i < 10; i++ )                                          \n"
+		"  {                                                                      \n"
+		"    IShape@ s = Circle();                                                \n"
+		"    Circle@ c = cast<Circle>(s);                                         \n"
+		"    @s = null;                                                           \n"
+		"    n += g_destroyed * 100;                                              \n"
+		"    if( c !is null ) n += c.v;                                           \n"
+		"  }                                                                      \n"
+		"  return n * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
+		"int lentException()                                                      \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int n = 0;                                                             \n"
+		"  IShape@ s = Circle();                                                  \n"
+		"  try                                                                    \n"
+		"  {                                                                      \n"
+		"    for( int i = 0; i < 10; i++ )                                        \n"
+		"    {                                                                    \n"
+		"      Circle@ c = cast<Circle>(s);                                       \n"
+		"      n += c.v * 10 / (5 - i);                                           \n"
+		"    }                                                                    \n"
+		"  }                                                                      \n"
+		"  catch { n += 100; }                                                    \n"
+		"  n += g_destroyed * 1000;                                               \n"
+		"  @s = null;                                                             \n"
+		"  return n * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
 		"int nullHandle()                                                         \n"
 		"{                                                                        \n"
 		"  IShape@ none;                                                          \n"
@@ -6617,7 +6682,8 @@ namespace Casts
 	static CBufferedOutStream msgs;
 
 	// The results of the functions, executed twice so that the deferred functions
-	// are compiled for the second time, and the messages
+	// are compiled for the second time, then twice with a line callback that suspends
+	// them, and the messages
 	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
 	{
 		msgs.buffer.clear();
@@ -6637,14 +6703,24 @@ namespace Casts
 			return "";
 		}
 
-		const char *decls[] = { "int classes()", "int kept()", "int nullHandle()" };
+		const char *decls[] = { "int classes()", "int kept()", "int nullHandle()", "int lentLoop()", "int lentWritten()", "int lentException()" };
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
-		for( int pass = 0; pass < 2; pass++ )
+		for( int pass = 0; pass < 4; pass++ )
 			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
 			{
 				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				lines = 0;
+				if( pass >= 2 )
+					ctx->SetLineCallback(asFUNCTION(LineCallback), 0, asCALL_CDECL);
 				int r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 1000 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				ctx->ClearLineCallback();
 				s << decls[n] << ": ";
 				if( r == asEXECUTION_FINISHED )
 					s << int(ctx->GetReturnDWord());
@@ -6652,7 +6728,7 @@ namespace Casts
 					s << ctx->GetExceptionString();
 				else
 					s << "result " << r;
-				s << "\n";
+				s << ", " << lines << " lines, " << suspensions << " suspensions\n";
 			}
 		ctx->Release();
 		s << msgs.buffer;
@@ -6671,17 +6747,46 @@ static bool TestCasts()
 	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string expected = Casts::Run(engine, 0, fail);
 	engine->ShutDownAndRelease();
-	if( expected.find("int classes(): 166300013\n") == std::string::npos || expected.find("int nullHandle(): 10\n") == std::string::npos )
+	if( expected.find("int classes(): 166300013, 0 lines") == std::string::npos || expected.find("int nullHandle(): 10, 0 lines") == std::string::npos ||
+	    expected.find("int lentWritten(): 4510010, 0 lines") == std::string::npos || expected.find(" 0 suspensions") == std::string::npos ||
+	    expected.find("lines, 0 suspensions") == std::string::npos )
 	{
 		PRINTF("casts:\n%s", expected.c_str());
 		TEST_FAILED;
 	}
 
-	// The JIT compiler must outlive the engine
-	CJITCompiler jit(envFlags);
+	// The JIT compiler must outlive the engine. The log shows which casts lend
+	// references. The line callback must be called like by the VM
+	FILE *log = tmpfile();
+	CJITCompiler jit((envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND)) | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "int lent");
 	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string actual = Casts::Run(engine, &jit, fail);
 	engine->ShutDownAndRelease();
+	if( log )
+	{
+		std::string text;
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+		const char *expectedLog[][2] = { { "int lentLoop()", "1" }, { "int lentWritten()", "0" }, { "int lentException()", "1" } };
+		for( asUINT n = 0; n < sizeof(expectedLog) / sizeof(expectedLog[0]) && !(envFlags & CJITCompiler::JIT_AOT_ONLY); n++ )
+		{
+			std::string head = std::string("; ---- ") + expectedLog[n][0] + " ----";
+			size_t at = text.find(head);
+			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
+			bool lends = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; lends") != std::string::npos;
+			if( at == std::string::npos || lends != (expectedLog[n][1][0] == '1') )
+			{
+				PRINTF("casts: %s %s\n", expectedLog[n][0], lends ? "lends references" : "doesn't lend references");
+				TEST_FAILED;
+			}
+		}
+	}
 
 	SJITStatistics stats = jit.GetStatistics();
 	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )

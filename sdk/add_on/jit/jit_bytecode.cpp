@@ -2248,15 +2248,7 @@ void CJITByteCode::FindLentRefs()
 
 		// The object is the one that the method is called on
 		const std::vector<SJITInlinee> &inlinees = GetInlinees(n + 1);
-		bool plain = !inlinees.empty() && inlinees[0].code->GetFunction()->objectType != 0;
-		for( asUINT k = 0; k < inlinees.size() && plain; k++ )
-		{
-			const std::vector<SJITInstr> &body = inlinees[k].code->GetInstructions();
-			for( asUINT i = 0; i < body.size() && plain; i++ )
-				plain = (body[i].flags & JIT_INSTR_DEAD) ||
-				        (!IsSyncPoint(body[i].op) && body[i].op != asBC_FREE && body[i].op != asBC_COPY && body[i].op != asBC_Cast);
-		}
-		if( !plain )
+		if( inlinees.empty() || inlinees[0].code->GetFunction()->objectType == 0 || !InlineesArePlain(n + 1) )
 			continue;
 
 		// The handles of other variables may be released in between, e.g. the one that
@@ -2274,6 +2266,111 @@ void CJITByteCode::FindLentRefs()
 			continue;
 
 		copy.flags    |= JIT_INSTR_LEND;
+		release.flags |= JIT_INSTR_LENT;
+		for( asUINT i = n; i < f; i++ )
+			m_lentFrees[i] = f;
+	}
+	FindLentCasts();
+}
+
+// True if the functions compiled in place of the call neither call nor release
+// anything, nor copy objects or cast handles, see FindLentRefs
+bool CJITByteCode::InlineesArePlain(asUINT instrIdx) const
+{
+	const std::vector<SJITInlinee> &inlinees = GetInlinees(instrIdx);
+	for( asUINT k = 0; k < inlinees.size(); k++ )
+	{
+		const std::vector<SJITInstr> &body = inlinees[k].code->GetInstructions();
+		for( asUINT i = 0; i < body.size(); i++ )
+			if( !(body[i].flags & JIT_INSTR_DEAD) &&
+			    (IsSyncPoint(body[i].op) || body[i].op == asBC_FREE || body[i].op == asBC_COPY || body[i].op == asBC_Cast) )
+				return false;
+	}
+	return !inlinees.empty();
+}
+
+// A handle cast from a variable of the function points to an object that the
+// variable keeps alive as long as it isn't written, so the cast lends the reference
+// of the variable to the variable that the result is stored in, instead of adding
+// one, and the FREE of that variable only clears it, like in FindLentRefs. Up to the
+// FREE, the variable cast from must neither be used, nor may its address have been
+// taken by anything else, which only the parameters' could, and the variable that
+// holds the lent reference must only be read, not stored anywhere but in variables
+// that add references of their own. The instructions in between may only branch
+// among themselves and to the FREE, and nothing else may branch into them, so the
+// FREE only follows the cast. They must not be sync points, but for the methods
+// compiled in place that are plain like in FindLentRefs, so that the only ways to
+// the VM are the returns to it, the suspensions, and the calls made in place of the
+// inlined ones, which give the variable a reference of its own first, see
+// CJITCodeGen::OwnLentRef
+void CJITByteCode::FindLentCasts()
+{
+	for( asUINT n = 1; n + 2 < m_instrs.size(); n++ )
+	{
+		SJITInstr &cast = m_instrs[n];
+		const SJITInstr &push = m_instrs[n - 1];
+		if( cast.op != asBC_Cast || push.op != asBC_PSF || !(cast.flags & JIT_INSTR_REFCOUNT) ||
+		    (cast.flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_DEAD)) || (push.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) )
+			continue;
+		int source = asBC_SWORDARG0(push.bc);
+		if( source <= 0 || FindParam(source) >= 0 )
+			continue;
+
+		// The old object of the variable is released before the new one is stored
+		asUINT store = n + 1;
+		if( m_instrs[store].op == asBC_FREE )
+			store++;
+		if( m_instrs[store].op != asBC_STOREOBJ )
+			continue;
+		int var = asBC_SWORDARG0(m_instrs[store].bc);
+		if( var <= 0 || var == source || FindParam(var) >= 0 || (store == n + 2 && asBC_SWORDARG0(m_instrs[n + 1].bc) != var) )
+			continue;
+		bool ok = true;
+		for( asUINT i = n + 1; i <= store && ok; i++ )
+			ok = !(m_instrs[i].flags & (JIT_INSTR_BLOCK_START | JIT_INSTR_BAIL | JIT_INSTR_DEAD));
+
+		asUINT f = store + 1;
+		while( f < m_instrs.size() && !(m_instrs[f].op == asBC_FREE && asBC_SWORDARG0(m_instrs[f].bc) == var) )
+			f++;
+		if( !ok || f >= m_instrs.size() )
+			continue;
+		SJITInstr &release = m_instrs[f];
+		if( !(release.flags & JIT_INSTR_REFCOUNT) || (release.flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD | JIT_INSTR_MOVED | JIT_INSTR_LENT)) )
+			continue;
+
+		// A variable is lent one reference at a time, as the ways to the VM give only
+		// that variable one of its own
+		for( asUINT i = n; i < f && ok; i++ )
+			ok = m_lentFrees.find(i) == m_lentFrees.end();
+		for( asUINT i = store + 1; i < f && ok; i++ )
+		{
+			const SJITInstr &instr = m_instrs[i];
+			if( instr.flags & JIT_INSTR_DEAD )
+				continue;
+			ok = !(instr.flags & JIT_INSTR_BAIL) && instr.op != asBC_JMPP && (IsBranch(instr.op) || !IsTerminator(instr.op)) &&
+			     (instr.target < 0 || (instr.target > int(store) && instr.target <= int(f))) && !UsesVar(instr, source);
+			if( ok && IsSyncPointAt(i) )
+				ok = (instr.op == asBC_CALL || instr.op == asBC_CALLINTF) && (instr.flags & JIT_INSTR_INLINE) && InlineesArePlain(i);
+			if( ok && UsesVar(instr, var) )
+				ok = instr.op == asBC_PshVPtr || instr.op == asBC_ChkNullV || instr.op == asBC_CmpPtr || instr.op == asBC_LoadRObjR || instr.op == asBC_LoadVObjR;
+		}
+		for( asUINT i = 0; i < m_instrs.size() && ok; i++ )
+		{
+			if( (i > store && i < f) || (m_instrs[i].flags & JIT_INSTR_DEAD) )
+				continue;
+			int target = m_instrs[i].target;
+			ok = target <= int(store) || target > int(f);
+			if( ok && m_instrs[i].op == asBC_JMPP )
+			{
+				const std::vector<int> &targets = GetSwitchTargets(i);
+				for( asUINT t = 0; t < targets.size() && ok; t++ )
+					ok = targets[t] <= int(store) || targets[t] > int(f);
+			}
+		}
+		if( !ok )
+			continue;
+
+		cast.flags    |= JIT_INSTR_LEND;
 		release.flags |= JIT_INSTR_LENT;
 		for( asUINT i = n; i < f; i++ )
 			m_lentFrees[i] = f;
