@@ -7307,6 +7307,234 @@ static bool TestFunctionPointers()
 	return fail;
 }
 
+// The floats and doubles that the registered functions return are copied to the
+// variables from the vector registers they are returned in, see
+// CJITByteCode::FindFloatReturns, also where the function has suspended the context
+// or raised an exception and the VM goes on or enters the function again after the
+// call, and in the functions compiled in place. The generic functions return them in
+// the value register
+namespace FloatReturns
+{
+	static int lines = 0;
+	static int pauses = 0;
+	static void LineCallback(asIScriptContext *ctx, void *)
+	{
+		if( ++lines % 5 == 0 )
+			ctx->Suspend();
+	}
+	static float AddF(float a, float b) { return a + b; }
+	static double AddD(double a, double b) { return a + b; }
+	static float PauseF(float a, int i)
+	{
+		if( ++pauses % 7 == 0 )
+			asGetActiveContext()->Suspend();
+		return a + float(i) * 0.25f;
+	}
+	static double CheckD(double a, int i)
+	{
+		if( i == 97 )
+			asGetActiveContext()->SetException("checked");
+		return a * 0.5 + i;
+	}
+	static void AddFGeneric(asIScriptGeneric *gen)
+	{
+		gen->SetReturnFloat(gen->GetArgFloat(0) + gen->GetArgFloat(1));
+	}
+
+	static const char *script =
+		"float step(float x) { return addf(x, 0.75f); }                           \n"
+		"float sumF()                                                             \n"
+		"{                                                                        \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < 100; i++ ) s = addf(s, 0.5f);                      \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"double sumD()                                                            \n"
+		"{                                                                        \n"
+		"  double s = 0;                                                          \n"
+		"  for( int i = 0; i < 100; i++ ) s = addd(s, 0.1);                       \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"double chained()                                                         \n"
+		"{                                                                        \n"
+		"  float f = 1;                                                           \n"
+		"  double d = 0;                                                          \n"
+		"  for( int i = 0; i < 100; i++ )                                         \n"
+		"  {                                                                      \n"
+		"    float t = addf(f, float(i));                                         \n"
+		"    f = t * 0.5f;                                                        \n"
+		"    d = addd(d, f) - addd(t, 0.5);                                       \n"
+		"  }                                                                      \n"
+		"  return d;                                                              \n"
+		"}                                                                        \n"
+		"float paused()                                                           \n"
+		"{                                                                        \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < 100; i++ ) s = pausef(s, i);                       \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"double checked()                                                         \n"
+		"{                                                                        \n"
+		"  double s = 0;                                                          \n"
+		"  for( int i = 0; i < 100; i++ ) s = checkd(s, i);                       \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"float generic()                                                          \n"
+		"{                                                                        \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < 100; i++ ) s = gaddf(s, 0.5f);                     \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"float branched()                                                         \n"
+		"{                                                                        \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < 100; i++ ) s = i % 3 == 0 ? addf(s, 0.5f) : gaddf(s, 2); \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
+		"float inlined()                                                          \n"
+		"{                                                                        \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < 100; i++ ) s = step(s) + step(0.125f);             \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n";
+
+	static CBufferedOutStream msgs;
+
+	// The results of the functions as bits, executed twice, then twice with a line
+	// callback that suspends them, and the messages
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		msgs.buffer.clear();
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		int r = engine->RegisterGlobalFunction("float addf(float, float)", asFUNCTION(AddF), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double addd(double, double)", asFUNCTION(AddD), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float pausef(float, int)", asFUNCTION(PauseF), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("double checkd(double, int)", asFUNCTION(CheckD), asCALL_CDECL); assert( r >= 0 );
+		r = engine->RegisterGlobalFunction("float gaddf(float, float)", asFUNCTION(AddFGeneric), asCALL_GENERIC); assert( r >= 0 );
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "float sumF()", "double sumD()", "double chained()", "float paused()", "double checked()", "float generic()", "float branched()", "float inlined()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		pauses = 0;
+		for( int pass = 0; pass < 4; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				asIScriptFunction *func = mod->GetFunctionByDecl(decls[n]);
+				ctx->Prepare(func);
+				lines = 0;
+				if( pass >= 2 )
+					ctx->SetLineCallback(asFUNCTION(LineCallback), 0, asCALL_CDECL);
+				r = ctx->Execute();
+				int suspensions = 0;
+				while( r == asEXECUTION_SUSPENDED && suspensions < 100000 )
+				{
+					suspensions++;
+					r = ctx->Execute();
+				}
+				ctx->ClearLineCallback();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+				{
+					char buf[64];
+					if( func->GetReturnTypeId() == asTYPEID_FLOAT )
+						snprintf(buf, sizeof(buf), "%a", double(ctx->GetReturnFloat()));
+					else
+						snprintf(buf, sizeof(buf), "%a", ctx->GetReturnDouble());
+					s << buf;
+				}
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString() << " in " << ctx->GetExceptionFunction()->GetName() << ":" << ctx->GetExceptionLineNumber();
+				else
+					s << "result " << r;
+				s << ", " << lines << " lines, " << suspensions << " suspensions\n";
+			}
+		ctx->Release();
+		s << msgs.buffer;
+		return s.str();
+	}
+}
+
+static bool TestFloatReturns()
+{
+	using namespace FloatReturns;
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("float sumF(): 0x1.9p+5, 0 lines") == std::string::npos ||
+	    expected.find("double checked(): checked in checked:") == std::string::npos ||
+	    expected.find("float paused(): ") == std::string::npos || expected.find("lines, 0 suspensions") == std::string::npos )
+	{
+		PRINTF("float returns:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows the copies that take the
+	// values from vector registers. The line callback must be called like by the VM
+	FILE *log = tmpfile();
+	CJITCompiler jit((envFlags & ~asDWORD(CJITCompiler::JIT_NO_SUSPEND)) | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	std::string text;
+	if( log )
+	{
+		char buf[4096];
+		size_t len;
+		rewind(log);
+		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+			text.append(buf, len);
+		fclose(log);
+	}
+
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
+	{
+		PRINTF("float returns: %u functions compiled, %u failed\n", stats.functionsCompiled, stats.functionsFailed);
+		TEST_FAILED;
+	}
+	if( actual != expected )
+	{
+		PRINTF("float returns:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log && !(envFlags & CJITCompiler::JIT_AOT_ONLY) )
+	{
+		const char *checks[][2] = { { "float sumF()", "1" }, { "double sumD()", "1" }, { "double chained()", "1" }, { "float generic()", "0" } };
+		for( asUINT n = 0; n < sizeof(checks) / sizeof(checks[0]); n++ )
+		{
+			std::string head = std::string("; ---- ") + checks[n][0] + " ----";
+			size_t at = text.find(head);
+			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
+			bool found = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; float in a register") != std::string::npos;
+			if( at == std::string::npos || found != (checks[n][1][0] == '1') )
+			{
+				PRINTF("float returns: %s %s\n", checks[n][0], found ? "takes a float from a vector register" : "doesn't take a float from a vector register");
+				TEST_FAILED;
+			}
+		}
+	}
+	return fail;
+}
+
 static bool TestGenericCalls()
 {
 	bool fail = false;
@@ -7427,6 +7655,7 @@ bool Test()
 	fail = TestCasts() || fail;
 	fail = TestMathCalls() || fail;
 	fail = TestFunctionPointers() || fail;
+	fail = TestFloatReturns() || fail;
 	fail = TestCodeSizeStatistics() || fail;
 
 	return fail;

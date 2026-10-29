@@ -1158,7 +1158,7 @@ bool CJITCodeGen::EntryNeedsStub(asUINT n) const
 		return true;
 	if( m_options.syncEveryInstr )
 		return m_vrInReg || !m_cached.empty();
-	if( m_code->GetObjectReaderAfter(entry) >= 0 )
+	if( m_code->GetObjectReaderAfter(entry) >= 0 || m_code->GetFloatReaderAfter(entry) >= 0 )
 		return true;
 	const SJITBlock &block = m_code->GetBlocks()[m_code->GetInstructions()[entry].block];
 	return (m_vrInReg && block.vrLiveIn) || m_code->GetEntryMask(entry) != 0 || HeldFields(entry) != 0;
@@ -1224,6 +1224,14 @@ void CJITCodeGen::EmitEntryStubs()
 		int lentFree = m_code->GetLentFree(entries[n]);
 		if( lentFree >= 0 )
 			m_uc.mov(m_lentOwned[asUINT(lentFree)], Imm(1));
+		// The float or double that the instruction after copies from a vector register
+		// is in the value register, see ReturnedFloat
+		int floatReader = m_code->GetFloatReaderAfter(entries[n]);
+		if( floatReader >= 0 && m_floatsReturned.count(std::make_pair(0, asUINT(floatReader))) )
+		{
+			bool f64 = instrs[floatReader].op == asBC_CpyRtoV8;
+			LoadVRFloat(ReturnedFloat(0, asUINT(floatReader), f64), f64);
+		}
 		// The object that the instruction after reads in a register is where the VM
 		// has stored it, see ForwardedObject
 		int reader = m_code->GetObjectReaderAfter(entries[n]);
@@ -2659,7 +2667,12 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 			StoreVRF64(LoadF64(a0));
 		break;
 
+	// The floats and doubles that the call before has returned in a vector register
+	// are copied from it, see ReturnedFloat
 	case asBC_CpyRtoV4:
+		if( m_floatsReturned.count(std::make_pair(m_frame, idx)) )
+			CommitF32(a0, ReturnedFloat(m_frame, idx, false));
+		else
 		{
 			Gp t = m_uc.new_gp32();
 			LoadVR32(t);
@@ -2668,7 +2681,9 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 		break;
 
 	case asBC_CpyRtoV8:
-		if( Is64Bit() )
+		if( m_floatsReturned.count(std::make_pair(m_frame, idx)) )
+			CommitF64(a0, ReturnedFloat(m_frame, idx, true));
+		else if( Is64Bit() )
 		{
 			Gp t = m_uc.new_gp64();
 			LoadVR64(t);

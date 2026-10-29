@@ -12,6 +12,7 @@
 #include <asmjit/ujit.h>
 #include <vector>
 #include <map>
+#include <set>
 
 BEGIN_AS_NAMESPACE
 
@@ -232,6 +233,10 @@ protected:
 	std::map<int, SPushedValue> m_pushedAtCall; // the pushes before the inlined call being emitted
 	std::map<std::pair<int, asUINT>, Gp> m_forwardedObjects; // by frame and the instruction reading them, see ForwardedObject
 	Gp   ForwardedObject(int frame, asUINT reader);
+	std::map<std::pair<int, asUINT>, Vec> m_returnedFloats; // by frame and the instruction copying them, see ReturnedFloat
+	std::set<std::pair<int, asUINT> > m_floatsReturned; // the copies whose calls have returned the value in its register
+	Vec  ReturnedFloat(int frame, asUINT reader, bool f64);
+	void LoadVRFloat(const Vec &v, bool f64);
 	bool FindPushedArg(int offset, SPushedValue &value) const;
 	void NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var = 0);
 	bool MovePushed32(const Gp &dst, const SPushedValue &value);

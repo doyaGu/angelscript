@@ -9,6 +9,7 @@
 
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 
 BEGIN_AS_NAMESPACE
@@ -660,6 +661,15 @@ public:
 	// whose entry stub loads the register, or -1
 	int GetObjectReaderAfter(asUINT entryIdx) const;
 
+	// The asBC_CALLSYS before the asBC_CpyRtoV4 or asBC_CpyRtoV8 that copies the float
+	// or double it returns, so that the value can be passed in a vector register, or -1,
+	// see FindFloatReturns
+	int GetFloatSource(asUINT instrIdx) const;
+	// The instruction that copies the value passed in a vector register, from the
+	// asBC_CALLSYS or the asBC_JitEntry in between, whose entry stub loads the register,
+	// or -1
+	int GetFloatReaderAfter(asUINT instrIdx) const;
+
 	// The variables of the function whose objects can be kept in its frame, and their
 	// classes, see FindFrameObjects
 	const std::map<int, asCObjectType*> &GetFrameObjects() const { return m_frameObjects; }
@@ -702,6 +712,9 @@ protected:
 	void FindInPlaceAssigns();
 	void FindInPlaceConstructors();
 	void FindForwardedObjects();
+	void FindFloatReturns();
+	void TypeFloatCopies();
+	void GetJumpTargets(std::set<asUINT> &targets) const;
 	bool ReturnsLoadedObject() const;
 	void FindFrameObjects();
 	bool FindFreshReturn(asCObjectType *type);
@@ -776,6 +789,8 @@ protected:
 	std::map<asUINT, SJITConstructor> m_constructors; // by instruction, see GetInPlaceConstructor
 	std::map<asUINT, asUINT> m_objectSources;  // by the instruction reading the object, see GetObjectSource
 	std::map<asUINT, asUINT> m_objectReaders;  // by the asBC_JitEntry in between, see GetObjectReaderAfter
+	std::map<asUINT, asUINT> m_floatSources;   // by the instruction copying the value, see GetFloatSource
+	std::map<asUINT, asUINT> m_floatReaders;   // by the call and the asBC_JitEntry in between, see GetFloatReaderAfter
 	std::map<int, asCObjectType*> m_frameObjects; // see GetFrameObjects
 	std::map<asUINT, int>         m_freshVars;    // by instruction, see GetFreshVar
 	int                           m_freshSource;  // see GetFreshSource

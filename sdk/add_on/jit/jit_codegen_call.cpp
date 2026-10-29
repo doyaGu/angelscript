@@ -1796,6 +1796,38 @@ CJITCodeGen::Gp CJITCodeGen::ForwardedObject(int frame, asUINT reader)
 	return obj;
 }
 
+// The vector register that a float or double is returned in for the asBC_CpyRtoV4 or
+// asBC_CpyRtoV8 copying it in the frame, see CJITByteCode::FindFloatReturns
+CJITCodeGen::Vec CJITCodeGen::ReturnedFloat(int frame, asUINT reader, bool f64)
+{
+	std::pair<int, asUINT> key(frame, reader);
+	std::map<std::pair<int, asUINT>, Vec>::iterator it = m_returnedFloats.find(key);
+	if( it != m_returnedFloats.end() )
+		return it->second;
+	Vec v = f64 ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
+	m_returnedFloats[key] = v;
+	return v;
+}
+
+// Loads the float or double in the value register into a vector register
+void CJITCodeGen::LoadVRFloat(const Vec &v, bool f64)
+{
+	if( !f64 )
+	{
+		Gp bits = m_uc.new_gp32();
+		LoadVR32(bits);
+		m_uc.s_mov_u32(v, bits);
+	}
+	else if( Is64Bit() )
+	{
+		Gp bits = m_uc.new_gp64();
+		LoadVR64(bits);
+		m_uc.s_mov_u64(v, bits);
+	}
+	else
+		LoadVRF64(v);
+}
+
 // Creates the object of a script class like asBC_ALLOC, in the frame if it is kept
 // there, see EmitFrameObject, and sets its members like the constructor does, see
 // CJITByteCode::FindInPlaceConstructors. The variable whose address is below the
@@ -2178,6 +2210,9 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		return false;
 	if( sysFunc->hostReturnSize != expectedRetSize || (retKind != RET_PARTS && sysFunc->hostReturnFloat != (retKind == RET_F32 || retKind == RET_F64)) )
 		return false;
+	// The float or double is returned in the register that the copy after the call
+	// reads, see CJITByteCode::FindFloatReturns
+	int floatReader = !retOnStack && (retKind == RET_F32 || retKind == RET_F64) ? m_code->GetFloatReaderAfter(idx) : -1;
 
 	// Arguments, as laid out on the script stack
 	enum { ARG_I32, ARG_I64, ARG_F32, ARG_F64, ARG_PTR };
@@ -2483,7 +2518,12 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		m_uc.load(retPtr, Stack(retOff));
 	}
 
-	// Load the arguments before anything is written back so the loads can be scheduled freely
+	// The function may raise a script exception, suspend the context, or inspect the
+	// variables through the debug interface, so the variables are written back. That
+	// is done before the arguments are loaded, so that the variables passed in
+	// registers end where they are moved to the registers of the arguments, which can
+	// then be the same, instead of being held across the moves
+	StoreDirtySlots(m_code->GetDirtyMask(idx));
 	std::vector<Gp>  gpArgs(args.size());
 	std::vector<Gp>  gpArgsHi(args.size());
 	std::vector<Gp>  valueObjs(args.size());
@@ -2642,11 +2682,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			freeValue->set_arg(1, valueObjs[n]);
 		}
 
-	// The function may raise a script exception, suspend the context, or
-	// inspect the variables through the debug interface, so the VM registers
-	// must be up to date, and the frames of the inlined calls on the call stack.
-	// The value register isn't needed until the slow path
-	StoreDirtySlots(m_code->GetDirtyMask(idx));
+	// The VM registers must be up to date too, and the frames of the inlined calls on
+	// the call stack. The value register isn't needed until the slow path
 	SyncStack();
 	EmitMaterialize();
 	SetPC(instr.pos);
@@ -2851,11 +2888,11 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 		break;
 	case RET_F32:
-		retVec = m_uc.new_vec128_f32x1();
+		retVec = floatReader >= 0 ? ReturnedFloat(m_frame, asUINT(floatReader), false) : m_uc.new_vec128_f32x1();
 		call->set_ret(0, retVec);
 		break;
 	case RET_F64:
-		retVec = m_uc.new_vec128_f64x1();
+		retVec = floatReader >= 0 ? ReturnedFloat(m_frame, asUINT(floatReader), true) : m_uc.new_vec128_f64x1();
 		call->set_ret(0, retVec);
 		break;
 	case RET_PTR:
@@ -2947,6 +2984,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			m_uc.s_mov_u32(bits, retVec);
 			StoreVR32(bits);
 		}
+		if( floatReader >= 0 )
+			m_floatsReturned.insert(std::make_pair(m_frame, asUINT(floatReader)));
 		break;
 	case RET_F64:
 		if( Is64Bit() )
@@ -2957,6 +2996,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 		}
 		else
 			StoreVRF64(retVec);
+		if( floatReader >= 0 )
+			m_floatsReturned.insert(std::make_pair(m_frame, asUINT(floatReader)));
 		break;
 	case RET_PTR:
 		StoreVRPtr(retGp);
@@ -3015,6 +3056,10 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	EmitLeaveIf(r);
 	// With a debugger attached the variables may have been modified through the context
 	ReloadLiveSlots(idx);
+	// The value is taken from the value register again, so that the register it is
+	// returned in isn't held across the helper, which would store it on the stack
+	if( floatReader >= 0 )
+		LoadVRFloat(retVec, retKind == RET_F64);
 	EndCold(cold, cont);
 	m_uc.bind(cont);
 	EmitDematerialize();

@@ -419,6 +419,18 @@ int CJITByteCode::GetObjectReaderAfter(asUINT entryIdx) const
 	return it == m_objectReaders.end() ? -1 : int(it->second);
 }
 
+int CJITByteCode::GetFloatSource(asUINT instrIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_floatSources.find(instrIdx);
+	return it == m_floatSources.end() ? -1 : int(it->second);
+}
+
+int CJITByteCode::GetFloatReaderAfter(asUINT instrIdx) const
+{
+	std::map<asUINT, asUINT>::const_iterator it = m_floatReaders.find(instrIdx);
+	return it == m_floatReaders.end() ? -1 : int(it->second);
+}
+
 int CJITByteCode::GetFreshVar(asUINT instrIdx) const
 {
 	std::map<asUINT, int>::const_iterator it = m_freshVars.find(instrIdx);
@@ -905,6 +917,7 @@ std::shared_ptr<CJITByteCode> CJITByteCode::AnalyseInlinee(SInlineSearch &search
 				callee->FindInPlaceAssigns();
 				callee->FindInPlaceConstructors();
 				callee->FindForwardedObjects();
+				callee->FindFloatReturns();
 				callee->AnalyseBorrows(inlining.borrowCalls, inlining.classes, inlining.profile);
 				callee->AnalyseBody(search.allowRegisterCache, search.maxCachedSlots);
 			}
@@ -1054,6 +1067,7 @@ void CJITByteCode::Analyse(bool allowRegisterCache, asUINT maxCachedSlots, const
 	FindInPlaceAssigns();
 	FindInPlaceConstructors();
 	FindForwardedObjects();
+	FindFloatReturns();
 	AnalyseBorrows(inlining && inlining->borrowCalls, inlining ? inlining->classes : 0, inlining && inlining->profile);
 	m_frameObjects.clear();
 	m_freshVars.clear();
@@ -1757,18 +1771,7 @@ void CJITByteCode::FindForwardedObjects()
 	m_objectSources.clear();
 	m_objectReaders.clear();
 	std::set<asUINT> targets;
-	for( asUINT n = 0; n < m_instrs.size(); n++ )
-	{
-		if( m_instrs[n].target >= 0 )
-			targets.insert(asUINT(m_instrs[n].target));
-		if( m_instrs[n].op == asBC_JMPP )
-		{
-			const std::vector<int> &cases = GetSwitchTargets(n);
-			for( asUINT k = 0; k < cases.size(); k++ )
-				if( cases[k] >= 0 )
-					targets.insert(asUINT(cases[k]));
-		}
-	}
+	GetJumpTargets(targets);
 
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
@@ -1806,6 +1809,108 @@ void CJITByteCode::FindForwardedObjects()
 		for( asUINT k = asUINT(source) + 1; k < n; k++ )
 			m_objectReaders[k] = n;
 	}
+}
+
+// The instructions that the branches and switches jump to
+void CJITByteCode::GetJumpTargets(std::set<asUINT> &targets) const
+{
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		if( m_instrs[n].target >= 0 )
+			targets.insert(asUINT(m_instrs[n].target));
+		if( m_instrs[n].op == asBC_JMPP )
+		{
+			const std::vector<int> &cases = GetSwitchTargets(n);
+			for( asUINT k = 0; k < cases.size(); k++ )
+				if( cases[k] >= 0 )
+					targets.insert(asUINT(cases[k]));
+		}
+	}
+}
+
+// The floats and doubles that registered functions return, and that the next
+// instruction past asBC_JitEntry copies from the value register to a variable, can
+// be passed in the vector register that they are returned in, so that they don't go
+// through a general purpose register, see CJITCodeGen::ReturnedFloat. The functions
+// with the generic calling convention return them in the value register. Nothing may
+// jump in between. The VM enters only at asBC_JitEntry, after which the value is
+// loaded, see CJITCodeGen::EmitEntryStubs
+void CJITByteCode::FindFloatReturns()
+{
+	m_floatSources.clear();
+	m_floatReaders.clear();
+	std::set<asUINT> targets;
+	GetJumpTargets(targets);
+
+	asCScriptEngine *engine = m_func->engine;
+	for( asUINT n = 0; n < m_instrs.size(); n++ )
+	{
+		const SJITInstr &reader = m_instrs[n];
+		if( (reader.op != asBC_CpyRtoV4 && reader.op != asBC_CpyRtoV8) || (reader.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
+			continue;
+		int source = int(n) - 1;
+		while( source >= 0 && m_instrs[source].op == asBC_JitEntry )
+			source--;
+		if( source < 0 )
+			continue;
+		bool joined = false;
+		for( asUINT k = asUINT(source) + 1; k <= n && !joined; k++ )
+			joined = targets.count(k) != 0 || (m_instrs[k].flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) != 0;
+		const SJITInstr &call = m_instrs[source];
+		if( joined || call.op != asBC_CALLSYS ||
+		    (call.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INDEXER | JIT_INSTR_MATH | JIT_INSTR_ASSIGN)) )
+			continue;
+
+		int id = asBC_INTARG(call.bc);
+		asCScriptFunction *func = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 ||
+		    func->sysFuncIntf->callConv == ICC_GENERIC_FUNC || func->sysFuncIntf->callConv == ICC_GENERIC_FUNC_RETURNINMEM ||
+		    func->returnType.IsReference() || func->DoesReturnOnStack() )
+			continue;
+		const asCDataType &type = func->returnType;
+		if( !(reader.op == asBC_CpyRtoV4 ? type.IsFloatType() : type.IsDoubleType()) )
+			continue;
+		m_floatSources[n] = asUINT(source);
+		for( asUINT k = asUINT(source); k < n; k++ )
+			m_floatReaders[k] = n;
+	}
+}
+
+// The variables that the floats and doubles returned in vector registers are copied
+// to are held in vector registers too, and so are the variables that only untyped
+// instructions use, like the copies and the pushes of the arguments, if they are
+// copied from or to a variable that holds floats or doubles, so that the values
+// stay in vector registers, see AnalyseSlots
+void CJITByteCode::TypeFloatCopies()
+{
+	if( m_aot )
+		return;
+	for( std::map<asUINT, asUINT>::const_iterator it = m_floatSources.begin(); it != m_floatSources.end(); ++it )
+	{
+		const SJITInstr &reader = m_instrs[it->first];
+		AddSlotUse(asBC_SWORDARG0(reader.bc), reader.op == asBC_CpyRtoV4 ? JIT_SLOT_F32 : JIT_SLOT_F64);
+	}
+
+	// A chain of copies is followed one variable per pass
+	for( int pass = 0; pass < 2; pass++ )
+		for( asUINT n = 0; n < m_instrs.size(); n++ )
+		{
+			const SJITInstr &instr = m_instrs[n];
+			if( (instr.op != asBC_CpyVtoV4 && instr.op != asBC_CpyVtoV8) || (instr.flags & JIT_INSTR_DEAD) )
+				continue;
+			asUINT floatKind = instr.op == asBC_CpyVtoV4 ? JIT_SLOT_F32 : JIT_SLOT_F64;
+			asUINT intKind   = instr.op == asBC_CpyVtoV4 ? JIT_SLOT_I32 : JIT_SLOT_I64;
+			std::map<int, int>::const_iterator a = m_slotIndex.find(asBC_SWORDARG0(instr.bc));
+			std::map<int, int>::const_iterator b = m_slotIndex.find(asBC_SWORDARG1(instr.bc));
+			if( a == m_slotIndex.end() || b == m_slotIndex.end() )
+				continue;
+			asUINT kindsA = m_slots[asUINT(a->second)].kinds;
+			asUINT kindsB = m_slots[asUINT(b->second)].kinds;
+			if( (kindsA & floatKind) && !(kindsB & (floatKind | intKind)) )
+				AddSlotUse(b->first, floatKind);
+			else if( (kindsB & floatKind) && !(kindsA & (floatKind | intKind)) )
+				AddSlotUse(a->first, floatKind);
+		}
 }
 
 // Whether the constructor called by asBC_ALLOC, which isn't compiled in place, only
@@ -3821,6 +3926,7 @@ void CJITByteCode::AnalyseSlots(bool allowRegisterCache, asUINT maxCachedSlots)
 
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 		CollectSlotUses(m_instrs[n]);
+	TypeFloatCopies();
 
 	if( !allowRegisterCache )
 		return;

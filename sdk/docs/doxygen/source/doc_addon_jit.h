@@ -136,11 +136,14 @@ the calling convention at runtime. The 32bit integer, float, and double argument
 that are pushed for the call are passed from the registers that hold them, also
 past the instructions computing the other arguments, so that the call doesn't
 wait for them to be stored on the script stack and loaded again. The floats and
-doubles held in vector registers are passed and copied in them. On an Apple M5 a
-loop that adds to a variable with a registered int function takes 1.4 nanoseconds
-per call instead of 2.5, one that adds to a float with a registered function 3.9
-instead of 4.2, and one that calls a math function on a double 7.6 instead of
-14.8. The square roots, absolute values, and roundings down and up of the C library
+doubles held in vector registers are passed and copied in them. The floats and
+doubles that the functions return are copied to the variables from the vector
+registers they are returned in, and the variables that they are copied on to are
+held in vector registers too, so that a value that goes from one call to the next
+doesn't go through a general purpose register. On an Apple M5 a loop that adds to
+a variable with a registered int function takes 1.4 nanoseconds per call instead
+of 2.5, one that adds to a float with a registered function 1.1 instead of 4.2, and
+one that calls a math function on a double 7.6 instead of 14.8. The square roots, absolute values, and roundings down and up of the C library
 (sqrt, fabs, floor, and ceil, and their float versions sqrtf and so on), registered
 by the application like the \ref doc_addon_math "math add-on" does, aren't called
 at all but computed by the instructions of the CPU, whatever their names in the
