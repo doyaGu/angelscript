@@ -7576,11 +7576,22 @@ namespace FloatReturns
 				s << decls[n] << ": ";
 				if( r == asEXECUTION_FINISHED )
 				{
+					// The bits, as the C libraries print %a differently
 					char buf[64];
 					if( func->GetReturnTypeId() == asTYPEID_FLOAT )
-						snprintf(buf, sizeof(buf), "%a", double(ctx->GetReturnFloat()));
+					{
+						float value = ctx->GetReturnFloat();
+						asDWORD bits;
+						memcpy(&bits, &value, sizeof(bits));
+						snprintf(buf, sizeof(buf), "0x%08x", unsigned(bits));
+					}
 					else
-						snprintf(buf, sizeof(buf), "%a", ctx->GetReturnDouble());
+					{
+						double value = ctx->GetReturnDouble();
+						asQWORD bits;
+						memcpy(&bits, &value, sizeof(bits));
+						snprintf(buf, sizeof(buf), "0x%016llx", (unsigned long long)bits);
+					}
 					s << buf;
 				}
 				else if( r == asEXECUTION_EXCEPTION )
@@ -7607,7 +7618,7 @@ static bool TestFloatReturns()
 	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string expected = Run(engine, 0, fail);
 	engine->ShutDownAndRelease();
-	if( expected.find("float sumF(): 0x1.9p+5, 0 lines") == std::string::npos ||
+	if( expected.find("float sumF(): 0x42480000, 0 lines") == std::string::npos ||
 	    expected.find("double checked(): checked in checked:") == std::string::npos ||
 	    expected.find("float paused(): ") == std::string::npos || expected.find("lines, 0 suspensions") == std::string::npos )
 	{
