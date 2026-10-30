@@ -663,38 +663,38 @@ are done by helper functions on 32bit hosts.
 The table below shows the same tests measured on an Apple M5 Pro with the arm64
 release build from Apple clang 21 on macOS, as the fastest of the ten runs of each
 test in six runs of the program. By the geometric mean of the speedups over the
-interpreter, the tests are 3.5 times as fast with the JIT compiler without direct
-system calls, 4.7 times with the default settings, 5.0 times with the pooled memory
+interpreter, the tests are 3.7 times as fast with the JIT compiler without direct
+system calls, 5.0 times with the default settings, 5.2 times with the pooled memory
 functions too, and 4.1 times with the code generated ahead of time. The JIT
 compiler gains less than on x86-64, as the interpreter is faster on this CPU.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
-Basic          0.150    0.065      0.030    0.030     0.039
-Basic2         0.049    0.006      0.006    0.005     0.014
-Call           0.173    0.079      0.077    0.077     0.080
-Call2          0.213    0.116      0.114    0.114     0.115
-Fib            0.284    0.076      0.074    0.075     0.090
-Int            0.045    0.020      0.006    0.006     0.007
-Intf           0.096    0.010      0.009    0.010     0.028
+Basic          0.152    0.068      0.027    0.027     0.041
+Basic2         0.048    0.006      0.006    0.006     0.014
+Call           0.167    0.081      0.080    0.081     0.080
+Call2          0.208    0.117      0.116    0.115     0.114
+Fib            0.285    0.076      0.075    0.077     0.093
+Int            0.044    0.021      0.006    0.006     0.007
+Intf           0.096    0.009      0.010    0.010     0.028
 Mthd           0.093    0.010      0.010    0.010     0.023
-String         0.211    0.171      0.090    0.091     0.102
-String2        0.115    0.087      0.043    0.044     0.066
-StringPooled   0.134    0.118      0.046    0.046     0.049
-ThisProp       0.099    0.008      0.008    0.008     0.006
-Vector3        0.083    0.064      0.009    0.009     0.008
-Assign.1       0.050    0.005      0.005    0.005     0.011
-Assign.2       0.088    0.011      0.013    0.013     0.009
-Assign.3       0.071    0.012      0.012    0.012     0.008
-Assign.4       0.077    0.022      0.022    0.022     0.012
-Assign.5       0.081    0.021      0.022    0.022     0.011
-Array.1        0.186    0.092      0.073    0.042     0.078
-Array.2        0.088    0.015      0.015    0.015     0.009
-GlobalVar      0.039    0.034      0.012    0.012     0.019
+String         0.209    0.179      0.093    0.092     0.109
+String2        0.116    0.093      0.045    0.045     0.068
+StringPooled   0.133    0.122      0.046    0.047     0.051
+ThisProp       0.100    0.008      0.008    0.009     0.006
+Vector3        0.082    0.067      0.008    0.008     0.008
+Assign.1       0.051    0.005      0.005    0.005     0.011
+Assign.2       0.088    0.013      0.010    0.013     0.011
+Assign.3       0.075    0.012      0.012    0.012     0.008
+Assign.4       0.085    0.019      0.022    0.022     0.013
+Assign.5       0.091    0.019      0.022    0.022     0.012
+Array.1        0.192    0.095      0.073    0.043     0.078
+Array.2        0.091    0.015      0.015    0.015     0.009
+GlobalVar      0.040    0.033      0.012    0.013     0.019
 ClassProp      0.068    0.011      0.011    0.011     0.009
-RetObj.1       0.240    0.123      0.122    0.077     0.150
-RetObj.2       0.138    0.059      0.060    0.036     0.078
-RetObj.3       0.040    0.004      0.004    0.004     0.009
+RetObj.1       0.239    0.067      0.066    0.045     0.153
+RetObj.2       0.136    0.054      0.053    0.028     0.079
+RetObj.3       0.040    0.003      0.004    0.003     0.009
 </pre>
 
 The test_jit_bench project in /sdk/tests/test_jit_bench measures smaller loops
@@ -704,6 +704,36 @@ floats, the generic calling convention, the methods called on the elements of
 arrays, script-class vectors, the casts to base classes and interfaces, and the
 calls through function pointers. It prints the nanoseconds per iteration with the
 VM and with the JIT compiler, and fails if their results differ.
+Some of its tests on the Apple M5 Pro, in nanoseconds per iteration, the fastest of
+three runs in two runs of the program:
+
+<pre>
+Test             VM       JIT      Speedup
+intArraySum      14.94    0.88     17.0
+floatArrayDot    18.94    3.17     6.0
+doubleMath       18.96    7.62     2.5
+sqrtSum          13.77    0.61     22.6
+switchOps        13.25    0.64     20.7
+funcdefCalls     10.08    1.41     7.1
+directCalls      10.04    1.41     7.1
+callbackCalls2   15.10    1.41     10.7
+shapes           40.52    2.23     18.2
+globals          4.82     0.48     10.0
+memberArray      16.28    1.50     10.9
+int64Math        5.98     0.97     6.2
+castIntf         17.66    1.42     12.4
+stringOps        80.42    8.52     9.4
+dictionaryOps    31.86    9.56     3.3
+vec2Test         170.69   8.02     21.3
+nativeTest       14.04    1.13     12.4
+genericTest      18.30    5.56     3.3
+arrayTest        32.86    2.68     12.3
+stringTest       272.26   107.67   2.5
+</pre>
+
+The loops on strings and dictionaries spend most of their time in the add-ons,
+doubleMath waits for each result in turn, and the generic function reads its
+arguments through the interface.
 
 \section doc_addon_jit_limits Known limitations
 
