@@ -3971,7 +3971,8 @@ static bool TestForwardedValues()
 // The objects of the plain script classes that never leave the function are kept in
 // the memory of its frame, see CJITByteCode::FindFrameObjects. The results must be
 // those of the VM, also where the VM goes on with the objects after an exception or a
-// suspension, in recursive calls, and when the functions are compiled later or again.
+// suspension, also more than once with the same objects, which the VM releases, in
+// recursive calls, and when the functions are compiled later or again.
 // The objects that are stored somewhere must be allocated, which the functions
 // executed after them see
 namespace FrameObjects
@@ -3987,6 +3988,7 @@ namespace FrameObjects
 		"  Vec2 opAdd(const Vec2 &in o) const { return Vec2(x + o.x, y + o.y); }  \n"
 		"  Vec2 opMul(float s) const { return Vec2(x * s, y * s); }               \n"
 		"  Vec2 div(int d) const { return Vec2(x / float(10 / d), y); }           \n"
+		"  Vec2 pause(int i) const { if( i % 3 == 0 ) suspend(); return Vec2(x, y + 1); } \n"
 		"}                                                                        \n"
 		"class Bad { int v; void keep() { @g_bad = this; } }                      \n"
 		"Bad@ g_bad;                                                              \n"
@@ -4017,6 +4019,23 @@ namespace FrameObjects
 		"    a = a + b * 2;                                                       \n"
 		"    if( i % 2 == 1 ) suspend();                                          \n"
 		"  }                                                                      \n"
+		"  return a.x + a.y;                                                      \n"
+		"}                                                                        \n"
+		"float thrown(int n)                                                      \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2), b(1, 1);                                                 \n"
+		"  float s = 0;                                                           \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"  {                                                                      \n"
+		"    try { Vec2 t = b * 2; t = t.div(i % 3); a = t; } catch { s += 1; }   \n"
+		"  }                                                                      \n"
+		"  return a.x + a.y + s;                                                  \n"
+		"}                                                                        \n"
+		"float paused(int n)                                                      \n"
+		"{                                                                        \n"
+		"  Vec2 a(1, 2), b(1, 1);                                                 \n"
+		"  for( int i = 0; i < n; i++ )                                           \n"
+		"    a = a.pause(i) + b * 2;                                              \n"
 		"  return a.x + a.y;                                                      \n"
 		"}                                                                        \n"
 		"float recursive(int d)                                                   \n"
@@ -4075,7 +4094,7 @@ namespace FrameObjects
 		}
 
 		struct { const char *decl; int arg; } calls[] = {
-			{ "float vec(int)", 10 }, { "float divide(int)", 9 }, { "float suspended(int)", 7 }, { "float recursive(int)", 4 },
+			{ "float vec(int)", 10 }, { "float divide(int)", 9 }, { "float suspended(int)", 7 }, { "float paused(int)", 10 }, { "float thrown(int)", 10 }, { "float recursive(int)", 4 },
 			{ "float escapes()", -1 }, { "float stored(int)", 5 }, { "int thisEscape()", -1 }, { "float later()", -1 } };
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
@@ -4139,9 +4158,10 @@ static bool TestFrameObjects()
 		TEST_FAILED;
 	}
 
-	// Compiled first, compiled when they are executed often enough, and compiled again
-	// with the classes that their calls see
-	for( int mode = 0; mode < 3; mode++ )
+	// Compiled first, compiled when they are executed often enough, compiled again
+	// with the classes that their calls see, and with the releases left to the VM, so
+	// that the VM also executes what follows them
+	for( int mode = 0; mode < 4; mode++ )
 	{
 		FILE *log = tmpfile();
 		CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
@@ -4151,6 +4171,9 @@ static bool TestFrameObjects()
 			jit.SetCompileThresholds(2, 3);
 		if( mode == 2 )
 			jit.SetProfileThreshold(3);
+		const asEBCInstr freeInstr = asBC_FREE;
+		if( mode == 3 )
+			jit.SetBailInstructions(&freeInstr, 1);
 		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 		std::string actual = FrameObjects::Run(engine, &jit, fail);
 		engine->ShutDownAndRelease();

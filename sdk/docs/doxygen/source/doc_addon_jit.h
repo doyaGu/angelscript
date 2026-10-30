@@ -189,8 +189,10 @@ depth of its call stack, as only one function executes at a depth at a time, and
 that it releases with the context. Their header has a reference more than that of
 an allocated object, so the VM can go on with them after an exception or a
 suspension like with any other object without ever freeing them, and the compiled
-code only forgets them where they are released. The members are read and written
-in memory. On an Apple M5 the loop adding
+code only forgets them where they are released. Only the reference count and the
+flags beside it are written where an object is created, as the VM may have changed
+them, and the rest of the header when the function is entered. The members are read
+and written in memory. On an Apple M5 the loop adding
 script-class 2D vectors takes 21 nanoseconds per iteration instead of 51, and
 RetObj.1 of the test_performance project 0.075 seconds instead of 0.121. The code
 generated ahead of time allocates the objects. The initialization lists that hold only
@@ -830,8 +832,9 @@ compiled in place takes those of its parameters that it holds in registers, and 
 pointer of the object of a method, from the registers they were pushed from. An
 object returned through the object register by a function compiled in place, and
 an object created by a constructor compiled in place and returned by the factory,
-are passed on in a register too. That takes the loop adding script-class 2D vectors
-from 11.6 to 9.7 nanoseconds per iteration on an Apple M5.
+are passed on in a register too, without going through the object register of the
+VM. That takes the loop adding script-class 2D vectors from 11.6 to 7.9 nanoseconds
+per iteration on an Apple M5.
 \ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
 compiled in place.
 

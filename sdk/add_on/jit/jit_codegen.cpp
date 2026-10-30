@@ -1239,7 +1239,10 @@ void CJITCodeGen::EmitEntryStubs()
 		{
 			Gp obj = ForwardedObject(0, asUINT(reader));
 			if( instrs[reader].op == asBC_STOREOBJ )
+			{
 				m_uc.load(obj, RegsField(offsetof(asSVMRegisters, objectRegister)));
+				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectRegister)));
+			}
 			else
 				m_uc.mov(obj, LoadPtr(asBC_SWORDARG0(instrs[reader].bc)));
 		}

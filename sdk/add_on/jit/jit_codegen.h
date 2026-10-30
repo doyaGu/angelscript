@@ -227,6 +227,7 @@ protected:
 	int  FrameSlot(int var) const;
 	int  FreshSlot(asUINT idx) const;
 	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);
+	void StoreFrameObjectHeader(const Gp &base, int offset, asCObjectType *type, bool changing);
 	void EmitFrameArena();
 
 	std::map<int, SPushedValue> m_pushed; // by stack offset, for the pushes since the last other instruction

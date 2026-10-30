@@ -1935,7 +1935,9 @@ static bool IsCtorSafe(asCScriptEngine *engine, int funcId)
 // the variable may only read and write the members, check for null, release the
 // object, and pass it to the methods compiled in place and the default assignment,
 // which must do the same with it. The VM can then go on with the objects in the frame
-// like with any other, which have a reference more so that it never frees them.
+// like with any other, which have a reference more so that it never frees them. So
+// the instructions that only the VM executes, after those it always executes, must
+// keep the objects as well.
 void CJITByteCode::FindFrameObjects()
 {
 	if( !m_staticStack || m_func->scriptData == 0 )
@@ -1971,7 +1973,7 @@ void CJITByteCode::FindFrameObjects()
 		for( asUINT n = 0; n < m_instrs.size() && ok; n++ )
 		{
 			const SJITInstr &instr = m_instrs[n];
-			if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+			if( !UsesVar(instr, var) )
 				continue;
 			switch( instr.op )
 			{
@@ -2048,7 +2050,7 @@ bool CJITByteCode::FindFreshReturn(asCObjectType *type)
 	int ret = -1;
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
-		if( m_instrs[n].op != asBC_RET || (m_instrs[n].flags & JIT_INSTR_DEAD) )
+		if( m_instrs[n].op != asBC_RET )
 			continue;
 		if( ret >= 0 )
 			return false;
@@ -2064,7 +2066,7 @@ bool CJITByteCode::FindFreshReturn(asCObjectType *type)
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+		if( !UsesVar(instr, var) )
 			continue;
 		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR || (instr.op == asBC_LOADOBJ && int(n) == ret - 1) )
 			continue;
@@ -2126,7 +2128,7 @@ bool CJITByteCode::IsThisSafe(asCObjectType *type) const
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, 0) )
+		if( !UsesVar(instr, 0) )
 			continue;
 		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR )
 			continue;
@@ -2142,7 +2144,7 @@ bool CJITByteCode::IsRefParamSafe(int var, asCObjectType *type) const
 	for( asUINT n = 0; n < m_instrs.size(); n++ )
 	{
 		const SJITInstr &instr = m_instrs[n];
-		if( (instr.flags & JIT_INSTR_DEAD) || !UsesVar(instr, var) )
+		if( !UsesVar(instr, var) )
 			continue;
 		if( instr.op == asBC_ChkNullV || instr.op == asBC_LoadRObjR )
 			continue;

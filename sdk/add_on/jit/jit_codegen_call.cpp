@@ -643,6 +643,9 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 			m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 			m_uc.j(BailLabel(idx + 1), test_nz(flag));
 		}
+		// The object goes on in its register, see asBC_STOREOBJ
+		if( returnedObj.is_valid() )
+			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectRegister)));
 		EndCold(cold, cont);
 		m_uc.bind(cont);
 	}
@@ -1648,6 +1651,64 @@ void CJITCodeGen::EmitFrameArena()
 	SetRegsArg(call, 0);
 	call->set_arg(1, Imm(int(m_options.frameObjectSize)));
 	call->set_ret(0, m_objectArena);
+
+	// The parts of the headers of the objects that never change, the table of
+	// virtual functions and the class, are written once the function is entered, as
+	// the other functions at the same depth of the call stack use the memory too
+	Label none = m_uc.new_label();
+	m_uc.j(none, test_z(m_objectArena));
+	const std::map<int, asCObjectType*> &objects = m_code->GetFrameObjects();
+	for( std::map<int, asCObjectType*>::const_iterator it = objects.begin(); it != objects.end(); ++it )
+	{
+		int slot = FrameSlot(it->first);
+		if( slot >= 0 )
+			StoreFrameObjectHeader(m_objectArena, slot, it->second, false);
+	}
+	m_uc.bind(none);
+}
+
+// Whether the bytes of the header of a script object may change while it is kept in
+// the frame: the reference count and the flags beside it, which the VM changes
+static bool IsHeaderChanging(int offset, int size)
+{
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	int bytes[] = { layout.refCount, layout.refCount + 3, layout.gcFlag, layout.deadFlag };
+	for( asUINT n = 0; n < sizeof(bytes) / sizeof(bytes[0]); n++ )
+		if( bytes[n] >= offset && bytes[n] < offset + size )
+			return true;
+	return false;
+}
+
+// Writes the parts of the header of an object kept in the frame that may change, or
+// those that don't, see EmitFrameObject
+void CJITCodeGen::StoreFrameObjectHeader(const Gp &base, int offset, asCObjectType *type, bool changing)
+{
+	const SJITObjectLayout &layout = JIT_GetObjectLayout();
+	std::vector<asBYTE> header(size_t(layout.scriptObjectSize));
+	JIT_GetFrameObjectHeader(type, &header[0]);
+	Gp t = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
+	for( int n = 0, width; n + 4 <= layout.scriptObjectSize; n += width )
+	{
+		width = Is64Bit() && n + 8 <= layout.scriptObjectSize ? 8 : 4;
+		if( IsHeaderChanging(n, width) != changing )
+			continue;
+		asQWORD value = 0;
+		memcpy(&value, &header[size_t(n)], size_t(width));
+		if( value == 0 && width == 8 )
+			m_uc.store_zero_reg(Addr(base, offset + n));
+		else if( value == 0 )
+			m_uc.store_zero_u32(Addr(base, offset + n));
+		else if( width == 8 )
+		{
+			m_uc.mov(t, Imm(int64_t(value)));
+			m_uc.store_u64(Addr(base, offset + n), t);
+		}
+		else
+		{
+			m_uc.mov(t.r32(), Imm(int(asDWORD(value))));
+			m_uc.store_u32(Addr(base, offset + n), t.r32());
+		}
+	}
 }
 
 // Creates an object of a plain script class in the memory for the objects kept in the
@@ -1655,9 +1716,10 @@ void CJITCodeGen::EmitFrameArena()
 // function, see CJITByteCode::FindFrameObjects and JIT_GetFrameArena. The header is
 // that of a new object, with a reference more, so that the releases by the VM, which
 // goes on with the objects like with any other, never free it, and the members are
-// cleared like ScriptObject_Construct does. The variable the object ends up in isn't
-// released by the generated code, which only forgets the object, and the next object
-// for it takes its place
+// cleared like ScriptObject_Construct does. Only the parts of the header that the VM
+// may have changed are written here, the others when the function is entered, see
+// EmitFrameArena. The variable the object ends up in isn't released by the generated
+// code, which only forgets the object, and the next object for it takes its place
 void CJITCodeGen::EmitFrameObject(const Gp &obj, int slot, asCObjectType *type)
 {
 	const SJITObjectLayout &layout = JIT_GetObjectLayout();
@@ -1665,38 +1727,15 @@ void CJITCodeGen::EmitFrameObject(const Gp &obj, int slot, asCObjectType *type)
 	Label done = m_uc.new_label();
 	m_uc.j(heap, test_z(m_objectArena));
 	m_uc.add(obj, m_objectArena, Imm(slot));
-	std::vector<asBYTE> header(size_t(layout.scriptObjectSize));
-	JIT_GetFrameObjectHeader(type, &header[0]);
+	StoreFrameObjectHeader(obj, 0, type, true);
 	int size = int(type->size);
-	Gp t = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
-	int offset = 0;
+	Gp t = m_uc.new_gp32();
+	int offset = layout.scriptObjectSize;
 	if( Is64Bit() )
 		for( ; offset + 8 <= size; offset += 8 )
-		{
-			asQWORD value = 0;
-			if( offset < layout.scriptObjectSize )
-				memcpy(&value, &header[size_t(offset)], offset + 8 <= layout.scriptObjectSize ? 8 : size_t(layout.scriptObjectSize - offset));
-			if( value == 0 )
-				m_uc.store_zero_reg(Addr(obj, offset));
-			else
-			{
-				m_uc.mov(t, Imm(int64_t(value)));
-				m_uc.store_u64(Addr(obj, offset), t);
-			}
-		}
+			m_uc.store_zero_reg(Addr(obj, offset));
 	for( ; offset + 4 <= size; offset += 4 )
-	{
-		asDWORD value = 0;
-		if( offset < layout.scriptObjectSize )
-			memcpy(&value, &header[size_t(offset)], offset + 4 <= layout.scriptObjectSize ? 4 : size_t(layout.scriptObjectSize - offset));
-		if( value == 0 )
-			m_uc.store_zero_u32(Addr(obj, offset));
-		else
-		{
-			m_uc.mov(t.r32(), Imm(int(value)));
-			m_uc.store_u32(Addr(obj, offset), t.r32());
-		}
-	}
+		m_uc.store_zero_u32(Addr(obj, offset));
 	for( ; offset < size; offset++ )
 	{
 		m_uc.mov(t.r32(), Imm(0));
@@ -3363,13 +3402,21 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 	case asBC_LOADOBJ:
 		{
 			// The object created in place is still in its register, and the object
-			// returned by an inlined function goes on in a register too
+			// returned by an inlined function goes on in a register too. Then the
+			// object register isn't needed, unless the VM returns, as nothing else
+			// returns to the VM before the asBC_STOREOBJ of the caller, see
+			// CJITByteCode::FindForwardedObjects
 			Gp obj = m_code->GetObjectSource(idx) >= 0 ? ForwardedObject(m_frame, idx) : LoadPtr(a0);
-			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
-			m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
-			// Before the variable, which may hold the object in the same register, is cleared
 			const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
-			if( m_frames[m_frame].returnedObj.is_valid() && idx + 1 < instrs.size() && instrs[idx + 1].op == asBC_RET )
+			bool forwarded = m_frames[m_frame].returnedObj.is_valid() && idx + 1 < instrs.size() && instrs[idx + 1].op == asBC_RET &&
+			                 !(instrs[idx + 1].flags & JIT_INSTR_BAIL);
+			if( !forwarded )
+			{
+				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
+				m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), obj);
+			}
+			// Before the variable, which may hold the object in the same register, is cleared
+			if( forwarded )
 				m_uc.mov(m_frames[m_frame].returnedObj, obj);
 			ClearPtr(a0);
 		}
@@ -3377,13 +3424,17 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_STOREOBJ:
 		{
+			// The object returned in a register by an inlined function hasn't been
+			// stored in the object register, which the code that loads the register
+			// from it clears instead, see EmitInlineCall and EmitEntryStubs
 			Gp obj = m_uc.new_gp_ptr();
 			if( m_code->GetObjectSource(idx) >= 0 )
 				m_uc.mov(obj, ForwardedObject(m_frame, idx));
 			else
 				m_uc.load(obj, RegsField(offsetof(asSVMRegisters, objectRegister)));
 			StorePtr(a0, obj);
-			m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectRegister)));
+			if( m_code->GetObjectSource(idx) < 0 )
+				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectRegister)));
 		}
 		break;
 
