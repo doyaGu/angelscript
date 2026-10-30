@@ -1509,25 +1509,6 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 	return true;
 }
 
-// Calls a registered function directly with its native calling convention, instead
-// of through the generic CallSystemFunction of the engine. This is only done for
-// simple signatures: primitives and pointers as arguments, a primitive, pointer,
-// handle, or value type as return value, and only auto handles to clean up after
-// the call.
-// Value types returned in memory are left out where the address is neither passed
-// like an argument nor in a register of its own (see JIT_HIDDEN_RETURN_POINTER).
-// Everything else, e.g. value objects with an unsupported native register layout,
-// returns false and is called through the engine. Complex and large value objects
-// passed indirectly are already pointers here and can be called directly.
-//
-// C++ exceptions thrown by the function pass through the generated code and are
-// caught by JIT_GuardedEntry. Where the code has no unwind information for that
-// (see CJITUnwindInfo) this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
-//
-// The indexers are compiled in place as the loads of the address of the element, see
-// CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
-// left to the VM, which calls the method to raise the exception. Nothing else can
-// see the variables, so they aren't stored, see CJITByteCode::IsSyncPointAt
 // Computes the math function of the C library in place, see
 // CJITByteCode::FindMathCalls. The argument is taken from the register it was pushed
 // from, like for the direct calls, and so is the result set to the value register.
@@ -1591,6 +1572,10 @@ void CJITCodeGen::EmitMathCall(asUINT idx)
 		StoreVRF64(ret);
 }
 
+// The indexers are compiled in place as the loads of the address of the element, see
+// CJITCompiler::AddIndexer. A null object or buffer, or an index out of range, is
+// left to the VM, which calls the method to raise the exception. Nothing else can
+// see the variables, so they aren't stored, see CJITByteCode::IsSyncPointAt
 void CJITCodeGen::EmitIndexer(asUINT idx)
 {
 	const SJITIndexerCall &indexer = *m_code->GetIndexer(idx);
@@ -2078,6 +2063,20 @@ void CJITCodeGen::EmitLengthQuery(asUINT idx, const SJITIndexerCall &query)
 		StoreVR32(count);
 }
 
+// Calls a registered function directly with its native calling convention, instead
+// of through the generic CallSystemFunction of the engine. This is only done for
+// simple signatures: primitives and pointers as arguments, a primitive, pointer,
+// handle, or value type as return value, and only auto handles to clean up after
+// the call.
+// Value types returned in memory are left out where the address is neither passed
+// like an argument nor in a register of its own (see JIT_HIDDEN_RETURN_POINTER).
+// Everything else, e.g. value objects with an unsupported native register layout,
+// returns false and is called through the engine. Complex and large value objects
+// passed indirectly are already pointers here and can be called directly.
+//
+// C++ exceptions thrown by the function pass through the generated code and are
+// caught by JIT_GuardedEntry. Where the code has no unwind information for that
+// (see CJITUnwindInfo) this is only used when the JIT_DIRECT_SYSTEM_CALLS flag is set
 bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 {
 	const SJITInstr &instr = m_code->GetInstructions()[idx];
@@ -3124,7 +3123,7 @@ bool CJITCodeGen::EmitGenericCall(asUINT idx, const SJITGenericInfo *info)
 	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
 	bool method = sysFunc->callConv == ICC_GENERIC_METHOD;
 	if( !m_options.directSystemCalls || (sysFunc->callConv != ICC_GENERIC_FUNC && !method) ||
-	    sysFunc->cleanArgs.GetLength() || sysFunc->returnAutoHandle || FailIfHidden() )
+	    sysFunc->cleanArgs.GetLength() || sysFunc->returnAutoHandle )
 		return false;
 
 	const SJITInstr &instr = m_code->GetInstructions()[idx];

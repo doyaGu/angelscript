@@ -6421,8 +6421,8 @@ static bool TestCodeSizeStatistics()
 // through the generic interface of JIT_CallGeneric, whose arguments and return values
 // must be those of the VM's, also for the wrong types, which give zero or
 // asINVALID_TYPE, and for the methods, the null objects, the exceptions and the
-// suspensions in the functions, the objects and handles passed and returned, and
-// the variadic functions
+// suspensions in the functions, the objects and handles passed and returned, the
+// variadic functions, and the calls in the functions compiled in place
 namespace GenericCalls
 {
 	struct Counter { int value; };
@@ -6537,7 +6537,23 @@ namespace GenericCalls
 		"  return r;                                                                                  \n"
 		"}                                                                                            \n"
 		"int uncaught(int k) { return fails(k); }                                                     \n"
-		"int suspended(int k) { int s = 0; for( int i = 0; i < k; i++ ) s += fails(3) + i; return s; } \n";
+		"int suspended(int k) { int s = 0; for( int i = 0; i < k; i++ ) s += fails(3) + i; return s; } \n"
+		// The calls in the functions compiled in place
+		"int addOne(Counter@ c, int k) { return c.add(k); }                                           \n"
+		"int failsIn(int k) { return fails(k); }                                                      \n"
+		"int rDWordIn(int k) { return rDWord(k); }                                                    \n"
+		"int inlinedCalls(int k)                                                                      \n"
+		"{                                                                                            \n"
+		"  Counter@ c = getCounter();                                                                 \n"
+		"  c.value = 0;                                                                               \n"
+		"  int s = 0;                                                                                 \n"
+		"  for( int i = 0; i < 10; i++ ) s += addOne(c, i) + rDWordIn(k);                             \n"
+		"  try { s += failsIn(1); } catch { s += 7; }                                                 \n"
+		"  s += failsIn(3) + failsIn(0);                                                              \n"
+		"  Counter@ n;                                                                                \n"
+		"  try { s += addOne(n, 1); } catch { s += 70; }                                              \n"
+		"  return s;                                                                                  \n"
+		"}                                                                                            \n";
 
 	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
 	{
@@ -6578,7 +6594,7 @@ namespace GenericCalls
 		}
 
 		const char *calls[] = { "int probeAll(int)", "string returns(int)", "int methods(int)", "int nullMethod()", "int handles(int)",
-		                        "string failures(int)", "int uncaught(int)", "int suspended(int)" };
+		                        "string failures(int)", "int uncaught(int)", "int suspended(int)", "int inlinedCalls(int)" };
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
 		g_log.clear();
@@ -7687,6 +7703,13 @@ static bool TestGenericCalls()
 	if( actual != expected )
 	{
 		PRINTF("generic calls:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	// Also the functions that the generic functions are called in place in
+	SJITStatistics stats = jit.GetStatistics();
+	if( stats.functionsFailed != 0 )
+	{
+		PRINTF("generic calls: %u functions failed to compile\n", stats.functionsFailed);
 		TEST_FAILED;
 	}
 	return fail;
