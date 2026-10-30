@@ -771,6 +771,14 @@ arguments through the interface.
    \ref doc_addon_jit_profiles "profiles" is still synchronous.
  - The profiles note up to three classes at a call. The objects of further classes
    call the methods.
+ - The objects that a function keeps in its frame, see the
+   \ref doc_addon_jit_2 "usage", are only valid while it runs, as the functions
+   called later at the same depth of the call stack reuse the memory. An application
+   that keeps one of them through the context, e.g. a debugger that adds a reference
+   to an object that \c asIScriptContext::GetAddressOfVar returns, holds an object
+   that is gone once the function has returned. With
+   \ref CJITCompiler::JIT_NO_INLINE, or \ref CJITCompiler::SetMaxInlineSize set to 0,
+   the objects are always allocated.
  - Only x86-64, AArch64, and 32bit x86 are supported, as those are the
    architectures supported by AsmJit's UniCompiler.
  - The deprecated asBC_STR instruction is executed by the VM.
