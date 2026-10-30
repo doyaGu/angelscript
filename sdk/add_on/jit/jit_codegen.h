@@ -226,8 +226,10 @@ protected:
 	void OwnLentRef(asUINT lentFree);
 	int  FrameSlot(int var) const;
 	int  FreshSlot(asUINT idx) const;
+	void EmitNewScriptObject(const Gp &obj, asCObjectType *type);
 	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);
 	bool EmitGenericCall(asUINT idx, const SJITGenericInfo *info);
+	void EmitAfterDirectCall(asUINT idx, int funcId, bool vrLive, const Gp *retPtr, const Vec *floatReturn, bool f64);
 	Mem  m_genericStack;     // the slot of the generic interface, see EmitGenericCall
 	bool m_hasGenericStack = false;
 	void StoreFrameObjectHeader(const Gp &base, int offset, asCObjectType *type, bool changing);
@@ -245,6 +247,8 @@ protected:
 	void NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var = 0);
 	bool MovePushed32(const Gp &dst, const SPushedValue &value);
 	bool MovePushedF32(const Vec &dst, const SPushedValue &value);
+	bool MovePushedF64(const Vec &dst, const SPushedValue &value);
+	const SPushedValue *PushedAt(int stackOff) const;
 	void ReloadParamSlots(const JITSlotMask &mask);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;

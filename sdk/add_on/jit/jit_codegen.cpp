@@ -2021,6 +2021,24 @@ bool CJITCodeGen::MovePushedF32(const Vec &dst, const SPushedValue &value)
 	}
 }
 
+bool CJITCodeGen::MovePushedF64(const Vec &dst, const SPushedValue &value)
+{
+	if( value.kind != SPushedValue::F64 )
+		return false;
+	MoveVec(dst, value.vec);
+	return true;
+}
+
+// The value pushed at the dwords above the stack pointer of the static stack, which
+// is still in its register, or null
+const CJITCodeGen::SPushedValue *CJITCodeGen::PushedAt(int stackOff) const
+{
+	if( !m_staticStack )
+		return 0;
+	std::map<int, SPushedValue>::const_iterator it = m_pushed.find(m_spOffset + stackOff * 4);
+	return it == m_pushed.end() ? 0 : &it->second;
+}
+
 // Loads the cached slots in the mask when an inlined function is entered, the
 // parameters from the registers that the caller has pushed them from, which spares
 // the loads waiting for the stores

@@ -661,6 +661,11 @@ public:
 	// whose entry stub loads the register, or -1
 	int GetObjectReaderAfter(asUINT entryIdx) const;
 
+	// The instruction before or after the one at the index past asBC_JitEntry, which
+	// does nothing in the generated code, or -1 or the number of instructions
+	int    GetInstrBefore(asUINT instrIdx) const;
+	asUINT GetInstrAfter(asUINT instrIdx) const;
+
 	// The asBC_CALLSYS before the asBC_CpyRtoV4 or asBC_CpyRtoV8 that copies the float
 	// or double it returns, so that the value can be passed in a vector register, or -1,
 	// see FindFloatReturns
@@ -715,6 +720,7 @@ protected:
 	void FindFloatReturns();
 	void TypeFloatCopies();
 	void GetJumpTargets(std::set<asUINT> &targets) const;
+	bool IsJoinedBetween(asUINT from, asUINT to, const std::set<asUINT> &targets) const;
 	bool ReturnsLoadedObject() const;
 	void FindFrameObjects();
 	bool FindFreshReturn(asCObjectType *type);
@@ -794,7 +800,8 @@ protected:
 	std::map<int, asCObjectType*> m_frameObjects; // see GetFrameObjects
 	std::map<asUINT, int>         m_freshVars;    // by instruction, see GetFreshVar
 	int                           m_freshSource;  // see GetFreshSource
-	int                           m_freshState;   // 0 not looked for, 1 found for m_freshType, -1 not found
+	enum EFreshState { FRESH_UNKNOWN, FRESH_FOUND, FRESH_NONE };
+	EFreshState                   m_freshState;   // whether FindFreshReturn has found the source for m_freshType
 	asCObjectType                *m_freshType;
 	std::vector<int>        m_noChecks;
 	const bool             *m_bail;           // see SetBailInstructions

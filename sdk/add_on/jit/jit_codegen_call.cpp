@@ -138,9 +138,7 @@ void CJITCodeGen::EmitScriptCall(asUINT idx, int kind, int funcId, asPWORD extra
 			EmitFrameObject(obj, slot, reinterpret_cast<asCObjectType*>(extra));
 		else
 		{
-			InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
-			alloc->set_arg(0, Imm(int64_t(extra)));
-			alloc->set_ret(0, obj);
+			EmitNewScriptObject(obj, reinterpret_cast<asCObjectType*>(extra));
 		}
 
 		Gp var = m_uc.new_gp_ptr();
@@ -416,12 +414,9 @@ void CJITCodeGen::EmitInlineCall(asUINT idx)
 	// the object returned in a register for the asBC_STOREOBJ after the call
 	std::map<int, SPushedValue> args;
 	args.swap(m_pushedAtCall);
-	const std::vector<SJITInstr> &callerInstrs = m_code->GetInstructions();
-	asUINT reader = idx + 1;
-	while( reader < callerInstrs.size() && callerInstrs[reader].op == asBC_JitEntry )
-		reader++;
+	asUINT reader = m_code->GetInstrAfter(idx);
 	Gp returnedObj;
-	if( reader < callerInstrs.size() && m_code->GetObjectSource(reader) == int(idx) )
+	if( reader < m_code->GetInstructions().size() && m_code->GetObjectSource(reader) == int(idx) )
 		returnedObj = ForwardedObject(caller, reader);
 	bool checkVM = caller == 0 || m_code->HasSyncPoints(m_frames[caller].borrowed);
 	if( m_options.elideSuspend && m_suspendChecked )
@@ -1518,15 +1513,13 @@ void CJITCodeGen::EmitMathCall(asUINT idx)
 {
 	const SJITMathCall &math = *m_code->GetMathCall(idx);
 	Vec arg = math.f64 ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
-	std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset) : m_pushed.end();
+	const SPushedValue *pushed = PushedAt(0);
 	if( math.f64 )
 	{
-		if( pushed != m_pushed.end() && pushed->second.kind == SPushedValue::F64 )
-			MoveVec(arg, pushed->second.vec);
-		else
+		if( !pushed || !MovePushedF64(arg, *pushed) )
 			m_uc.v_loadu64_f64(arg, Stack(0));
 	}
-	else if( pushed == m_pushed.end() || !MovePushedF32(arg, pushed->second) )
+	else if( !pushed || !MovePushedF32(arg, *pushed) )
 		m_uc.v_loadu32_f32(arg, Stack(0));
 
 	Vec ret = math.f64 ? m_uc.new_vec128_f64x1() : m_uc.new_vec128_f32x1();
@@ -1701,6 +1694,15 @@ void CJITCodeGen::StoreFrameObjectHeader(const Gp &base, int offset, asCObjectTy
 	}
 }
 
+// Allocates an object of a script class like asBC_ALLOC before the constructor is
+// called, see JIT_NewScriptObject
+void CJITCodeGen::EmitNewScriptObject(const Gp &obj, asCObjectType *type)
+{
+	InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
+	alloc->set_arg(0, Imm(int64_t(asPWORD(type))));
+	alloc->set_ret(0, obj);
+}
+
 // Creates an object of a plain script class in the memory for the objects kept in the
 // frame of the outermost function instead of allocating it, as it never leaves the
 // function, see CJITByteCode::FindFrameObjects and JIT_GetFrameArena. The header is
@@ -1734,9 +1736,7 @@ void CJITCodeGen::EmitFrameObject(const Gp &obj, int slot, asCObjectType *type)
 
 	// Without the memory the object is allocated
 	BaseNode *cold = BeginCold(heap);
-	InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
-	alloc->set_arg(0, Imm(int64_t(asPWORD(type))));
-	alloc->set_ret(0, obj);
+	EmitNewScriptObject(obj, type);
 	EndCold(cold, done);
 	m_uc.bind(done);
 }
@@ -1911,9 +1911,7 @@ void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 		EmitFrameObject(obj, slot, ctor->type);
 	else
 	{
-		InvokeNode *alloc = Invoke((const void*)JIT_NewScriptObject, FuncSignature::build<void*, void*>());
-		alloc->set_arg(0, Imm(int64_t(asPWORD(ctor->type))));
-		alloc->set_ret(0, obj);
+		EmitNewScriptObject(obj, ctor->type);
 	}
 
 	Gp v = Is64Bit() ? m_uc.new_gp64() : m_uc.new_gp32();
@@ -2018,11 +2016,8 @@ void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 	}
 
 	// The asBC_LOADOBJ of the variable takes the object from its register
-	const std::vector<SJITInstr> &instrs = m_code->GetInstructions();
-	asUINT reader = idx + 1;
-	while( reader < instrs.size() && instrs[reader].op == asBC_JitEntry )
-		reader++;
-	if( reader < instrs.size() && m_code->GetObjectSource(reader) == int(idx) )
+	asUINT reader = m_code->GetInstrAfter(idx);
+	if( reader < m_code->GetInstructions().size() && m_code->GetObjectSource(reader) == int(idx) )
 		m_uc.mov(ForwardedObject(m_frame, reader), obj);
 
 	// The variable gets the object, which asBC_ALLOC stores before the constructor
@@ -2608,8 +2603,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				// The value pushed right before is taken from its register, which
 				// spares the load waiting for the store
-				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
-				if( pushed == m_pushed.end() || !MovePushed32(gpArgs[n], pushed->second) )
+				const SPushedValue *pushed = PushedAt(args[n].stackOff);
+				if( !pushed || !MovePushed32(gpArgs[n], *pushed) )
 					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
 			}
 			break;
@@ -2696,8 +2691,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			else
 			{
 				// Like the int arguments above, also from the vector register of a float
-				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
-				if( pushed == m_pushed.end() || !MovePushedF32(vecArgs[n], pushed->second) )
+				const SPushedValue *pushed = PushedAt(args[n].stackOff);
+				if( !pushed || !MovePushedF32(vecArgs[n], *pushed) )
 					m_uc.v_loadu32_f32(vecArgs[n], Stack(args[n].stackOff));
 			}
 			break;
@@ -2714,10 +2709,8 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			}
 			else
 			{
-				std::map<int, SPushedValue>::const_iterator pushed = m_staticStack ? m_pushed.find(m_spOffset + args[n].stackOff * 4) : m_pushed.end();
-				if( pushed != m_pushed.end() && pushed->second.kind == SPushedValue::F64 )
-					MoveVec(vecArgs[n], pushed->second.vec);
-				else
+				const SPushedValue *pushed = PushedAt(args[n].stackOff);
+				if( !pushed || !MovePushedF64(vecArgs[n], *pushed) )
 					m_uc.v_loadu64_f64(vecArgs[n], Stack(args[n].stackOff));
 			}
 			break;
@@ -3083,14 +3076,24 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	}
 	PopStack(popSize * 4);
 
-	// Exceptions, suspend requests, and line callbacks are handled by the helper
+	EmitAfterDirectCall(idx, funcId, vrLive, retOnStack ? &retPtr : 0, floatReader >= 0 ? &retVec : 0, retKind == RET_F64);
+	return true;
+}
+
+// Checks for exceptions, suspend requests, and line callbacks after a registered
+// function was called directly, which the helper handles. The VM continues with the
+// popped stack pointer if it returns non-zero. A value returned on the stack is
+// destroyed if the function raised an exception. A float or double returned in a
+// vector register is taken from the value register again, so that the register isn't
+// held across the helper, which would store it on the stack
+void CJITCodeGen::EmitAfterDirectCall(asUINT idx, int funcId, bool vrLive, const Gp *retPtr, const Vec *floatReturn, bool f64)
+{
 	Gp flag = m_uc.new_gp32();
 	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
 	Label check = m_uc.new_label();
 	Label cont = m_uc.new_label();
 	m_uc.j(check, test_nz(flag));
 	BaseNode *cold = BeginCold(check);
-	// The VM continues with the popped stack pointer if the helper returns non-zero
 	SyncStack();
 	if( vrLive )
 		SyncVR();
@@ -3098,23 +3101,19 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	Gp r = m_uc.new_gp32();
 	SetRegsArg(after, 0);
 	after->set_arg(1, Imm(funcId));
-	if( retOnStack )
-		after->set_arg(2, retPtr);
+	if( retPtr )
+		after->set_arg(2, *retPtr);
 	else
 		after->set_arg(2, Imm(0));
 	after->set_ret(0, r);
 	EmitLeaveIf(r);
 	// With a debugger attached the variables may have been modified through the context
 	ReloadLiveSlots(idx);
-	// The value is taken from the value register again, so that the register it is
-	// returned in isn't held across the helper, which would store it on the stack
-	if( floatReader >= 0 )
-		LoadVRFloat(retVec, retKind == RET_F64);
+	if( floatReturn )
+		LoadVRFloat(*floatReturn, f64);
 	EndCold(cold, cont);
 	m_uc.bind(cont);
 	EmitDematerialize();
-
-	return true;
 }
 
 // Calls a registered function with the generic calling convention directly, like
@@ -3223,30 +3222,7 @@ bool CJITCodeGen::EmitGenericCall(asUINT idx, const SJITGenericInfo *info)
 	}
 	PopStack((sysFunc->paramSize + argsOff) * 4);
 
-	// Exceptions, suspend requests, and line callbacks are handled by the helper
-	Gp flag = m_uc.new_gp32();
-	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
-	Label check = m_uc.new_label();
-	Label cont = m_uc.new_label();
-	m_uc.j(check, test_nz(flag));
-	BaseNode *cold = BeginCold(check);
-	SyncStack();
-	if( vrLive )
-		SyncVR();
-	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int, void*>());
-	Gp r = m_uc.new_gp32();
-	SetRegsArg(after, 0);
-	after->set_arg(1, Imm(descr->GetId()));
-	if( retOnStack )
-		after->set_arg(2, retPtr);
-	else
-		after->set_arg(2, Imm(0));
-	after->set_ret(0, r);
-	EmitLeaveIf(r);
-	ReloadLiveSlots(idx);
-	EndCold(cold, cont);
-	m_uc.bind(cont);
-	EmitDematerialize();
+	EmitAfterDirectCall(idx, descr->GetId(), vrLive, retOnStack ? &retPtr : 0, 0, false);
 	return true;
 }
 

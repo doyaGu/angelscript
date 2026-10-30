@@ -30,7 +30,7 @@ CJITByteCode::CJITByteCode()
 	m_aot = false;
 	m_inlinedLength = 0;
 	m_freshSource = -1;
-	m_freshState  = 0;
+	m_freshState  = FRESH_UNKNOWN;
 	m_freshType   = 0;
 	m_borrowableParams = 0;
 	m_releasedParams   = 0;
@@ -468,6 +468,13 @@ int CJITByteCode::GetPopSize(asCScriptFunction *func)
 	return func->GetSpaceNeededForArguments() + (func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0);
 }
 
+// The function of the id that an instruction names, or null. The id 0 is never a
+// function
+static asCScriptFunction *ScriptFunction(asCScriptEngine *engine, int id)
+{
+	return id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+}
+
 // The funcdef of the function pointer in the variable that asBC_CallPtr calls, found
 // like asCScriptFunction::GetCalledFunction does, or 0. The compiler only lets
 // variables of the same type share a slot
@@ -507,9 +514,7 @@ bool CJITByteCode::GetStackInc(const SJITInstr &instr, int &inc) const
 	case asBC_CALL:
 	case asBC_CALLINTF:
 	case asBC_CALLSYS:
-		id = asBC_INTARG(instr.bc);
-		if( id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
-			callee = engine->scriptFunctions[id];
+		callee = ScriptFunction(engine, asBC_INTARG(instr.bc));
 		break;
 
 	case asBC_CALLBND:
@@ -533,8 +538,7 @@ bool CJITByteCode::GetStackInc(const SJITInstr &instr, int &inc) const
 			inc = -AS_PTR_SIZE;
 			return true;
 		}
-		if( id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
-			callee = engine->scriptFunctions[id];
+		callee = ScriptFunction(engine, id);
 		if( callee && !callee->IsVariadic() && (((asCObjectType*)asBC_PTRARG(instr.bc))->flags & asOBJ_SCRIPT_OBJECT) )
 		{
 			inc = -GetPopSize(callee) + AS_PTR_SIZE;
@@ -963,7 +967,7 @@ void CJITByteCode::FindInlinees(SInlineSearch &search, asUINT levels, asUINT bud
 		std::vector<std::pair<asCScriptFunction*, asCObjectType*> > impls;
 		bool profiled = false;
 		int id = asBC_INTARG(instr.bc);
-		asCScriptFunction *func = instr.op != asBC_CallPtr && id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = instr.op != asBC_CallPtr ? ScriptFunction(engine, id) : 0;
 		if( func && instr.op == asBC_CALLINTF )
 		{
 			asCScriptFunction *method = func;
@@ -1086,7 +1090,7 @@ bool CJITByteCode::FindIndexer(asCScriptEngine *engine, int funcId, const TJITCo
 {
 	if( indexers == 0 || indexers->empty() )
 		return false;
-	asCScriptFunction *func = funcId >= 0 && asUINT(funcId) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[funcId] : 0;
+	asCScriptFunction *func = ScriptFunction(engine, funcId);
 	if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 || func->objectType == 0 )
 		return false;
 	const asSSystemFunctionInterface *sysFunc = func->sysFuncIntf;
@@ -1164,7 +1168,7 @@ void CJITByteCode::FindMathCalls()
 		if( instr.op != asBC_CALLSYS || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INDEXER)) )
 			continue;
 		int id = asBC_INTARG(instr.bc);
-		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = ScriptFunction(engine, id);
 		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 || func->sysFuncIntf->callConv != ICC_CDECL ||
 		    func->parameterTypes.GetLength() != 1 || func->parameterTypes[0].IsReference() || func->returnType.IsReference() )
 			continue;
@@ -1380,13 +1384,11 @@ void CJITByteCode::FindCalledBorrowedArgs(const SJITProfile *profile, bool profi
 			asUINT imported = asUINT(id & ~FUNC_IMPORTED);
 			if( imported < engine->importedFunctions.GetLength() && engine->importedFunctions[imported] )
 			{
-				int bound = engine->importedFunctions[imported]->boundFunctionId;
-				if( bound > 0 && asUINT(bound) < engine->scriptFunctions.GetLength() )
-					func = engine->scriptFunctions[bound];
+				func = ScriptFunction(engine, engine->importedFunctions[imported]->boundFunctionId);
 			}
 		}
-		else if( instr.op != asBC_CallPtr && id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() )
-			func = engine->scriptFunctions[id];
+		else if( instr.op != asBC_CallPtr )
+			func = ScriptFunction(engine, id);
 		std::vector<asCScriptFunction*> targets;
 		if( instr.op == asBC_CallPtr )
 		{
@@ -1576,7 +1578,7 @@ void CJITByteCode::FindInPlaceAssigns()
 		if( instr.op != asBC_CALLSYS || (instr.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) || !m_staticStack )
 			continue;
 		int id = asBC_INTARG(instr.bc);
-		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = ScriptFunction(engine, id);
 		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 ||
 		    func->sysFuncIntf->callConv != ICC_CDECL_OBJLAST ||
 		    func->sysFuncIntf->func != reinterpret_cast<asFUNCTION_t>(ScriptObject_Assignment) )
@@ -1725,7 +1727,7 @@ void CJITByteCode::FindInPlaceConstructors()
 			continue;
 		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
 		int id = asBC_INTARG(instr.bc + AS_PTR_SIZE);
-		asCScriptFunction *ctor = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *ctor = ScriptFunction(engine, id);
 		if( !(type->flags & asOBJ_SCRIPT_OBJECT) || (type->flags & asOBJ_GC) || ctor == 0 ||
 		    ctor->funcType != asFUNC_SCRIPT || ctor->scriptData == 0 || ctor->objectType != type )
 			continue;
@@ -1778,15 +1780,8 @@ void CJITByteCode::FindForwardedObjects()
 		const SJITInstr &reader = m_instrs[n];
 		if( (reader.op != asBC_STOREOBJ && reader.op != asBC_LOADOBJ) || (reader.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
 			continue;
-		int source = int(n) - 1;
-		while( source >= 0 && m_instrs[source].op == asBC_JitEntry )
-			source--;
-		if( source < 0 )
-			continue;
-		bool joined = false;
-		for( asUINT k = asUINT(source) + 1; k <= n && !joined; k++ )
-			joined = targets.count(k) != 0 || (m_instrs[k].flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) != 0;
-		if( joined )
+		int source = GetInstrBefore(n);
+		if( source < 0 || IsJoinedBetween(asUINT(source), n, targets) )
 			continue;
 
 		const SJITInstr &instr = m_instrs[source];
@@ -1809,6 +1804,32 @@ void CJITByteCode::FindForwardedObjects()
 		for( asUINT k = asUINT(source) + 1; k < n; k++ )
 			m_objectReaders[k] = n;
 	}
+}
+
+int CJITByteCode::GetInstrBefore(asUINT instrIdx) const
+{
+	int n = int(instrIdx) - 1;
+	while( n >= 0 && m_instrs[n].op == asBC_JitEntry )
+		n--;
+	return n;
+}
+
+asUINT CJITByteCode::GetInstrAfter(asUINT instrIdx) const
+{
+	asUINT n = instrIdx + 1;
+	while( n < m_instrs.size() && m_instrs[n].op == asBC_JitEntry )
+		n++;
+	return n;
+}
+
+// True if anything may jump between the instructions, or the instructions between
+// them are left to the VM, see GetJumpTargets
+bool CJITByteCode::IsJoinedBetween(asUINT from, asUINT to, const std::set<asUINT> &targets) const
+{
+	for( asUINT n = from + 1; n <= to; n++ )
+		if( targets.count(n) || (m_instrs[n].flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
+			return true;
+	return false;
 }
 
 // The instructions that the branches and switches jump to
@@ -1848,21 +1869,16 @@ void CJITByteCode::FindFloatReturns()
 		const SJITInstr &reader = m_instrs[n];
 		if( (reader.op != asBC_CpyRtoV4 && reader.op != asBC_CpyRtoV8) || (reader.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) )
 			continue;
-		int source = int(n) - 1;
-		while( source >= 0 && m_instrs[source].op == asBC_JitEntry )
-			source--;
-		if( source < 0 )
+		int source = GetInstrBefore(n);
+		if( source < 0 || IsJoinedBetween(asUINT(source), n, targets) )
 			continue;
-		bool joined = false;
-		for( asUINT k = asUINT(source) + 1; k <= n && !joined; k++ )
-			joined = targets.count(k) != 0 || (m_instrs[k].flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL)) != 0;
 		const SJITInstr &call = m_instrs[source];
-		if( joined || call.op != asBC_CALLSYS ||
+		if( call.op != asBC_CALLSYS ||
 		    (call.flags & (JIT_INSTR_DEAD | JIT_INSTR_BAIL | JIT_INSTR_INDEXER | JIT_INSTR_MATH | JIT_INSTR_ASSIGN)) )
 			continue;
 
 		int id = asBC_INTARG(call.bc);
-		asCScriptFunction *func = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = ScriptFunction(engine, id);
 		if( func == 0 || func->funcType != asFUNC_SYSTEM || func->sysFuncIntf == 0 ||
 		    func->sysFuncIntf->callConv == ICC_GENERIC_FUNC || func->sysFuncIntf->callConv == ICC_GENERIC_FUNC_RETURNINMEM ||
 		    func->returnType.IsReference() || func->DoesReturnOnStack() )
@@ -1918,7 +1934,7 @@ void CJITByteCode::TypeFloatCopies()
 // default assignment
 static bool IsCtorSafe(asCScriptEngine *engine, int funcId)
 {
-	asCScriptFunction *ctor = funcId > 0 && asUINT(funcId) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[funcId] : 0;
+	asCScriptFunction *ctor = ScriptFunction(engine, funcId);
 	if( ctor == 0 || ctor->funcType != asFUNC_SCRIPT || ctor->scriptData == 0 || ctor->objectType == 0 )
 		return false;
 	CJITByteCode code;
@@ -1990,9 +2006,7 @@ void CJITByteCode::FindFrameObjects()
 			case asBC_STOREOBJ:
 			{
 				// The object returned by the call before, see FindFreshReturn
-				int call = int(n) - 1;
-				while( call >= 0 && m_instrs[call].op == asBC_JitEntry )
-					call--;
+				int call = GetInstrBefore(n);
 				std::vector<asCScriptFunction*> targets;
 				ok = call >= 0 && (m_instrs[call].op == asBC_CALL || m_instrs[call].op == asBC_CALLINTF) &&
 				     (m_instrs[call].flags & JIT_INSTR_INLINE) && GetCallTargets(asUINT(call), targets);
@@ -2040,9 +2054,9 @@ void CJITByteCode::FindFrameObjects()
 // Notes the instruction that creates it, see GetFreshSource
 bool CJITByteCode::FindFreshReturn(asCObjectType *type)
 {
-	if( m_freshState != 0 )
-		return m_freshState > 0 && m_freshType == type;
-	m_freshState = -1;
+	if( m_freshState != FRESH_UNKNOWN )
+		return m_freshState == FRESH_FOUND && m_freshType == type;
+	m_freshState = FRESH_NONE;
 	m_freshType  = type;
 	if( !m_staticStack )
 		return false;
@@ -2080,9 +2094,7 @@ bool CJITByteCode::FindFreshReturn(asCObjectType *type)
 			return false;
 		if( instr.op == asBC_STOREOBJ )
 		{
-			int call = int(n) - 1;
-			while( call >= 0 && m_instrs[call].op == asBC_JitEntry )
-				call--;
+			int call = GetInstrBefore(n);
 			std::vector<asCScriptFunction*> targets;
 			if( call < 0 || (m_instrs[call].op != asBC_CALL && m_instrs[call].op != asBC_CALLINTF) ||
 			    !(m_instrs[call].flags & JIT_INSTR_INLINE) || !GetCallTargets(asUINT(call), targets) )
@@ -2109,7 +2121,7 @@ bool CJITByteCode::FindFreshReturn(asCObjectType *type)
 	if( source < 0 )
 		return false;
 	m_freshSource = source;
-	m_freshState  = 1;
+	m_freshState  = FRESH_FOUND;
 	return true;
 }
 
@@ -2172,7 +2184,7 @@ bool CJITByteCode::IsPushSafe(asUINT pushIdx, asCObjectType *type) const
 	{
 		int id = asBC_INTARG(instr.bc);
 		asCScriptEngine *engine = m_func->engine;
-		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = ScriptFunction(engine, id);
 		return func && func->funcType == asFUNC_SYSTEM && func->sysFuncIntf && func->sysFuncIntf->callConv == ICC_CDECL_OBJLAST &&
 		       func->sysFuncIntf->func == reinterpret_cast<asFUNCTION_t>(ScriptObject_Assignment) &&
 		       (offset == 0 || offset == AS_PTR_SIZE);
@@ -2192,7 +2204,7 @@ bool CJITByteCode::IsMethodSafe(asUINT callIdx, asCObjectType *type) const
 	const SJITInstr &instr = m_instrs[callIdx];
 	asCScriptEngine *engine = m_func->engine;
 	int id = asBC_INTARG(instr.bc);
-	asCScriptFunction *method = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	asCScriptFunction *method = ScriptFunction(engine, id);
 	if( method == 0 || method->objectType == 0 || !(instr.flags & JIT_INSTR_INLINE) )
 		return false;
 	asCScriptFunction *impl = method;
@@ -2230,7 +2242,7 @@ bool CJITByteCode::IsRefArgSafe(asUINT varIdx, asCObjectType *type) const
 	// The parameter that the reference is passed for
 	asCScriptEngine *engine = m_func->engine;
 	int id = asBC_INTARG(m_instrs[call].bc);
-	asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	asCScriptFunction *func = ScriptFunction(engine, id);
 	if( func == 0 )
 		return false;
 	int offset = m_stackDepth[call] - top;
@@ -2282,7 +2294,7 @@ int CJITByteCode::FindAllocFor(asUINT psfIdx) const
 		if( instr.op != asBC_ALLOC )
 			continue;
 		int id = asBC_INTARG(instr.bc + AS_PTR_SIZE);
-		asCScriptFunction *ctor = id > 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *ctor = ScriptFunction(engine, id);
 		asCObjectType *type = reinterpret_cast<asCObjectType*>(asBC_PTRARG(instr.bc));
 		if( ctor == 0 || !(type->flags & asOBJ_SCRIPT_OBJECT) )
 			return -1;
@@ -2351,7 +2363,7 @@ bool CJITByteCode::GetCallTargets(asUINT callIdx, std::vector<asCScriptFunction*
 	const SJITInstr &instr = m_instrs[callIdx];
 	asCScriptEngine *engine = m_func->engine;
 	int id = asBC_INTARG(instr.bc);
-	asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength() ? engine->scriptFunctions[id] : 0;
+	asCScriptFunction *func = ScriptFunction(engine, id);
 	if( func == 0 )
 		return false;
 	if( instr.op == asBC_CALL )
@@ -2864,8 +2876,7 @@ void CJITByteCode::FindAOTBorrowedArgs()
 			continue;
 
 		int id = asBC_INTARG(instr.bc);
-		asCScriptFunction *func = id >= 0 && asUINT(id) < engine->scriptFunctions.GetLength()
-		                           ? engine->scriptFunctions[id] : 0;
+		asCScriptFunction *func = ScriptFunction(engine, id);
 		func = FindAOTCallee(func, instr.op == asBC_CALLINTF);
 		if( func == 0 || func->funcType != asFUNC_SCRIPT || func->scriptData == 0 || HasHandleReferenceArgument(func) )
 			continue;

@@ -24,6 +24,31 @@
 namespace TestJIT
 {
 
+// The text of a log file of the JIT compiler, which is closed then
+static std::string ReadLog(FILE *log)
+{
+	std::string text;
+	char buf[4096];
+	size_t len;
+	rewind(log);
+	while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
+		text.append(buf, len);
+	fclose(log);
+	return text;
+}
+
+// The part of the log for the first compilation of the function, or an empty string
+// if the function wasn't compiled
+static std::string LogSection(const std::string &text, const char *decl)
+{
+	std::string head = std::string("; ---- ") + decl + " ----";
+	size_t at = text.find(head);
+	if( at == std::string::npos )
+		return std::string();
+	size_t end = text.find("; ---- ", at + head.size());
+	return text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
 static std::string g_buf;
 int as_powi_test(int base, int exponent, bool &isOverflow);
 
@@ -3497,21 +3522,12 @@ static bool TestLentRefs()
 		bool inlines = !(envFlags & (CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_AOT_ONLY));
 		if( log )
 		{
-			std::string text;
-			char buf[4096];
-			rewind(log);
-			size_t len;
-			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-				text.append(buf, len);
-			fclose(log);
+			std::string text = ReadLog(log);
 			// The methods returning values lend them too
 			const char *lending[] = { "int normal()", "int returned()" };
 			for( asUINT n = 0; n < sizeof(lending) / sizeof(lending[0]) && inlines && !tiered; n++ )
 			{
-				std::string head = std::string("; ---- ") + lending[n] + " ----";
-				size_t at = text.find(head);
-				size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
-				std::string section = at == std::string::npos ? "" : text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+				std::string section = LogSection(text, lending[n]);
 				if( section.find("; lends") == std::string::npos || section.find("; lent") == std::string::npos )
 				{
 					PRINTF("lent references: the reference of the element isn't lent in %s\n", lending[n]);
@@ -3661,13 +3677,7 @@ static bool TestInPlaceAssigns()
 	}
 	if( log )
 	{
-		std::string text;
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
+		std::string text = ReadLog(log);
 		if( !(envFlags & CJITCompiler::JIT_AOT_ONLY) && text.find("; assigned in place") == std::string::npos )
 		{
 			PRINTF("in-place assignments: the assignment isn't copied in place\n");
@@ -3827,23 +3837,15 @@ static bool TestInPlaceConstructors()
 	}
 	if( log )
 	{
-		std::string text;
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
+		std::string text = ReadLog(log);
 		const char *expectedLog[][2] = { { "A@ A()", "1" }, { "A@ A(float, float)", "1" }, { "B@ B()", "1" }, { "C@ C(int)", "1" },
 		                                 { "C@ C(int, double)", "0" }, { "D@ D()", "0" }, { "E@ E(float)", "0" }, { "F@ F(int8, int16)", "1" },
 		                                 { "G@ G(double, int64)", "1" }, { "A@ A(const A&inout)", "0" } };
 		for( asUINT n = 0; n < sizeof(expectedLog) / sizeof(expectedLog[0]) && !(envFlags & CJITCompiler::JIT_AOT_ONLY); n++ )
 		{
-			std::string head = std::string("; ---- ") + expectedLog[n][0] + " ----";
-			size_t at = text.find(head);
-			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
-			bool inPlace = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; constructed in place") != std::string::npos;
-			if( at == std::string::npos || inPlace != (expectedLog[n][1][0] == '1') )
+			std::string section = LogSection(text, expectedLog[n][0]);
+			bool inPlace = section.find("; constructed in place") != std::string::npos;
+			if( section.empty() || inPlace != (expectedLog[n][1][0] == '1') )
 			{
 				PRINTF("in-place constructors: %s is %sconstructed in place\n", expectedLog[n][0], inPlace ? "" : "not ");
 				TEST_FAILED;
@@ -4003,13 +4005,7 @@ static bool TestForwardedValues()
 	}
 	if( log )
 	{
-		std::string text;
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
+		std::string text = ReadLog(log);
 		if( !(envFlags & (CJITCompiler::JIT_AOT_ONLY | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_NO_SCRIPT_CALLS)) && text.find("; object in a register") == std::string::npos )
 		{
 			PRINTF("forwarded values: no object is passed in a register\n");
@@ -4235,13 +4231,7 @@ static bool TestFrameObjects()
 		}
 		if( log )
 		{
-			std::string text;
-			char buf[4096];
-			size_t len;
-			rewind(log);
-			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-				text.append(buf, len);
-			fclose(log);
+			std::string text = ReadLog(log);
 			bool inlines = !(envFlags & (CJITCompiler::JIT_NO_SCRIPT_CALLS | CJITCompiler::JIT_SYNC_EVERY_INSTR | CJITCompiler::JIT_NO_INLINE | CJITCompiler::JIT_AOT_ONLY));
 			const char *kept[] = { "float vec(int)", "float divide(int)", "float suspended(int)", "float recursive(int)" };
 			const char *escaped[] = { "float escapes()", "float stored(int)", "int thisEscape()", "Vec2 returned()" };
@@ -6896,21 +6886,13 @@ static bool TestCasts()
 	engine->ShutDownAndRelease();
 	if( log )
 	{
-		std::string text;
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
+		std::string text = ReadLog(log);
 		const char *expectedLog[][2] = { { "int lentLoop()", "1" }, { "int lentWritten()", "0" }, { "int lentException()", "1" } };
 		for( asUINT n = 0; n < sizeof(expectedLog) / sizeof(expectedLog[0]) && !(envFlags & CJITCompiler::JIT_AOT_ONLY); n++ )
 		{
-			std::string head = std::string("; ---- ") + expectedLog[n][0] + " ----";
-			size_t at = text.find(head);
-			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
-			bool lends = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; lends") != std::string::npos;
-			if( at == std::string::npos || lends != (expectedLog[n][1][0] == '1') )
+			std::string section = LogSection(text, expectedLog[n][0]);
+			bool lends = section.find("; lends") != std::string::npos;
+			if( section.empty() || lends != (expectedLog[n][1][0] == '1') )
 			{
 				PRINTF("casts: %s %s\n", expectedLog[n][0], lends ? "lends references" : "doesn't lend references");
 				TEST_FAILED;
@@ -7086,16 +7068,7 @@ static bool TestMathCalls()
 	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string actual = MathCalls::Run(engine, &jit, fail);
 	engine->ShutDownAndRelease();
-	std::string text;
-	if( log )
-	{
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
-	}
+	std::string text = log ? ReadLog(log) : std::string();
 
 	SJITStatistics stats = jit.GetStatistics();
 	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
@@ -7389,16 +7362,7 @@ static bool TestFunctionPointers()
 		engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 		std::string actual = Run(engine, &jit, fail);
 		engine->ShutDownAndRelease();
-		std::string text;
-		if( log )
-		{
-			char buf[4096];
-			size_t len;
-			rewind(log);
-			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-				text.append(buf, len);
-			fclose(log);
-		}
+		std::string text = log ? ReadLog(log) : std::string();
 
 		SJITStatistics stats = jit.GetStatistics();
 		if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 || stats.codeSize != 0 )
@@ -7635,16 +7599,7 @@ static bool TestFloatReturns()
 	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
 	std::string actual = Run(engine, &jit, fail);
 	engine->ShutDownAndRelease();
-	std::string text;
-	if( log )
-	{
-		char buf[4096];
-		size_t len;
-		rewind(log);
-		while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
-			text.append(buf, len);
-		fclose(log);
-	}
+	std::string text = log ? ReadLog(log) : std::string();
 
 	SJITStatistics stats = jit.GetStatistics();
 	if( stats.functionsCompiled == 0 || stats.functionsFailed != 0 )
@@ -7662,11 +7617,9 @@ static bool TestFloatReturns()
 		const char *checks[][2] = { { "float sumF()", "1" }, { "double sumD()", "1" }, { "double chained()", "1" }, { "float generic()", "0" } };
 		for( asUINT n = 0; n < sizeof(checks) / sizeof(checks[0]); n++ )
 		{
-			std::string head = std::string("; ---- ") + checks[n][0] + " ----";
-			size_t at = text.find(head);
-			size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
-			bool found = at != std::string::npos && text.substr(at, end == std::string::npos ? std::string::npos : end - at).find("; float in a register") != std::string::npos;
-			if( at == std::string::npos || found != (checks[n][1][0] == '1') )
+			std::string section = LogSection(text, checks[n][0]);
+			bool found = section.find("; float in a register") != std::string::npos;
+			if( section.empty() || found != (checks[n][1][0] == '1') )
 			{
 				PRINTF("float returns: %s %s\n", checks[n][0], found ? "takes a float from a vector register" : "doesn't take a float from a vector register");
 				TEST_FAILED;
