@@ -65,6 +65,7 @@ using namespace AngelScript;
 // JIT compiler attached, so the whole suite runs with native code
 asIScriptEngine *CreateEngineWithJit(asDWORD version = ANGELSCRIPT_VERSION);
 void             ReleaseJitCompiler();
+asUINT           GetJitFunctionsFailed();
 #define asCreateScriptEngine(...) CreateEngineWithJit(__VA_ARGS__)
 #endif
 

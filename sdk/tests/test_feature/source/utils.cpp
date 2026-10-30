@@ -599,6 +599,13 @@ asIScriptEngine *CreateEngineWithJit(asDWORD version)
 	return engine;
 }
 
+// The functions that the JIT compiler of the tests couldn't compile, which the VM
+// executes instead, so that the tests still pass
+asUINT GetJitFunctionsFailed()
+{
+	return g_jit ? g_jit->GetStatistics().functionsFailed : 0;
+}
+
 // Must be called after all engines have been released
 void ReleaseJitCompiler()
 {

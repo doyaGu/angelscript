@@ -480,6 +480,15 @@ int allTests()
 	// been removed so we don't get false positives for memory leaks.
 	g_engine.en = asCreateScriptEngine(ANGELSCRIPT_VERSION);
 
+#ifdef AS_TEST_JIT
+	// The functions that the JIT compiler failed to compile would pass in the VM
+	if( GetJitFunctionsFailed() )
+	{
+		PRINTF("JIT: %u functions failed to compile\n", GetJitFunctionsFailed());
+		goto failed;
+	}
+#endif
+
 //succeed:
 	PRINTF("--------------------------------------------\n");
 	PRINTF("All of the tests passed with success.\n\n");
