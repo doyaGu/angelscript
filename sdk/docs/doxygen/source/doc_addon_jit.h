@@ -158,18 +158,18 @@ reference is added and released for them. On x86 and AArch64 the generated code
 counts the references of the script classes itself like the engine does, and only
 calls their AddRef and Release when an object loses its last reference or is
 resurrected while it is being destroyed. The casts of handles add the reference to
-an object of the class cast to in place too, after comparing its class with the one
-looked up when the function was compiled. For the casts to base classes and
-interfaces, and in the code generated ahead of time, the ids of the types are
-compared instead of looking up the type of the id in the engine, which takes a
-lock. A cast from a local variable that isn't used again before the variable that
+an object in place too, after comparing its class with those of the module that
+derive from the class cast to or implement the interface, up to four, which are
+looked up when the function is compiled. For the casts of the objects of other
+classes, and in the code generated ahead of time, the ids of the types are compared
+instead of looking up the type of the id in the engine, which takes a lock. A cast from a local variable that isn't used again before the variable that
 holds the result is released lends the reference of the variable cast from instead
 of adding one, as long as nothing in between calls anything but the methods compiled
 in place that neither call nor release anything. The result gets a reference of its
 own only where the VM may see it, at a suspension, an exception, or a return to the
 VM. On an Apple M5 that takes a loop casting a handle of an interface to the class
-of its object from 10.1 to 1.4 nanoseconds per iteration, and to a base class or
-another interface from about 10.5 to 2.5. The default assignment of a script
+of its object from 10.1 to 1.4 nanoseconds per iteration, and so does a loop casting
+it to a base class or another interface, which took about 10.5. The default assignment of a script
 class without a destructor, garbage collection, or members other than primitives and
 enums copies the bytes of the members in place when both objects are of the class of
 the variable assigned to, instead of the engine's assignment looking at each member.

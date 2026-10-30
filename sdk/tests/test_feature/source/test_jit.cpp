@@ -6568,15 +6568,17 @@ namespace GenericCalls
 	}
 }
 
-// The casts add the reference to the objects of the class cast to in place, and
-// call JIT_Cast for the others, see CJITByteCode::FindInPlaceRefCounts. The objects
+// The casts add the reference to the objects of the classes that can be cast in
+// place, and call JIT_Cast for the others, see CJITByteCode::FindInPlaceRefCounts. The objects
 // must be destroyed as often as with the VM, and the casts to the base classes and
 // the interfaces must find the same classes, also in the methods compiled in place,
 // and in the destructors, where the object casts a handle of itself. The casts from
 // local variables lend their references, see CJITByteCode::FindLentCasts, unless the
 // variable is written before the result is released, and the result must get a
 // reference of its own where the VM sees it, at the suspensions, the exceptions, and
-// the calls made in place of the methods compiled in place
+// the calls made in place of the methods compiled in place. The casts check for the
+// classes of the module in place, unless there are many, and the classes of other
+// modules implementing the shared interfaces are found by the helper
 namespace Casts
 {
 	static int lines = 0;
@@ -6694,6 +6696,32 @@ namespace Casts
 		"  @s = null;                                                             \n"
 		"  return n * 1000 + g_destroyed;                                         \n"
 		"}                                                                        \n"
+		"shared interface IBase {}                                                \n"
+		"shared interface IShared {}                                              \n"
+		"import IBase@ makeFar() from 'other';                                    \n"
+		"class Near : IBase, IShared {}                                           \n"
+		"interface IMany {}                                                       \n"
+		"class M1 : IBase, IMany {}                                               \n"
+		"class M2 : IBase, IMany {}                                               \n"
+		"class M3 : IBase, IMany {}                                               \n"
+		"class M4 : IBase, IMany {}                                               \n"
+		"class M5 : IBase, IMany {}                                               \n"
+		"int sharedCasts()                                                        \n"
+		"{                                                                        \n"
+		"  array<IBase@> list = { Near(), makeFar(), M1(), M2(), M3(), M4(), M5(), null }; \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 10; k++ )                                          \n"
+		"    for( uint i = 0; i < list.length(); i++ )                           \n"
+		"    {                                                                    \n"
+		"      if( cast<IShared>(list[i]) !is null ) s += 1;                      \n"
+		"      if( cast<IMany>(list[i]) !is null ) s += 100;                      \n"
+		"      if( cast<Near>(list[i]) !is null ) s += 10000;                     \n"
+		"      IBase@ b = list[i];                                                \n"
+		"      IShared@ x = cast<IShared>(b);                                     \n"
+		"      if( x !is null ) s += 1000000;                                     \n"
+		"    }                                                                    \n"
+		"  return s;                                                              \n"
+		"}                                                                        \n"
 		"int nullHandle()                                                         \n"
 		"{                                                                        \n"
 		"  IShape@ none;                                                          \n"
@@ -6701,6 +6729,14 @@ namespace Casts
 		"  for( int k = 0; k < 10; k++ ) s += count(none) + (cast<Circle>(none) is null ? 1 : 0); \n"
 		"  return s;                                                              \n"
 		"}                                                                        \n";
+
+	// A class of another module that implements the shared interfaces, which the casts
+	// in place don't check for
+	static const char *otherScript =
+		"shared interface IBase {}                                                \n"
+		"shared interface IShared {}                                              \n"
+		"class Far : IBase, IShared {}                                            \n"
+		"IBase@ makeFar() { return Far(); }                                       \n";
 
 	static CBufferedOutStream msgs;
 
@@ -6717,16 +6753,19 @@ namespace Casts
 		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
 			TEST_FAILED;
 
+		asIScriptModule *other = engine->GetModule("other", asGM_ALWAYS_CREATE);
+		other->AddScriptSection("other", otherScript);
 		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
 		mod->AddScriptSection("test", script);
-		if( mod->Build() < 0 )
+		if( other->Build() < 0 || mod->Build() < 0 || mod->BindAllImportedFunctions() < 0 )
 		{
 			PRINTF("%s", msgs.buffer.c_str());
 			TEST_FAILED;
 			return "";
 		}
 
-		const char *decls[] = { "int classes()", "int kept()", "int nullHandle()", "int lentLoop()", "int lentWritten()", "int lentException()" };
+		const char *decls[] = { "int classes()", "int kept()", "int nullHandle()", "int lentLoop()", "int lentWritten()", "int lentException()",
+		                        "int sharedCasts()" };
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
 		for( int pass = 0; pass < 4; pass++ )
@@ -6772,6 +6811,7 @@ static bool TestCasts()
 	engine->ShutDownAndRelease();
 	if( expected.find("int classes(): 166300013, 0 lines") == std::string::npos || expected.find("int nullHandle(): 10, 0 lines") == std::string::npos ||
 	    expected.find("int lentWritten(): 4510010, 0 lines") == std::string::npos || expected.find(" 0 suspensions") == std::string::npos ||
+	    expected.find("int sharedCasts(): 20105020, 0 lines") == std::string::npos ||
 	    expected.find("lines, 0 suspensions") == std::string::npos )
 	{
 		PRINTF("casts:\n%s", expected.c_str());

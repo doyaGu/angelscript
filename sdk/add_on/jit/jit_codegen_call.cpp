@@ -3,6 +3,7 @@
 
 // The engine internals are only inspected at compile time, to know the object
 // type flags and the calling conventions of the registered functions
+#include "as_module.h"
 #include "as_objecttype.h"
 #include "as_scriptengine.h"
 #include "as_scriptfunction.h"
@@ -3243,6 +3244,37 @@ bool CJITCodeGen::EmitGenericCall(asUINT idx, const SJITGenericInfo *info)
 	return true;
 }
 
+// The classes whose objects asBC_Cast to the type checks for in place: those of the
+// module of the function that derive from the class cast to or implement the
+// interface, if there are only a few, otherwise the class cast to, as the casts that
+// go to other classes are made by the helper. The objects of a class are the same
+// pointer for the classes it derives from and the interfaces it implements. The
+// classes of the module exist as long as the code of its functions
+static const asUINT JIT_CAST_CLASSES = 4;
+static void FindCastClasses(asCScriptFunction *func, int typeId, std::vector<asCObjectType*> &classes)
+{
+	classes.clear();
+	asCObjectType *to = func->engine->GetObjectTypeFromTypeId(typeId);
+	if( to == 0 )
+		return;
+	if( func->module )
+	{
+		const asCArray<asCObjectType*> &types = func->module->m_classTypes;
+		for( asUINT n = 0; n < types.GetLength() && classes.size() <= JIT_CAST_CLASSES; n++ )
+		{
+			asCObjectType *cls = types[n];
+			if( (cls->flags & asOBJ_SCRIPT_OBJECT) && !(cls->flags & asOBJ_ABSTRACT) && !cls->IsInterface() &&
+			    (to->IsInterface() ? cls->Implements(to) : cls->DerivesFrom(to)) )
+				classes.push_back(cls);
+		}
+		if( classes.size() <= JIT_CAST_CLASSES )
+			return;
+	}
+	classes.clear();
+	if( !to->IsInterface() )
+		classes.push_back(to);
+}
+
 // Resolves a behaviour that takes nothing but the object, like AddRef and Release,
 // to a function that the generated code can call instead of going through
 // CallObjectMethod of the engine. The same restrictions as for EmitDirectSystemCall
@@ -3726,15 +3758,16 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 
 	case asBC_Cast:
 		{
-			// The object of the class cast to gets its reference in place, see
-			// CJITByteCode::FindInPlaceRefCounts, or is lent the reference of the
-			// variable cast from, see CJITByteCode::FindLentCasts. The class is looked
-			// up here, and JIT_Cast looks at the interfaces and the base classes of the
-			// others, or JIT_CastObject where the reference is lent
-			asCObjectType *to = 0;
+			// The objects of the classes that can be cast to the class or interface get
+			// their reference in place, see CJITByteCode::FindInPlaceRefCounts, or are
+			// lent the reference of the variable cast from, see
+			// CJITByteCode::FindLentCasts. The classes are looked up here, see
+			// FindCastClasses, and JIT_Cast looks at the interfaces and the base classes
+			// of the others, or JIT_CastObject where the reference is lent
+			std::vector<asCObjectType*> classes;
 			if( instr.flags & JIT_INSTR_REFCOUNT )
-				to = m_code->GetFunction()->engine->GetObjectTypeFromTypeId(int(asBC_DWORDARG(bc)));
-			bool inPlace = to && !to->IsInterface();
+				FindCastClasses(m_code->GetFunction(), int(asBC_DWORDARG(bc)), classes);
+			bool inPlace = !classes.empty();
 			bool lent = (instr.flags & JIT_INSTR_LEND) && m_frame == 0;
 			if( lent )
 				m_uc.mov(m_lentOwned[asUINT(m_code->GetLentFree(idx))], Imm(0));
@@ -3755,7 +3788,11 @@ bool CJITCodeGen::EmitObjectOp(asUINT idx)
 				Gp type = m_uc.new_gp_ptr();
 				Label other = m_uc.new_label();
 				m_uc.load(type, Addr(obj, layout.objectType));
-				m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(to))));
+				Label match = m_uc.new_label();
+				for( asUINT c = 0; c + 1 < classes.size(); c++ )
+					m_uc.j(match, cmp_eq(type, PtrConst(asPWORD(classes[c]))));
+				m_uc.j(other, cmp_ne(type, PtrConst(asPWORD(classes.back()))));
+				m_uc.bind(match);
 				if( !lent )
 					EmitScriptAddRef(idx, obj);
 				m_uc.store_zero_reg(RegsField(offsetof(asSVMRegisters, objectType)));
