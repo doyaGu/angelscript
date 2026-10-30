@@ -697,6 +697,14 @@ RetObj.2       0.138    0.059      0.060    0.036     0.078
 RetObj.3       0.040    0.004      0.004    0.004     0.009
 </pre>
 
+The test_jit_bench project in /sdk/tests/test_jit_bench measures smaller loops
+written like the scripts of applications, which use what the tests of
+test_performance don't, e.g. the calls of registered functions taking and returning
+floats, the generic calling convention, the methods called on the elements of
+arrays, script-class vectors, the casts to base classes and interfaces, and the
+calls through function pointers. It prints the nanoseconds per iteration with the
+VM and with the JIT compiler, and fails if their results differ.
+
 \section doc_addon_jit_limits Known limitations
 
  - Imported functions, and the delegates of interface methods and of registered
