@@ -2679,7 +2679,14 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			}
 			break;
 		case ARG_F32:
+			// AArch64 needs a real S register here. Float32x1 is represented as a
+			// 64-bit vector register by AsmJit, which makes spilled arguments write
+			// eight bytes into the four-byte stack slots used by the Apple ABI.
+#if defined(ASMJIT_UJIT_AARCH64)
+			vecArgs[n] = m_uc.cc->new_vec_s();
+#else
 			vecArgs[n] = m_uc.new_vec128_f32x1();
+#endif
 			if( args[n].valueSize )
 			{
 				valueObjs[n] = m_uc.new_gp_ptr();
