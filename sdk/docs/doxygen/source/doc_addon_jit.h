@@ -831,16 +831,17 @@ Likewise a method compiled in place that neither calls nor releases anything
 borrows the reference of the handle it is called on when the handle was read from
 memory, like an element of an array of handles in a loop such as
 'for( uint i = 0; i < list.length(); i++ ) list[i].update(dt);'. On an Apple M5
-that loop takes 2.6 nanoseconds per element instead of 4.4. The handle gets a
-reference of its own where the VM takes over or another class's method is called
-instead. The arguments are still pushed on the stack of the VM, but the function
-compiled in place takes those of its parameters that it holds in registers, and the
-pointer of the object of a method, from the registers they were pushed from. An
-object returned through the object register by a function compiled in place, and
-an object created by a constructor compiled in place and returned by the factory,
-are passed on in a register too, without going through the object register of the
-VM. That takes the loop adding script-class 2D vectors from 11.6 to 7.9 nanoseconds
-per iteration on an Apple M5.
+that loop takes 2.6 nanoseconds per element instead of 4.4. The methods that return
+a value are lent the reference the same way, as in 's += list[i].area();'. The
+handle gets a reference of its own where the VM takes over or another class's
+method is called instead. The arguments are still pushed on the stack of the VM,
+but the function compiled in place takes those of its parameters that it holds in
+registers, and the pointer of the object of a method, from the registers they were
+pushed from. An object returned through the object register by a function compiled
+in place, and an object created by a constructor compiled in place and returned by
+the factory, are passed on in a register too, without going through the object
+register of the VM. That takes the loop adding script-class 2D vectors from 11.6 to
+7.9 nanoseconds per iteration on an Apple M5.
 \ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
 compiled in place.
 

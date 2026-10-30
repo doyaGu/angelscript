@@ -2389,14 +2389,15 @@ CJITByteCode *CJITByteCode::FindInlinee(asUINT callIdx, asCScriptFunction *func)
 // into a temporary variable for a method compiled in place and released after it,
 // like the compiler does for a method called on an element:
 //
-//   RDSPtr; RefCpyV vT; CALLINTF; JitEntry; FREE vA; FREE vT
+//   RDSPtr; RefCpyV vT; CALLINTF; JitEntry; CpyRtoV4 vR; FREE vA; FREE vT
 //
 // The memory holds a reference of its own, which keeps the object alive while
 // nothing is released, so the copy lends that reference to the call instead of
 // adding one, and the FREE only clears the variable. The methods compiled in place
 // must not call or release anything then, which also keeps the memory from being
-// modified. Nothing but the releases of other variables may be in between the call
-// and the FREE, which don't read the variable. The VM may only see the variable once
+// modified. Nothing but the releases of other variables and the copies of what the
+// method returns to other variables may be in between the call and the FREE, which
+// neither read the variable nor release anything. The VM may only see the variable once
 // it holds a reference of its own: the code that hands the inlined method to the VM
 // adds one, and so does the call of the method made in its place, for which the FREE
 // releases it, as it does when the VM returns to the function between the call and
@@ -2421,11 +2422,14 @@ void CJITByteCode::FindLentRefs()
 			continue;
 
 		// The handles of other variables may be released in between, e.g. the one that
-		// keeps an array alive while the method is called on its element
+		// keeps an array alive while the method is called on its element, and the
+		// value or the object that the method returns stored in another variable
 		int var = asBC_SWORDARG0(copy.bc);
 		asUINT f = n + 2;
 		while( f < m_instrs.size() && !(m_instrs[f].flags & (JIT_INSTR_BAIL | JIT_INSTR_DEAD)) &&
-		       (m_instrs[f].op == asBC_JitEntry || (m_instrs[f].op == asBC_FREE && asBC_SWORDARG0(m_instrs[f].bc) != var)) )
+		       (m_instrs[f].op == asBC_JitEntry ||
+		        ((m_instrs[f].op == asBC_FREE || m_instrs[f].op == asBC_CpyRtoV4 || m_instrs[f].op == asBC_CpyRtoV8 ||
+		          m_instrs[f].op == asBC_STOREOBJ) && asBC_SWORDARG0(m_instrs[f].bc) != var)) )
 			f++;
 		if( f >= m_instrs.size() )
 			continue;

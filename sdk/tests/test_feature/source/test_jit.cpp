@@ -3294,7 +3294,7 @@ static bool TestScriptRefCounts()
 // destroyed as often as with the VM, also when the method of another class is called
 // instead, which replaces the element that it is called on, when the method raises an
 // exception, when the element is null, and when the VM executes the method of the
-// other class and returns to the function
+// other class and returns to the function, and for the methods that return values
 namespace LentRefs
 {
 	static const char *script =
@@ -3308,6 +3308,10 @@ namespace LentRefs
 		"  ~Base() { g_destroyed++; }                                             \n"
 		"  void up() { v += 1; }                                                  \n"
 		"  void div() { v += 10 / g_zero; }                                       \n"
+		"  int get() { return v; }                                                \n"
+		"  float half() { return v * 0.5f; }                                      \n"
+		"  double third() { return v / 3.0; }                                     \n"
+		"  Base@ self() { return this; }                                          \n"
 		"}                                                                        \n"
 		// The class seen first is compiled in place, see SetProfileThreshold, and
 		// the method of the other class replaces the element that it is called on
@@ -3316,10 +3320,12 @@ namespace LentRefs
 		"  int v;                                                                 \n"
 		"  ~Item() { g_destroyed++; }                                             \n"
 		"  void up() { v += 1; }                                                  \n"
+		"  int bump() { return ++v; }                                             \n"
 		"}                                                                        \n"
 		"class SwapItem : Item                                                    \n"
 		"{                                                                        \n"
 		"  void up() override { v += 100; @g_items[1] = Item(); }                 \n"
+		"  int bump() override { @g_items[1] = Item(); return v + 100; }          \n"
 		"}                                                                        \n"
 		"int normal()                                                             \n"
 		"{                                                                        \n"
@@ -3358,6 +3364,42 @@ namespace LentRefs
 		"  g_list.resize(0);                                                      \n"
 		"  return s * 1000 + g_destroyed;                                         \n"
 		"}                                                                        \n"
+		"int returned()                                                           \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  g_list.insertLast(Base()); g_list.insertLast(Base());                  \n"
+		"  g_list[0].v = 3; g_list[1].v = 4;                                      \n"
+		"  int s = 0, k = 0;                                                      \n"
+		"  float f = 0;                                                           \n"
+		"  double d = 0;                                                          \n"
+		"  for( int n = 0; n < 50; n++ )                                         \n"
+		"    for( uint i = 0; i < g_list.length(); i++ )                          \n"
+		"    {                                                                    \n"
+		"      s += g_list[i].get();                                              \n"
+		"      f += g_list[i].half();                                             \n"
+		"      d += g_list[i].third();                                            \n"
+		"      Base@ b = g_list[i].self();                                        \n"
+		"      if( b is g_list[i] ) k++;                                          \n"
+		"    }                                                                    \n"
+		"  g_list.resize(0);                                                      \n"
+		"  return (s + int(f) + int(d) + k) * 1000 + g_destroyed;                 \n"
+		"}                                                                        \n"
+		"int replacedReturns()                                                    \n"
+		"{                                                                        \n"
+		"  g_destroyed = 0;                                                       \n"
+		"  int s = 0;                                                             \n"
+		"  for( int k = 0; k < 200; k++ )                                         \n"
+		"  {                                                                      \n"
+		"    g_items.resize(0);                                                   \n"
+		"    g_items.insertLast(Item());                                          \n"
+		"    if( k < 150 ) g_items.insertLast(Item()); else g_items.insertLast(SwapItem()); \n"
+		"    g_items.insertLast(Item());                                          \n"
+		"    for( uint i = 0; i < g_items.length(); i++ )                         \n"
+		"      s += g_items[i].bump();                                            \n"
+		"  }                                                                      \n"
+		"  g_items.resize(0);                                                     \n"
+		"  return s * 1000 + g_destroyed;                                         \n"
+		"}                                                                        \n"
 		"int nullElement()                                                        \n"
 		"{                                                                        \n"
 		"  g_destroyed = 0;                                                       \n"
@@ -3389,7 +3431,7 @@ namespace LentRefs
 			return "";
 		}
 
-		const char *decls[] = { "int normal()", "int replaced()", "int divide()", "int nullElement()" };
+		const char *decls[] = { "int normal()", "int replaced()", "int divide()", "int nullElement()", "int returned()", "int replacedReturns()" };
 		std::stringstream s;
 		asIScriptContext *ctx = engine->CreateContext();
 		for( int pass = 0; pass < 2; pass++ )
@@ -3439,7 +3481,7 @@ static bool TestLentRefs()
 		FILE *log = tmpfile();
 		CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
 		if( log )
-			jit.SetLogFile(log, "int normal()");
+			jit.SetLogFile(log, "int ");
 		jit.SetProfileThreshold(20);
 		if( tiered )
 			jit.SetCompileThresholds(1000, 1);
@@ -3462,10 +3504,19 @@ static bool TestLentRefs()
 			while( (len = fread(buf, 1, sizeof(buf), log)) > 0 )
 				text.append(buf, len);
 			fclose(log);
-			if( inlines && !tiered && (text.find("; lends") == std::string::npos || text.find("; lent") == std::string::npos) )
+			// The methods returning values lend them too
+			const char *lending[] = { "int normal()", "int returned()" };
+			for( asUINT n = 0; n < sizeof(lending) / sizeof(lending[0]) && inlines && !tiered; n++ )
 			{
-				PRINTF("lent references: the reference of the element isn't lent\n");
-				TEST_FAILED;
+				std::string head = std::string("; ---- ") + lending[n] + " ----";
+				size_t at = text.find(head);
+				size_t end = at == std::string::npos ? at : text.find("; ---- ", at + head.size());
+				std::string section = at == std::string::npos ? "" : text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+				if( section.find("; lends") == std::string::npos || section.find("; lent") == std::string::npos )
+				{
+					PRINTF("lent references: the reference of the element isn't lent in %s\n", lending[n]);
+					TEST_FAILED;
+				}
 			}
 		}
 	}
