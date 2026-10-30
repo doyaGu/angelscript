@@ -286,6 +286,30 @@ static int CallSimpleGeneric(asSVMRegisters *regs, asCContext *ctx, asCScriptFun
 	return popSize;
 }
 
+const SJITGenericLayout &JIT_GetGenericLayout() noexcept
+{
+	static const SJITGenericLayout layout = []()
+	{
+		SJITGenericInfo info;
+		info.func = 0;
+		CJITGeneric gen(0, &info, 0, 0);
+		const char *base = reinterpret_cast<const char*>(&gen);
+		SJITGenericLayout l;
+		l.size           = int(sizeof(CJITGeneric));
+		l.currentObject  = int(reinterpret_cast<const char*>(&gen.currentObject) - base);
+		l.stackPointer   = int(reinterpret_cast<const char*>(&gen.stackPointer) - base);
+		l.objectRegister = int(reinterpret_cast<const char*>(&gen.objectRegister) - base);
+		l.returnVal      = int(reinterpret_cast<const char*>(&gen.returnVal) - base);
+		return l;
+	}();
+	return layout;
+}
+
+void JIT_MakeGeneric(void *mem, const SJITGenericInfo *info) noexcept
+{
+	new(mem) CJITGeneric(info->func->engine, info, 0, 0);
+}
+
 int JIT_CallGeneric(asSVMRegisters *regs, const SJITGenericInfo *info) noexcept
 {
 	asCContext *ctx = GetContext(regs);

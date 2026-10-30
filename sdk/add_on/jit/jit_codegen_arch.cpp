@@ -193,6 +193,11 @@ void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 	m_uc.lea(dst, src);
 }
 
+void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
+{
+	m_uc.lea(dst, slot);
+}
+
 // AsmJit calls the functions out of the reach of a relative call through its address table
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 {
@@ -560,6 +565,13 @@ void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 		m_uc.add(dst, src.base_reg().as<Gp>(), Imm(src.offset_lo32()));
 }
 
+// The slots on the native stack have no base register until the register allocator
+// gives them one, which it does for the address loaded by adr
+void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
+{
+	m_uc.cc->load_address_of(dst, slot);
+}
+
 // bl only reaches 128MB, and the code is usually further away from the functions it
 // calls, so they are called through a register
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
@@ -891,6 +903,11 @@ Mem CJITCodeGen::Addr(const Gp &base, int32_t disp)
 void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 {
 	m_uc.lea(dst, src);
+}
+
+void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
+{
+	m_uc.lea(dst, slot);
 }
 
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)

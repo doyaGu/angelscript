@@ -721,6 +721,11 @@ RetObj.3       0.040    0.004      0.004    0.004     0.009
    functions with asCALL_GENERIC, other than the variadic ones, get an
    asIScriptGeneric that knows where their arguments are and which types they
    have, instead of looking them up for each argument read and value returned.
+   Those whose arguments aren't released after the call and whose returned
+   handle doesn't get a reference are called directly with that interface on the
+   native stack, which takes a loop calling a registered generic function on a
+   float from 8.1 to 6.2 nanoseconds per call on an Apple M5. The rest of the time
+   is spent in the function reading its arguments through the interface.
  - The \ref doc_addon_jit_tiered "deferred functions" are compiled by the thread
    that executes them when they reach a threshold, which waits for the compilation.
    The application can call \c CJITCompiler::CompileDeferred from another thread
@@ -743,8 +748,9 @@ engineering work is:
  - Find an unwind-registration scheme that works with the system unwinder on
    x86-64 macOS, so that direct system calls can be enabled there by default.
  - Extend direct system calls to more native ABI layouts. Complex value types
-   and asCALL_GENERIC deliberately continue to be called through the interfaces
-   of the engine today.
+   continue to be called through the interfaces of the engine today, and so do
+   the asCALL_GENERIC functions whose arguments are released after the call or
+   whose returned handle gets a reference.
  - Avoid synchronous compilation pauses at tier and profile thresholds. The
    application can already compile not-yet-triggered deferred functions in a
    worker thread with \c CJITCompiler::CompileDeferred, but the add-on has no

@@ -1294,7 +1294,8 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 		if( m_options.directSystemCalls && EmitDirectSystemCall(idx, asBC_INTARG(bc)) )
 			break;
 		{
-			SyncForCall(idx);
+			// The interface that the generic functions get reads the information,
+			// which is kept as long as the code
 			SJITGenericInfo *generic = 0;
 			if( m_options.genericInfos )
 			{
@@ -1303,6 +1304,9 @@ bool CJITCodeGen::EmitCall(asUINT idx)
 				if( generic )
 					m_options.genericInfos->push_back(generic);
 			}
+			if( generic && EmitGenericCall(idx, generic) )
+				break;
+			SyncForCall(idx);
 			InvokeNode *call;
 			if( generic )
 			{
@@ -3103,6 +3107,139 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 	m_uc.bind(cont);
 	EmitDematerialize();
 
+	return true;
+}
+
+// Calls a registered function with the generic calling convention directly, like
+// JIT_CallGeneric does, with the interface on the native stack, which is copied from
+// one made for it, see JIT_MakeGeneric. The same restrictions as for
+// EmitDirectSystemCall apply. The functions whose arguments are released after the
+// call, or whose returned handle gets a reference, are left to the helper, see
+// asCContext::CallGeneric, and the methods called on null to the VM, which raises the
+// exception. Returns false if the call isn't made here
+bool CJITCodeGen::EmitGenericCall(asUINT idx, const SJITGenericInfo *info)
+{
+	asCScriptFunction *descr = info->func;
+	asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+	bool method = sysFunc->callConv == ICC_GENERIC_METHOD;
+	if( !m_options.directSystemCalls || (sysFunc->callConv != ICC_GENERIC_FUNC && !method) ||
+	    sysFunc->cleanArgs.GetLength() || sysFunc->returnAutoHandle || FailIfHidden() )
+		return false;
+
+	const SJITInstr &instr = m_code->GetInstructions()[idx];
+	const SJITGenericLayout &layout = JIT_GetGenericLayout();
+	bool retOnStack = descr->DoesReturnOnStack();
+	int argsOff = (method ? AS_PTR_SIZE : 0) + (retOnStack ? AS_PTR_SIZE : 0);
+	Gp obj;
+	if( method )
+	{
+		obj = m_uc.new_gp_ptr();
+		m_uc.load(obj, Stack(0));
+		m_uc.j(BailLabel(idx), test_z(obj));
+	}
+	Gp retPtr;
+	if( retOnStack )
+	{
+		retPtr = m_uc.new_gp_ptr();
+		m_uc.load(retPtr, Stack(method ? AS_PTR_SIZE : 0));
+	}
+
+	// The function may raise a script exception, suspend the context, or inspect the
+	// variables through the debug interface, see EmitDirectSystemCall
+	StoreDirtySlots(m_code->GetDirtyMask(idx));
+	SyncStack();
+	EmitMaterialize();
+	SetPC(instr.pos);
+
+	// The interface of the function, with the object and the arguments. The calls of
+	// the function share its slot
+	if( !m_hasGenericStack )
+	{
+		m_genericStack = m_uc.new_stack(uint32_t(layout.size), 16);
+		m_hasGenericStack = true;
+	}
+	std::vector<asBYTE> proto(size_t(layout.size));
+	JIT_MakeGeneric(&proto[0], info);
+	Gp args = m_uc.new_gp_ptr();
+	Lea(args, Stack(argsOff));
+	Gp t = m_uc.new_gp_ptr();
+	for( int offset = 0; offset + PTR_BYTES <= layout.size; offset += PTR_BYTES )
+	{
+		Mem slot = m_genericStack.clone_adjusted(offset);
+		asPWORD value = 0;
+		memcpy(&value, &proto[size_t(offset)], PTR_BYTES);
+		if( offset == layout.stackPointer )
+			m_uc.store(slot, args);
+		else if( offset == layout.currentObject && method )
+			m_uc.store(slot, obj);
+		else if( value == 0 )
+			m_uc.store_zero_reg(slot);
+		else
+		{
+			m_uc.mov(t, Imm(int64_t(value)));
+			m_uc.store(slot, t);
+		}
+	}
+
+	Mem callingFunc = ContextField(JIT_GetContextLayout().callingSystemFunction);
+	m_uc.store(callingFunc, PtrConst(asPWORD(descr)));
+	Gp gen = m_uc.new_gp_ptr();
+	LeaStack(gen, m_genericStack);
+	InvokeNode *call = Invoke((const void*)FuncPtrToUInt(sysFunc->func), FuncSignature::build<void, void*>());
+	call->set_arg(0, gen);
+	m_uc.store_zero_reg(callingFunc);
+
+	// The value register gets the value returned, and the object register the object,
+	// like asCContext::CallGeneric does
+	bool vrLive = m_code->IsVRLiveAfter(idx);
+	if( vrLive && Is64Bit() )
+	{
+		Gp value = m_uc.new_gp64();
+		m_uc.load_u64(value, m_genericStack.clone_adjusted(layout.returnVal));
+		StoreVR64(value);
+	}
+	else if( vrLive )
+	{
+		Gp lo = m_uc.new_gp32();
+		Gp hi = m_uc.new_gp32();
+		m_uc.load_u32(lo, m_genericStack.clone_adjusted(layout.returnVal));
+		m_uc.load_u32(hi, m_genericStack.clone_adjusted(layout.returnVal + 4));
+		StoreVR64(lo, hi);
+	}
+	const asCDataType &rt = descr->returnType;
+	if( (rt.IsObject() || rt.IsFuncdef()) && !rt.IsReference() && !retOnStack )
+	{
+		Gp returned = m_uc.new_gp_ptr();
+		m_uc.load(returned, m_genericStack.clone_adjusted(layout.objectRegister));
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectRegister)), returned);
+		m_uc.store(RegsField(offsetof(asSVMRegisters, objectType)), PtrConst(asPWORD(rt.GetTypeInfo())));
+	}
+	PopStack((sysFunc->paramSize + argsOff) * 4);
+
+	// Exceptions, suspend requests, and line callbacks are handled by the helper
+	Gp flag = m_uc.new_gp32();
+	m_uc.load_u8(flag, RegsField(offsetof(asSVMRegisters, doProcessSuspend)));
+	Label check = m_uc.new_label();
+	Label cont = m_uc.new_label();
+	m_uc.j(check, test_nz(flag));
+	BaseNode *cold = BeginCold(check);
+	SyncStack();
+	if( vrLive )
+		SyncVR();
+	InvokeNode *after = Invoke((const void*)JIT_AfterDirectCall, FuncSignature::build<int, asSVMRegisters*, int, void*>());
+	Gp r = m_uc.new_gp32();
+	SetRegsArg(after, 0);
+	after->set_arg(1, Imm(descr->GetId()));
+	if( retOnStack )
+		after->set_arg(2, retPtr);
+	else
+		after->set_arg(2, Imm(0));
+	after->set_ret(0, r);
+	EmitLeaveIf(r);
+	ReloadLiveSlots(idx);
+	EndCold(cold, cont);
+	m_uc.bind(cont);
+	EmitDematerialize();
 	return true;
 }
 

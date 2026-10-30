@@ -156,6 +156,24 @@ SJITGenericInfo *JIT_CreateGenericInfo(asCScriptFunction *func);
 // asBC_CALLSYS of the function of the information, like JIT_CallSystem
 int    JIT_CallGeneric(asSVMRegisters *regs, const SJITGenericInfo *info) noexcept;
 
+// The generic interface that JIT_CallGeneric passes to the functions, which the
+// generated code makes on the native stack instead to call them directly: its size
+// and where its members are, in bytes
+struct SJITGenericLayout
+{
+	int size;
+	int currentObject;  // void*, the object of a method
+	int stackPointer;   // asDWORD*, the arguments
+	int objectRegister; // void*, the object returned
+	int returnVal;      // asQWORD, the value returned
+};
+const SJITGenericLayout &JIT_GetGenericLayout() noexcept;
+
+// Makes the interface for the function of the information, without an object and
+// arguments, in the memory of the size of the layout. Its destructor does nothing,
+// so its copies need not be destroyed
+void   JIT_MakeGeneric(void *mem, const SJITGenericInfo *info) noexcept;
+
 // Kinds of calls handled by JIT_CallScript
 enum EJITCallKind
 {

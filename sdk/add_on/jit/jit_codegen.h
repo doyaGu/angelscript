@@ -227,6 +227,9 @@ protected:
 	int  FrameSlot(int var) const;
 	int  FreshSlot(asUINT idx) const;
 	void EmitFrameObject(const Gp &obj, int slot, asCObjectType *type);
+	bool EmitGenericCall(asUINT idx, const SJITGenericInfo *info);
+	Mem  m_genericStack;     // the slot of the generic interface, see EmitGenericCall
+	bool m_hasGenericStack = false;
 	void StoreFrameObjectHeader(const Gp &base, int offset, asCObjectType *type, bool changing);
 	void EmitFrameArena();
 
@@ -284,6 +287,7 @@ protected:
 	Mem  PtrElement(const Gp &array, const Gp &index);
 	Mem  Addr(const Gp &base, int32_t disp);
 	void Lea(const Gp &dst, const Mem &src);
+	void LeaStack(const Gp &dst, const Mem &slot); // the address of a slot of new_stack
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void AddReturn(asmjit::FuncDetail &detail, int index, asmjit::TypeId type);
