@@ -198,6 +198,11 @@ void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
 	m_uc.lea(dst, slot);
 }
 
+CJITCodeGen::Vec CJITCodeGen::FloatArg(const Vec &v)
+{
+	return v;
+}
+
 // AsmJit calls the functions out of the reach of a relative call through its address table
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
 {
@@ -572,6 +577,13 @@ void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
 	m_uc.cc->load_address_of(dst, slot);
 }
 
+// UniCompiler holds a float in a 64bit vector register, which the calls of functions
+// taking or returning floats don't accept, so they get the 32bit view of it
+CJITCodeGen::Vec CJITCodeGen::FloatArg(const Vec &v)
+{
+	return v.s();
+}
+
 // bl only reaches 128MB, and the code is usually further away from the functions it
 // calls, so they are called through a register
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)
@@ -908,6 +920,11 @@ void CJITCodeGen::Lea(const Gp &dst, const Mem &src)
 void CJITCodeGen::LeaStack(const Gp &dst, const Mem &slot)
 {
 	m_uc.lea(dst, slot);
+}
+
+CJITCodeGen::Vec CJITCodeGen::FloatArg(const Vec &v)
+{
+	return v;
 }
 
 InvokeNode *CJITCodeGen::Invoke(const void *fn, const FuncSignature &sig)

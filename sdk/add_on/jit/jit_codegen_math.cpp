@@ -831,9 +831,9 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			Vec b = LoadF32(a2);
 			Vec r = m_uc.new_vec128_f32x1();
 			InvokeNode *call = Invoke((const void*)JIT_MODf, FuncSignature::build<float, float, float>());
-			call->set_arg(0, a);
-			call->set_arg(1, b);
-			call->set_ret(0, r);
+			call->set_arg(0, FloatArg(a));
+			call->set_arg(1, FloatArg(b));
+			call->set_ret(0, FloatArg(r));
 			CommitF32(a0, r);
 		}
 		break;
@@ -899,8 +899,8 @@ bool CJITCodeGen::EmitFloatMath(asUINT idx)
 			Gp r = m_uc.new_gp32();
 			SetRegsArg(call, 0);
 			call->set_arg(1, dst);
-			call->set_arg(2, a);
-			call->set_arg(3, b);
+			call->set_arg(2, FloatArg(a));
+			call->set_arg(3, FloatArg(b));
 			call->set_ret(0, r);
 			ReloadCachedSlot(a0);
 			EmitLeaveIf(r);
@@ -1382,7 +1382,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 				Vec r = m_uc.new_vec128_f32x1();
 				InvokeNode *call = Invoke((const void*)JIT_uTOf, FuncSignature::build<float, asUINT>());
 				call->set_arg(0, x);
-				call->set_ret(0, r);
+				call->set_ret(0, FloatArg(r));
 				CommitF32(a0, r);
 			}
 			else
@@ -1419,7 +1419,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 					call = Invoke((const void*)JIT_fTOu, FuncSignature::build<asUINT, float>());
 				else
 					call = Invoke((const void*)JIT_dTOu, FuncSignature::build<asUINT, double>());
-				call->set_arg(0, x);
+				call->set_arg(0, instr.op == asBC_fTOu ? FloatArg(x) : x);
 				call->set_ret(0, r);
 				Commit32(a0, r);
 			}
@@ -1566,7 +1566,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 				instr.op == asBC_fTOi64 ? FuncSignature::build<asINT64, float>() : FuncSignature::build<asINT64, double>());
 			Gp lo = m_uc.new_gp32();
 			Gp hi = m_uc.new_gp32();
-			call->set_arg(0, x);
+			call->set_arg(0, instr.op == asBC_fTOi64 ? FloatArg(x) : x);
 			call->set_ret(0, lo);
 			call->set_ret(1, hi);
 			m_uc.store_u32(Var(a0), lo);
@@ -1585,7 +1585,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 			{
 				Vec x = LoadF32(a1);
 				call = Invoke((const void*)JIT_fTOu64, FuncSignature::build<asQWORD, float>());
-				call->set_arg(0, x);
+				call->set_arg(0, FloatArg(x));
 			}
 			else
 			{
@@ -1603,7 +1603,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 				instr.op == asBC_fTOu64 ? FuncSignature::build<asQWORD, float>() : FuncSignature::build<asQWORD, double>());
 			Gp lo = m_uc.new_gp32();
 			Gp hi = m_uc.new_gp32();
-			call->set_arg(0, x);
+			call->set_arg(0, instr.op == asBC_fTOu64 ? FloatArg(x) : x);
 			call->set_ret(0, lo);
 			call->set_ret(1, hi);
 			m_uc.store_u32(Var(a0), lo);
@@ -1645,7 +1645,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 			if( instr.op == asBC_i64TOf )
 			{
 				Vec r = DstF32(a0);
-				call->set_ret(0, r);
+				call->set_ret(0, FloatArg(r));
 				CommitF32(a0, r);
 			}
 			else
@@ -1667,7 +1667,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 				Vec r = DstF32(a0);
 				InvokeNode *call = Invoke((const void*)JIT_u64TOf, FuncSignature::build<float, asQWORD>());
 				call->set_arg(0, x);
-				call->set_ret(0, r);
+				call->set_ret(0, FloatArg(r));
 				CommitF32(a0, r);
 			}
 			else
@@ -1694,7 +1694,7 @@ bool CJITCodeGen::EmitConversion(asUINT idx)
 			if( instr.op == asBC_u64TOf )
 			{
 				Vec r = DstF32(a0);
-				call->set_ret(0, r);
+				call->set_ret(0, FloatArg(r));
 				CommitF32(a0, r);
 			}
 			else

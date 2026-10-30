@@ -288,6 +288,7 @@ protected:
 	Mem  Addr(const Gp &base, int32_t disp);
 	void Lea(const Gp &dst, const Mem &src);
 	void LeaStack(const Gp &dst, const Mem &slot); // the address of a slot of new_stack
+	Vec  FloatArg(const Vec &v); // a float as an argument or return value of a call
 	void SetSignBit(const Gp &r);
 	void AddVRReturn(asmjit::FuncDetail &detail);
 	void AddReturn(asmjit::FuncDetail &detail, int index, asmjit::TypeId type);

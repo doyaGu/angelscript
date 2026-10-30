@@ -1534,8 +1534,8 @@ void CJITCodeGen::EmitMathCall(asUINT idx)
 	if( rounding && !CanRoundInPlace() )
 	{
 		InvokeNode *call = Invoke((const void*)math.func, math.f64 ? FuncSignature::build<double, double>() : FuncSignature::build<float, float>());
-		call->set_arg(0, arg);
-		call->set_ret(0, ret);
+		call->set_arg(0, math.f64 ? arg : FloatArg(arg));
+		call->set_ret(0, math.f64 ? ret : FloatArg(ret));
 	}
 	else switch( math.op )
 	{
