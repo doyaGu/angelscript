@@ -1578,12 +1578,13 @@ void CJITCodeGen::EmitIndexer(asUINT idx)
 		EmitLengthQuery(idx, indexer);
 		return;
 	}
-	Gp obj   = m_uc.new_gp_ptr();
+	// The object and the index are taken from the registers they were pushed from
+	// when they still hold them, see SPushedValue
+	Gp obj   = PushedPtr(0);
 	Gp index = m_uc.new_gp_ptr();
 	Gp buf   = m_uc.new_gp_ptr();
 	Gp count = m_uc.new_gp32();
-	m_uc.load(obj, Stack(0));
-	m_uc.load_u32(index, Stack(AS_PTR_SIZE));
+	Pushed32(index.r32(), AS_PTR_SIZE);
 	m_uc.j(bail, test_z(obj));
 	m_uc.load(buf, Addr(obj, indexer.layout.bufferOffset));
 	m_uc.j(bail, test_z(buf));
@@ -2037,10 +2038,9 @@ void CJITCodeGen::EmitInPlaceConstruct(asUINT idx)
 void CJITCodeGen::EmitLengthQuery(asUINT idx, const SJITIndexerCall &query)
 {
 	Label bail = BailLabel(idx);
-	Gp obj   = m_uc.new_gp_ptr();
+	Gp obj   = PushedPtr(0);
 	Gp buf   = m_uc.new_gp_ptr();
 	Gp count = m_uc.new_gp32();
-	m_uc.load(obj, Stack(0));
 	m_uc.j(bail, test_z(obj));
 	m_uc.load(buf, Addr(obj, query.layout.bufferOffset));
 	m_uc.j(bail, test_z(buf));
@@ -2603,9 +2603,7 @@ bool CJITCodeGen::EmitDirectSystemCall(asUINT idx, int funcId)
 			{
 				// The value pushed right before is taken from its register, which
 				// spares the load waiting for the store
-				const SPushedValue *pushed = PushedAt(args[n].stackOff);
-				if( !pushed || !MovePushed32(gpArgs[n], *pushed) )
-					m_uc.load_u32(gpArgs[n], Stack(args[n].stackOff));
+				Pushed32(gpArgs[n], args[n].stackOff);
 			}
 			break;
 		case ARG_I64:

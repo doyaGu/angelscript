@@ -7679,6 +7679,134 @@ static bool TestGenericCalls()
 	return fail;
 }
 
+// The addresses and pointers of members, which ADDSi and RDSPtr compute on the top of
+// the stack, stay in registers for the instructions that take them, like the
+// indexers and length queries compiled in place and the methods compiled in place,
+// see CJITCodeGen::PushedPtr. The results must be those of the VM, including the
+// exceptions for null handles and the indices out of bounds, which the VM raises
+// after the JIT compiled code bails
+namespace MemberPointers
+{
+	static const char *script =
+		"class Inner { array<int> items; int at(uint i) { return items[i]; } }       \n"
+		"class Bag                                                                   \n"
+		"{                                                                           \n"
+		"  array<int> items;                                                         \n"
+		"  Inner inner;                                                              \n"
+		"  Bag@ next;                                                                \n"
+		"  int sum() { int s = 0; for( uint i = 0; i < items.length(); i++ ) s += items[i]; return s; } \n"
+		"  int pairs() { int s = 0; for( uint i = 0; i + 1 < items.length(); i += 2 ) s += items[i] * items[i + 1]; return s; } \n"
+		"  int chained() { int s = 0; for( uint i = 0; i < inner.items.length(); i++ ) s += inner.items[i] * 10 + inner.at(i); return s; } \n"
+		"  int nextSum() { return next.sum() + next.items[0] + int(next.items.length()); } \n"
+		"  int beyond(uint i) { return items[i]; }                                   \n"
+		"  void fill(int n)                                                          \n"
+		"  {                                                                         \n"
+		"    items.resize(n); inner.items.resize(n);                                 \n"
+		"    for( int i = 0; i < n; i++ ) { items[i] = i + 1; inner.items[i] = n - i; } \n"
+		"  }                                                                         \n"
+		"}                                                                           \n"
+		"int sumOf(Bag@ b) { int s = 0; for( uint i = 0; i < b.items.length(); i++ ) s += b.items[i]; return s; } \n"
+		"int sums() { Bag a; a.fill(5); return a.sum() * 1000 + a.pairs(); }         \n"
+		"int chains() { Bag a; a.fill(4); return a.chained(); }                      \n"
+		"int linked() { Bag a, b; a.fill(2); b.fill(3); @a.next = b; return a.nextSum(); } \n"
+		"int unlinked() { Bag a; a.fill(2); return a.nextSum(); }                    \n"
+		"int handles() { Bag a; a.fill(4); return sumOf(a); }                        \n"
+		"int nullHandle() { return sumOf(null); }                                    \n"
+		"int outside() { Bag a; a.fill(3); return a.beyond(3); }                     \n"
+		"int modified() { Bag a; a.fill(6); int s = 0; uint i = 0; while( i < a.items.length() ) s += a.items[i++] * 2; return s; } \n";
+
+	// The results of the functions, or their exceptions
+	static std::string Run(asIScriptEngine *engine, CJITCompiler *jit, bool &fail)
+	{
+		CBufferedOutStream msgs;
+		engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &msgs, asCALL_THISCALL);
+		engine->SetEngineProperty(asEP_INCLUDE_JIT_INSTRUCTIONS, jit != 0);
+		engine->SetJITCompiler(jit);
+		RegisterScriptArray(engine, false);
+		if( jit && JIT_AddScriptArrayIndexers(jit) < 0 )
+			TEST_FAILED;
+
+		asIScriptModule *mod = engine->GetModule("test", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("test", script);
+		if( mod->Build() < 0 )
+		{
+			PRINTF("%s", msgs.buffer.c_str());
+			TEST_FAILED;
+			return "";
+		}
+
+		const char *decls[] = { "int sums()", "int chains()", "int linked()", "int unlinked()", "int handles()", "int nullHandle()", "int outside()", "int modified()" };
+		std::stringstream s;
+		asIScriptContext *ctx = engine->CreateContext();
+		for( int pass = 0; pass < 2; pass++ )
+			for( asUINT n = 0; n < sizeof(decls) / sizeof(decls[0]); n++ )
+			{
+				ctx->Prepare(mod->GetFunctionByDecl(decls[n]));
+				int r = ctx->Execute();
+				s << decls[n] << ": ";
+				if( r == asEXECUTION_FINISHED )
+					s << int(ctx->GetReturnDWord());
+				else if( r == asEXECUTION_EXCEPTION )
+					s << ctx->GetExceptionString();
+				else
+					s << "result " << r;
+				s << "\n";
+			}
+		ctx->Release();
+		return s.str();
+	}
+}
+
+static bool TestMemberPointers()
+{
+	bool fail = false;
+	asDWORD envFlags = 0;
+	const char *env = getenv("AS_JIT_FLAGS");
+	if( env )
+		envFlags = asDWORD(strtoul(env, 0, 0)) & ~asDWORD(CJITCompiler::JIT_LOG);
+
+	asIScriptEngine *engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string expected = MemberPointers::Run(engine, 0, fail);
+	engine->ShutDownAndRelease();
+	if( expected.find("int sums(): 15014\n") == std::string::npos || expected.find("int chains(): 110\n") == std::string::npos ||
+	    expected.find("int linked(): 10\n") == std::string::npos || expected.find("int unlinked(): Null pointer access\n") == std::string::npos ||
+	    expected.find("int handles(): 10\n") == std::string::npos || expected.find("int nullHandle(): Null pointer access\n") == std::string::npos ||
+	    expected.find("int outside(): Index out of bounds\n") == std::string::npos || expected.find("int modified(): 42\n") == std::string::npos )
+	{
+		PRINTF("member pointers:\n%s", expected.c_str());
+		TEST_FAILED;
+	}
+
+	// The JIT compiler must outlive the engine. The log shows the pointers taken from
+	// registers: in the loop of sum the address of the member, its pointer, and the
+	// object of the indexer, and the same three for the length query
+	FILE *log = tmpfile();
+	CJITCompiler jit(envFlags | (log ? asDWORD(CJITCompiler::JIT_LOG) : 0));
+	if( log )
+		jit.SetLogFile(log, "int Bag::sum()");
+	engine = (asCreateScriptEngine)(ANGELSCRIPT_VERSION);
+	std::string actual = MemberPointers::Run(engine, &jit, fail);
+	engine->ShutDownAndRelease();
+	if( actual != expected )
+	{
+		PRINTF("member pointers:\n  VM:\n%s  JIT:\n%s", expected.c_str(), actual.c_str());
+		TEST_FAILED;
+	}
+	if( log && !(envFlags & CJITCompiler::JIT_AOT_ONLY) )
+	{
+		std::string text = ReadLog(log);
+		int count = 0;
+		for( size_t at = text.find("; pointer in a register"); at != std::string::npos; at = text.find("; pointer in a register", at + 1) )
+			count++;
+		if( count != 6 )
+		{
+			PRINTF("member pointers: %d pointers taken from registers in sum instead of 6\n", count);
+			TEST_FAILED;
+		}
+	}
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -7751,6 +7879,7 @@ bool Test()
 	fail = TestInPlaceAssigns() || fail;
 	fail = TestInPlaceConstructors() || fail;
 	fail = TestForwardedValues() || fail;
+	fail = TestMemberPointers() || fail;
 	fail = TestFrameObjects() || fail;
 	fail = TestGenericCalls() || fail;
 	fail = TestCasts() || fail;

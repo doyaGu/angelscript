@@ -709,7 +709,7 @@ three runs in two runs of the program:
 
 <pre>
 Test             VM       JIT      Speedup
-intArraySum      14.94    0.88     17.0
+intArraySum      14.36    0.79     18.2
 floatArrayDot    18.94    3.17     6.0
 doubleMath       18.96    7.62     2.5
 sqrtSum          13.77    0.61     22.6
@@ -717,9 +717,9 @@ switchOps        13.25    0.64     20.7
 funcdefCalls     10.08    1.41     7.1
 directCalls      10.04    1.41     7.1
 callbackCalls2   15.10    1.41     10.7
-shapes           40.52    2.23     18.2
+shapes           40.12    2.15     18.7
 globals          4.82     0.48     10.0
-memberArray      16.28    1.50     10.9
+memberArray      16.03    1.31     12.2
 int64Math        5.98     0.97     6.2
 castIntf         17.66    1.42     12.4
 stringOps        80.42    8.52     9.4
@@ -727,7 +727,7 @@ dictionaryOps    31.86    9.56     3.3
 vec2Test         170.69   8.02     21.3
 nativeTest       14.04    1.13     12.4
 genericTest      18.30    5.56     3.3
-arrayTest        32.86    2.68     12.3
+arrayTest        33.45    2.16     15.5
 stringTest       272.26   107.67   2.5
 </pre>
 
@@ -883,11 +883,16 @@ handle gets a reference of its own where the VM takes over or another class's
 method is called instead. The arguments are still pushed on the stack of the VM,
 but the function compiled in place takes those of its parameters that it holds in
 registers, and the pointer of the object of a method, from the registers they were
-pushed from. An object returned through the object register by a function compiled
-in place, and an object created by a constructor compiled in place and returned by
-the factory, are passed on in a register too, without going through the object
-register of the VM. That takes the loop adding script-class 2D vectors from 11.6 to
-7.9 nanoseconds per iteration on an Apple M5.
+pushed from. The address of a member and the pointer read from it, which the
+instructions ADDSi and RDSPtr compute on the top of the stack, stay in registers as
+well, so that the indexers and length queries compiled in place, and the methods
+compiled in place that are called on a member, take them without reading the stack.
+That takes a loop summing the member array of a script class from 1.5 to 1.3
+nanoseconds per element on an Apple M5. An object returned through the object
+register by a function compiled in place, and an object created by a constructor
+compiled in place and returned by the factory, are passed on in a register too,
+without going through the object register of the VM. That takes the loop adding
+script-class 2D vectors from 11.6 to 7.9 nanoseconds per iteration on an Apple M5.
 \ref CJITCompiler::SetMaxInlineSize sets the size of the largest function that is
 compiled in place.
 

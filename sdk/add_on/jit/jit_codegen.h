@@ -244,11 +244,14 @@ protected:
 	Vec  ReturnedFloat(int frame, asUINT reader, bool f64);
 	void LoadVRFloat(const Vec &v, bool f64);
 	bool FindPushedArg(int offset, SPushedValue &value) const;
-	void NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var = 0);
+	enum { NO_VARIABLE = 0x7fffffff }; // the var of NotePushed for a value that is in no variable
+	void NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var = NO_VARIABLE);
 	bool MovePushed32(const Gp &dst, const SPushedValue &value);
 	bool MovePushedF32(const Vec &dst, const SPushedValue &value);
 	bool MovePushedF64(const Vec &dst, const SPushedValue &value);
 	const SPushedValue *PushedAt(int stackOff) const;
+	Gp   PushedPtr(int stackOff);
+	void Pushed32(const Gp &dst, int stackOff);
 	void ReloadParamSlots(const JITSlotMask &mask);
 	bool EmitObjectOp(asUINT idx);
 	bool GetDirectBehaviour(int funcId, SDirectBehaviour &beh) const;

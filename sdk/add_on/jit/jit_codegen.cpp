@@ -290,9 +290,10 @@ static bool SharesMaterialization(asEBCInstr op)
 	}
 }
 
-// The instructions that only push values onto the stack, and the calls of registered
-// functions, which take the values pushed before them from their registers, see
-// EmitDirectSystemCall
+// The instructions that only push values onto the stack, those that replace the
+// pointer on its top with the address or the pointer of a member, and the calls of
+// registered functions, which take the values pushed before them from their
+// registers, see EmitDirectSystemCall
 static bool KeepsPushedValues(asEBCInstr op)
 {
 	switch( op )
@@ -309,6 +310,8 @@ static bool KeepsPushedValues(asEBCInstr op)
 	case asBC_PSF:
 	case asBC_PGA:
 	case asBC_TYPEID:
+	case asBC_ADDSi:
+	case asBC_RDSPtr:
 	case asBC_CALLSYS:
 	case asBC_Thiscall1:
 		return true;
@@ -1976,9 +1979,11 @@ bool CJITCodeGen::FindPushedArg(int offset, SPushedValue &value) const
 	return true;
 }
 
-// Notes the value just pushed on the static stack, see SPushedValue. The register may
-// be that of the variable pushed, which is noted, so that the value is forgotten
-// where the variable is written, see EmitBody
+// Notes the value just pushed on the static stack, or computed in place of the one
+// on its top, see SPushedValue. The register may be that of the variable pushed,
+// which is noted, so that the value is forgotten where the variable is written, see
+// EmitBody. A value that is in no variable, like the address of a member, passes
+// NO_VARIABLE, since 0 is the variable of the object pointer
 void CJITCodeGen::NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &vec, int imm, int var)
 {
 	if( !m_staticStack )
@@ -1988,7 +1993,7 @@ void CJITCodeGen::NotePushed(SPushedValue::EKind kind, const Gp &gp, const Vec &
 	pushed.gp   = gp;
 	pushed.vec  = vec;
 	pushed.imm  = imm;
-	pushed.bit  = kind != SPushedValue::IMM32 && FindCached(var) ? m_code->GetCacheBit(var) : -1;
+	pushed.bit  = kind != SPushedValue::IMM32 && var != NO_VARIABLE && FindCached(var) ? m_code->GetCacheBit(var) : -1;
 }
 
 // Moves a 32bit value pushed into the integer register, or returns false
@@ -2037,6 +2042,33 @@ const CJITCodeGen::SPushedValue *CJITCodeGen::PushedAt(int stackOff) const
 		return 0;
 	std::map<int, SPushedValue>::const_iterator it = m_pushed.find(m_spOffset + stackOff * 4);
 	return it == m_pushed.end() ? 0 : &it->second;
+}
+
+// The pointer at the dwords above the stack pointer, in the register it was pushed
+// from or computed in, or loaded from the stack
+Gp CJITCodeGen::PushedPtr(int stackOff)
+{
+	const SPushedValue *pushed = PushedAt(stackOff);
+	if( pushed && pushed->kind == SPushedValue::PTR )
+	{
+#ifndef ASMJIT_NO_LOGGING
+		if( m_uc.cc->has_logger() )
+			m_uc.commentf("; pointer in a register");
+#endif
+		return pushed->gp;
+	}
+	Gp ptr = m_uc.new_gp_ptr();
+	m_uc.load(ptr, Stack(stackOff));
+	return ptr;
+}
+
+// Moves the 32bit value at the dwords above the stack pointer into the register,
+// from the register or the immediate it was pushed from, or loads it from the stack
+void CJITCodeGen::Pushed32(const Gp &dst, int stackOff)
+{
+	const SPushedValue *pushed = PushedAt(stackOff);
+	if( !pushed || !MovePushed32(dst, *pushed) )
+		m_uc.load_u32(dst, Stack(stackOff));
 }
 
 // Loads the cached slots in the mask when an inlined function is entered, the
@@ -2587,11 +2619,15 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 
 	case asBC_RDSPtr:
 		{
-			Gp a = m_uc.new_gp_ptr();
-			m_uc.load(a, Stack(0));
+			// The pointer is taken from the register it was pushed from or computed
+			// in, and the pointer read stays in a register for the next instruction
+			// that takes the top of the stack, see PushedPtr
+			Gp a = PushedPtr(0);
 			m_uc.j(BailLabel(idx), test_z(a));
-			m_uc.load(a, mem_ptr(a));
-			m_uc.store(Stack(0), a);
+			Gp ptr = m_uc.new_gp_ptr();
+			m_uc.load(ptr, mem_ptr(a));
+			m_uc.store(Stack(0), ptr);
+			NotePushed(SPushedValue::PTR, ptr, Vec(), 0);
 		}
 		break;
 
@@ -2651,11 +2687,13 @@ bool CJITCodeGen::EmitLoadStore(const SJITInstr &instr)
 
 	case asBC_ADDSi:
 		{
-			Gp a = m_uc.new_gp_ptr();
-			m_uc.load(a, Stack(0));
+			// Like RDSPtr, the address of the member stays in a register
+			Gp a = PushedPtr(0);
 			m_uc.j(BailLabel(idx), test_z(a));
-			m_uc.add(a, a, Imm(int(asBC_SWORDARG0(bc))));
-			m_uc.store(Stack(0), a);
+			Gp addr = m_uc.new_gp_ptr();
+			m_uc.add(addr, a, Imm(int(asBC_SWORDARG0(bc))));
+			m_uc.store(Stack(0), addr);
+			NotePushed(SPushedValue::PTR, addr, Vec(), 0);
 		}
 		break;
 
