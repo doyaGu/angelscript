@@ -663,38 +663,38 @@ are done by helper functions on 32bit hosts.
 The table below shows the same tests measured on an Apple M5 Pro with the arm64
 release build from Apple clang 21 on macOS, as the fastest of the ten runs of each
 test in six runs of the program. By the geometric mean of the speedups over the
-interpreter, the tests are 3.7 times as fast with the JIT compiler without direct
-system calls, 5.0 times with the default settings, 5.2 times with the pooled memory
-functions too, and 4.1 times with the code generated ahead of time. The JIT
+interpreter, the tests are 3.9 times as fast with the JIT compiler without direct
+system calls, 5.4 times with the default settings, 5.7 times with the pooled memory
+functions too, and 4.2 times with the code generated ahead of time. The JIT
 compiler gains less than on x86-64, as the interpreter is faster on this CPU.
 
 <pre>
 Test           VM       No direct  JIT      JIT+pool  AOT
-Basic          0.152    0.068      0.027    0.027     0.041
+Basic          0.153    0.067      0.027    0.026     0.039
 Basic2         0.048    0.006      0.006    0.006     0.014
-Call           0.167    0.081      0.080    0.081     0.080
-Call2          0.208    0.117      0.116    0.115     0.114
-Fib            0.285    0.076      0.075    0.077     0.093
-Int            0.044    0.021      0.006    0.006     0.007
-Intf           0.096    0.009      0.010    0.010     0.028
-Mthd           0.093    0.010      0.010    0.010     0.023
-String         0.209    0.179      0.093    0.092     0.109
-String2        0.116    0.093      0.045    0.045     0.068
-StringPooled   0.133    0.122      0.046    0.047     0.051
-ThisProp       0.100    0.008      0.008    0.009     0.006
-Vector3        0.082    0.067      0.008    0.008     0.008
-Assign.1       0.051    0.005      0.005    0.005     0.011
-Assign.2       0.088    0.013      0.010    0.013     0.011
-Assign.3       0.075    0.012      0.012    0.012     0.008
-Assign.4       0.085    0.019      0.022    0.022     0.013
-Assign.5       0.091    0.019      0.022    0.022     0.012
-Array.1        0.192    0.095      0.073    0.043     0.078
-Array.2        0.091    0.015      0.015    0.015     0.009
-GlobalVar      0.040    0.033      0.012    0.013     0.019
-ClassProp      0.068    0.011      0.011    0.011     0.009
-RetObj.1       0.239    0.067      0.066    0.045     0.153
-RetObj.2       0.136    0.054      0.053    0.028     0.079
-RetObj.3       0.040    0.003      0.004    0.003     0.009
+Call           0.165    0.083      0.080    0.082     0.082
+Call2          0.206    0.114      0.115    0.116     0.114
+Fib            0.279    0.075      0.074    0.074     0.089
+Int            0.044    0.020      0.006    0.006     0.007
+Intf           0.097    0.009      0.009    0.010     0.028
+Mthd           0.093    0.009      0.009    0.009     0.023
+String         0.188    0.153      0.070    0.070     0.081
+String2        0.106    0.083      0.036    0.036     0.055
+StringPooled   0.131    0.121      0.046    0.045     0.050
+ThisProp       0.097    0.008      0.008    0.008     0.006
+Vector3        0.081    0.067      0.008    0.008     0.008
+Assign.1       0.050    0.005      0.005    0.005     0.011
+Assign.2       0.087    0.010      0.010    0.010     0.010
+Assign.3       0.078    0.012      0.012    0.012     0.008
+Assign.4       0.084    0.015      0.016    0.016     0.012
+Assign.5       0.085    0.015      0.016    0.015     0.012
+Array.1        0.176    0.080      0.060    0.041     0.063
+Array.2        0.085    0.009      0.009    0.009     0.009
+GlobalVar      0.039    0.034      0.012    0.013     0.018
+ClassProp      0.068    0.009      0.009    0.009     0.009
+RetObj.1       0.218    0.055      0.056    0.044     0.129
+RetObj.2       0.128    0.043      0.043    0.027     0.067
+RetObj.3       0.040    0.003      0.003    0.003     0.009
 </pre>
 
 The test_jit_bench project in /sdk/tests/test_jit_bench measures smaller loops
